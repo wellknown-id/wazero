@@ -6,10 +6,9 @@ import (
 	"fmt"
 
 	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/sys"
 )
 
-// FailIfClosed returns a sys.ExitError if CloseWithExitCode was called.
+// FailIfClosed returns a api.ExitError if CloseWithExitCode was called.
 func (m *ModuleInstance) FailIfClosed() (err error) {
 	if closed := m.Closed.Load(); closed != 0 {
 		switch closed & exitCodeFlagMask {
@@ -19,7 +18,7 @@ func (m *ModuleInstance) FailIfClosed() (err error) {
 			// and the closure of resources have been deferred here.
 			_ = m.ensureResourcesClosed(context.Background())
 		}
-		return sys.NewExitError(uint32(closed >> 32)) // Unpack the high order bits as the exit code.
+		return api.NewExitError(uint32(closed >> 32)) // Unpack the high order bits as the exit code.
 	}
 	return nil
 }
@@ -56,10 +55,10 @@ func (m *ModuleInstance) closeModuleOnCanceledOrTimeout(ctx context.Context, can
 			switch {
 			case errors.Is(ctx.Err(), context.Canceled):
 				// TODO: figure out how to report error here.
-				_ = m.closeWithExitCodeWithoutClosingResource(sys.ExitCodeContextCanceled)
+				_ = m.closeWithExitCodeWithoutClosingResource(api.ExitCodeContextCanceled)
 			case errors.Is(ctx.Err(), context.DeadlineExceeded):
 				// TODO: figure out how to report error here.
-				_ = m.closeWithExitCodeWithoutClosingResource(sys.ExitCodeDeadlineExceeded)
+				_ = m.closeWithExitCodeWithoutClosingResource(api.ExitCodeDeadlineExceeded)
 			}
 		}
 	case <-cancelChan:
@@ -74,10 +73,10 @@ func (m *ModuleInstance) CloseWithCtxErr(ctx context.Context) {
 	switch {
 	case errors.Is(ctx.Err(), context.Canceled):
 		// TODO: figure out how to report error here.
-		_ = m.CloseWithExitCode(ctx, sys.ExitCodeContextCanceled)
+		_ = m.CloseWithExitCode(ctx, api.ExitCodeContextCanceled)
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		// TODO: figure out how to report error here.
-		_ = m.CloseWithExitCode(ctx, sys.ExitCodeDeadlineExceeded)
+		_ = m.CloseWithExitCode(ctx, api.ExitCodeDeadlineExceeded)
 	}
 }
 
@@ -148,11 +147,6 @@ func (m *ModuleInstance) ensureResourcesClosed(ctx context.Context) (err error) 
 	if closeNotifier := m.CloseNotifier; closeNotifier != nil { // experimental
 		closeNotifier.CloseNotify(ctx, uint32(m.Closed.Load()>>32))
 		m.CloseNotifier = nil
-	}
-
-	if sysCtx := m.Sys; sysCtx != nil { // nil if from HostModuleBuilder
-		err = sysCtx.FS().Close()
-		m.Sys = nil
 	}
 
 	if mem := m.MemoryInstance; mem != nil {

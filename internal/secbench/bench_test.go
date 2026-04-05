@@ -73,7 +73,7 @@ func BenchmarkExecutionBaseline(b *testing.B) {
 			defer r.Close(ctx)
 
 			mod, err := r.InstantiateWithConfig(ctx, facWasm,
-				wazero.NewModuleConfig().WithStartFunctions()) // Don't call start
+				wazero.NewModuleConfig()) // Don't call start
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -186,9 +186,9 @@ func BenchmarkFuelOverhead(b *testing.B) {
 		name string
 		fuel int64
 	}{
-		{"no_fuel", 0},                // No fuel metering — baseline
-		{"fuel_1M", 1_000_000},        // Generous budget — won't exhaust
-		{"fuel_100M", 100_000_000},    // Very generous
+		{"no_fuel", 0},             // No fuel metering — baseline
+		{"fuel_1M", 1_000_000},     // Generous budget — won't exhaust
+		{"fuel_100M", 100_000_000}, // Very generous
 	} {
 		b.Run(tc.name, func(b *testing.B) {
 			ctx := context.Background()
@@ -197,7 +197,7 @@ func BenchmarkFuelOverhead(b *testing.B) {
 			defer r.Close(ctx)
 
 			mod, err := r.InstantiateWithConfig(ctx, facWasm,
-				wazero.NewModuleConfig().WithStartFunctions())
+				wazero.NewModuleConfig())
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -240,7 +240,7 @@ func BenchmarkFuelOverheadWithController(b *testing.B) {
 			defer r.Close(ctx)
 
 			mod, err := r.InstantiateWithConfig(ctx, facWasm,
-				wazero.NewModuleConfig().WithStartFunctions())
+				wazero.NewModuleConfig())
 			if err != nil {
 				b.Fatal(err)
 			}

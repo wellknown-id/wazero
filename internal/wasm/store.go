@@ -11,8 +11,6 @@ import (
 	"github.com/tetratelabs/wazero/experimental"
 	"github.com/tetratelabs/wazero/internal/expctxkeys"
 	"github.com/tetratelabs/wazero/internal/internalapi"
-	internalsys "github.com/tetratelabs/wazero/internal/sys"
-	"github.com/tetratelabs/wazero/sys"
 )
 
 // nameToModuleShrinkThreshold is the size the nameToModule map can grow to
@@ -94,16 +92,6 @@ type (
 		// ElementInstances holds the element instance, and each holds the references to either functions
 		// or external objects (unimplemented).
 		ElementInstances []ElementInstance
-
-		// Sys is exposed for use in special imports such as WASI, assemblyscript.
-		//
-		// # Notes
-		//
-		//   - This is a part of ModuleInstance so that scope and Close is coherent.
-		//   - This is not exposed outside this repository (as a host function
-		//	  parameter) because we haven't thought through capabilities based
-		//	  security implications.
-		Sys *internalsys.Context
 
 		// Closed is used both to guard moduleEngine.CloseWithExitCode and to store the exit code.
 		//
@@ -313,11 +301,10 @@ func (s *Store) Instantiate(
 	ctx context.Context,
 	module *Module,
 	name string,
-	sys *internalsys.Context,
 	typeIDs []FunctionTypeID,
 ) (*ModuleInstance, error) {
 	// Instantiate the module and add it to the store so that other modules can import it.
-	m, err := s.instantiate(ctx, module, name, sys, typeIDs)
+	m, err := s.instantiate(ctx, module, name, typeIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -334,10 +321,9 @@ func (s *Store) instantiate(
 	ctx context.Context,
 	module *Module,
 	name string,
-	sysCtx *internalsys.Context,
 	typeIDs []FunctionTypeID,
 ) (m *ModuleInstance, err error) {
-	m = &ModuleInstance{ModuleName: name, TypeIDs: typeIDs, Sys: sysCtx, s: s, Source: module}
+	m = &ModuleInstance{ModuleName: name, TypeIDs: typeIDs, s: s, Source: module}
 
 	m.Tables = make([]*TableInstance, int(module.ImportTableCount)+len(module.TableSection))
 	m.Globals = make([]*GlobalInstance, int(module.ImportGlobalCount)+len(module.GlobalSection))
@@ -395,7 +381,7 @@ func (s *Store) instantiate(
 		funcIdx := *module.StartSection
 		ce := m.Engine.NewFunction(funcIdx)
 		_, err = ce.Call(ctx)
-		if exitErr, ok := err.(*sys.ExitError); ok { // Don't wrap an exit error!
+		if exitErr, ok := err.(*api.ExitError); ok { // Don't wrap an exit error!
 			return nil, exitErr
 		} else if err != nil {
 			return nil, fmt.Errorf("start %s failed: %w", module.funcDesc(SectionIDFunction, funcIdx), err)

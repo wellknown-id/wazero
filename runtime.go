@@ -12,11 +12,8 @@ import (
 	"github.com/tetratelabs/wazero/internal/expctxkeys"
 	"github.com/tetratelabs/wazero/internal/platform"
 	"github.com/tetratelabs/wazero/internal/secmem"
-	internalsock "github.com/tetratelabs/wazero/internal/sock"
-	internalsys "github.com/tetratelabs/wazero/internal/sys"
 	"github.com/tetratelabs/wazero/internal/wasm"
 	binaryformat "github.com/tetratelabs/wazero/internal/wasm/binary"
-	"github.com/tetratelabs/wazero/sys"
 )
 
 // Runtime allows embedding of WebAssembly modules.
@@ -321,13 +318,6 @@ func (r *runtime) InstantiateModule(
 	code := compiled.(*compiledModule)
 	config := mConfig.(*moduleConfig)
 
-	// Only add guest module configuration to guests.
-	if !code.module.IsHostModule {
-		if sockConfig, ok := ctx.Value(internalsock.ConfigKey{}).(*internalsock.Config); ok {
-			config.sockConfig = sockConfig
-		}
-	}
-
 	// In secure mode, inject the guard-page memory allocator if the platform
 	// supports it and no custom allocator is already set in the context.
 	if r.secureMode && !code.module.IsHostModule {
@@ -336,18 +326,13 @@ func (r *runtime) InstantiateModule(
 		}
 	}
 
-	var sysCtx *internalsys.Context
-	if sysCtx, err = config.toSysContext(); err != nil {
-		return nil, err
-	}
-
 	name := config.name
 	if !config.nameSet && code.module.NameSection != nil && code.module.NameSection.ModuleName != "" {
 		name = code.module.NameSection.ModuleName
 	}
 
 	// Instantiate the module.
-	mod, err = r.store.Instantiate(ctx, code.module, name, sysCtx, code.typeIDs)
+	mod, err = r.store.Instantiate(ctx, code.module, name, code.typeIDs)
 	if err != nil {
 		// If there was an error, don't leak the compiled module.
 		if code.closeWithModule {
@@ -366,25 +351,6 @@ func (r *runtime) InstantiateModule(
 		mod.(*wasm.ModuleInstance).CodeCloser = code
 	}
 
-	// Now, invoke any start functions, failing at first error.
-	for _, fn := range config.startFunctions {
-		start := mod.ExportedFunction(fn)
-		if start == nil {
-			continue
-		}
-		if _, err = start.Call(ctx); err != nil {
-			_ = mod.Close(ctx) // Don't leak the module on error.
-
-			if se, ok := err.(*sys.ExitError); ok {
-				if se.ExitCode() == 0 { // Don't err on success.
-					err = nil
-				}
-				return // Don't wrap an exit error
-			}
-			err = fmt.Errorf("module[%s] function[%s] failed: %w", name, fn, err)
-			return
-		}
-	}
 	return
 }
 

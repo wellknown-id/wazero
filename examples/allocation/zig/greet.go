@@ -46,7 +46,7 @@ func run() error {
 	// Instantiate a WebAssembly module that imports the "log" function defined
 	// in "env" and exports "memory" and functions we'll use in this example.
 	mod, err := r.InstantiateWithConfig(ctx, greetWasm,
-		wazero.NewModuleConfig().WithStdout(os.Stdout).WithStderr(os.Stderr))
+		wazero.NewModuleConfig())
 	if err != nil {
 		return err
 	}

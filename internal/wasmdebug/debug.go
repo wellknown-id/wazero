@@ -12,7 +12,6 @@ import (
 
 	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/internal/wasmruntime"
-	"github.com/tetratelabs/wazero/sys"
 )
 
 // FuncName returns the naming convention of "moduleName.funcName".
@@ -124,7 +123,7 @@ func (s *stackTrace) FromRecovered(recovered interface{}) error {
 		debug.PrintStack()
 	}
 
-	if exitErr, ok := recovered.(*sys.ExitError); ok { // Don't wrap an exit error!
+	if exitErr, ok := recovered.(*api.ExitError); ok { // Don't wrap an exit error!
 		return exitErr
 	}
 

@@ -52,7 +52,7 @@ func setupYieldTest(t *testing.T, cfg wazero.RuntimeConfig) (api.Module, wazero.
 	_, err := rt.NewHostModuleBuilder("example").
 		NewFunctionBuilder().
 		WithGoModuleFunction(&yieldingHostFunc{t: t},
-			nil,                               // no params
+			nil,                                // no params
 			[]api.ValueType{api.ValueTypeI32}). // 1 i32 result
 		Export("async_work").
 		Instantiate(ctx)

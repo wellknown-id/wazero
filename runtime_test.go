@@ -15,7 +15,6 @@ import (
 	"github.com/tetratelabs/wazero/internal/testing/binaryencoding"
 	"github.com/tetratelabs/wazero/internal/testing/require"
 	"github.com/tetratelabs/wazero/internal/wasm"
-	"github.com/tetratelabs/wazero/sys"
 )
 
 type arbitrary struct{}
@@ -389,14 +388,7 @@ func TestRuntime_Instantiate_ErrorOnStart(t *testing.T) {
 		name string
 		wasm *wasm.Module
 	}{
-		{
-			name: "_start function",
-			wasm: &wasm.Module{
-				TypeSection:   []wasm.FunctionType{{}},
-				ImportSection: []wasm.Import{{Module: "host", Name: "start", Type: wasm.ExternTypeFunc, DescFunc: 0}},
-				ExportSection: []wasm.Export{{Name: "_start", Type: wasm.ExternTypeFunc, Index: 0}},
-			},
-		},
+		
 		{
 			name: ".start function",
 			wasm: &wasm.Module{
@@ -487,24 +479,15 @@ func TestRuntime_InstantiateModule_ExitError(t *testing.T) {
 		{
 			name:        "start: exit code 0",
 			exitCode:    0,
-			expectedErr: sys.NewExitError(0),
+			expectedErr: api.NewExitError(0),
 		},
 		{
 			name:        "start: exit code 2",
 			exitCode:    2,
-			expectedErr: sys.NewExitError(2),
+			expectedErr: api.NewExitError(2),
 		},
-		{
-			name:     "_start: exit code 0",
-			exitCode: 0,
-			export:   true,
-		},
-		{
-			name:        "_start: exit code 2",
-			exitCode:    2,
-			export:      true,
-			expectedErr: sys.NewExitError(2),
-		},
+		
+		
 	}
 
 	for _, tt := range tests {
@@ -613,10 +596,10 @@ func TestRuntime_CloseWithExitCode(t *testing.T) {
 
 			// Modules closed so calls fail
 			_, err = func1.Call(testCtx)
-			require.ErrorIs(t, err, sys.NewExitError(tc.exitCode))
+			require.ErrorIs(t, err, api.NewExitError(tc.exitCode))
 
 			_, err = func2.Call(testCtx)
-			require.ErrorIs(t, err, sys.NewExitError(tc.exitCode))
+			require.ErrorIs(t, err, api.NewExitError(tc.exitCode))
 		})
 	}
 }
