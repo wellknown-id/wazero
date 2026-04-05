@@ -7,7 +7,7 @@ execute WebAssembly Modules (Wasm), which are most often binaries with a `.wasm`
 extension.
 
 wazero is a WebAssembly Core Specification [1.0][1] and [2.0][2] compliant
-runtime written in Go. It has *zero dependencies*, and doesn't rely on CGO.
+runtime written in Go. It has _zero dependencies_, and doesn't rely on CGO.
 This means you can run applications in other languages and still keep cross
 compilation.
 
@@ -25,17 +25,20 @@ There are two runtime configurations supported in wazero: _Compiler_ is default:
 
 By default, ex `wazero.NewRuntime(ctx)`, the Compiler is used if supported. You
 can also force the interpreter like so:
+
 ```go
 r := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfigInterpreter())
 ```
 
 ### Interpreter
+
 Interpreter is a naive interpreter-based implementation of Wasm virtual
 machine. Its implementation doesn't have any platform (GOARCH, GOOS) specific
 code, therefore _interpreter_ can be used for any compilation target available
 for Go (such as `riscv64`).
 
 ### Compiler
+
 Compiler compiles WebAssembly modules into machine code ahead of time (AOT),
 during `Runtime.CompileModule`. This means your WebAssembly functions execute
 natively at runtime. Compiler is faster than Interpreter, often by order of
@@ -47,9 +50,9 @@ Both runtimes pass WebAssembly Core [1.0][3] and [2.0][4] specification tests
 on supported platforms:
 
 |   Runtime   |                 Usage                  | amd64 | arm64 | others |
-|:-----------:|:--------------------------------------:|:-----:|:-----:|:------:|
-| Interpreter | `wazero.NewRuntimeConfigInterpreter()` |   ✅   |   ✅   |   ✅    |
-|  Compiler   |  `wazero.NewRuntimeConfigCompiler()`   |   ✅   |   ✅   |   ❌    |
+| :---------: | :------------------------------------: | :---: | :---: | :----: |
+| Interpreter | `wazero.NewRuntimeConfigInterpreter()` |  ✅   |  ✅   |   ✅   |
+|  Compiler   |  `wazero.NewRuntimeConfigCompiler()`   |  ✅   |  ✅   |   ❌   |
 
 ## Support Policy
 
@@ -68,6 +71,7 @@ happen with a minor version increment, e.g. 1.0.11 to 1.2.0. We also fix bugs
 or change internal details with a patch version, e.g. 1.0.0 to 1.0.1.
 
 You can get the latest version of wazero like this.
+
 ```bash
 go get github.com/tetratelabs/wazero@latest
 ```
@@ -95,16 +99,16 @@ OpenBSD, DragonFly BSD, illumos and Solaris.
 
 We also test cross compilation for many `GOOS` and `GOARCH` combinations.
 
-* Interpreter
-  * Linux is tested on amd64 and arm64 (native) as well as riscv64 via emulation.
-  * Windows, FreeBSD, NetBSD, OpenBSD, DragonFly BSD, illumos and Solaris are
+- Interpreter
+  - Linux is tested on amd64 and arm64 (native) as well as riscv64 via emulation.
+  - Windows, FreeBSD, NetBSD, OpenBSD, DragonFly BSD, illumos and Solaris are
     tested only on amd64.
-  * macOS is tested only on arm64.
-* Compiler
-  * Linux is tested on amd64 and arm64.
-  * Windows, FreeBSD, NetBSD, DragonFly BSD, illumos and Solaris are
+  - macOS is tested only on arm64.
+- Compiler
+  - Linux is tested on amd64 and arm64.
+  - Windows, FreeBSD, NetBSD, DragonFly BSD, illumos and Solaris are
     tested only on amd64.
-  * macOS is tested only on arm64.
+  - macOS is tested only on arm64.
 
 wazero has no dependencies and doesn't require CGO. This means it can also be
 embedded in an application that doesn't use an operating system. This is a main
@@ -118,7 +122,8 @@ This approach ensures compatibility with any parent image.
 If you're developing for macOS and need to code-sign your application,
 please read issue [#2393][11].
 
------
+---
+
 wazero is a registered trademark of Tetrate.io, Inc. in the United States and/or other countries
 
 [1]: https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/
