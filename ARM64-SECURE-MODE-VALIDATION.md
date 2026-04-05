@@ -101,3 +101,26 @@ Track Linux/arm64 against Linux/amd64 in these concrete areas:
 Exit condition for parity:
 
 - Linux/arm64 passes the same secure-mode memory fault integration semantics as Linux/amd64 on native hardware, including non-JIT fault forwarding behavior.
+
+## Current implementation status (April 2026)
+
+Linux/arm64 implementation parity with Linux/amd64 is effectively in place in code, but final parity sign-off is still pending native runtime validation.
+
+Implemented on Linux/arm64:
+
+- Custom SIGSEGV handler installation and JIT executable range filtering.
+- JIT fault conversion to Wasm OOB trap path (`ExitCodeMemoryOutOfBounds = 4`).
+- Signal-context restoration of SP, FP (`x29`), and LR (`x30`) before trampoline redirect.
+- Entry-path reservation of `x25` for execution context pointer, including allocator reservation and entrypoint wiring.
+- Secure-mode capability gating via `signalHandlerSupported()`.
+
+Validated so far:
+
+- Native host test suites (`go test ./internal/engine/wazevo/...`, `go test ./...`) pass.
+- arm64 cross-compilation validation passes (`GOOS=linux GOARCH=arm64 ...`).
+
+Still required for full parity sign-off:
+
+- Native Linux/arm64 execution of secure-mode memory fault integration tests.
+- Native Linux/arm64 verification that non-JIT faults are forwarded to Go's original handler path.
+- Native Linux/arm64 CI gate (required status check) for secure-mode trap/fault changes.
