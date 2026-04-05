@@ -142,12 +142,12 @@ func TestAbiImpl_constructEntryPreamble(t *testing.T) {
 	str x27, [x20, #0x18]
 	str x30, [x20, #0x20]
 	mov sp, x26
-	mov x18, x19
-	ldr w2, [x18], #0x8
-	ldr d0, [x18], #0x8
-	ldr w3, [x18], #0x8
-	ldr s1, [x18], #0x8
-	ldr x4, [x18], #0x8
+	mov x17, x19
+	ldr w2, [x17], #0x8
+	ldr d0, [x17], #0x8
+	ldr w3, [x17], #0x8
+	ldr s1, [x17], #0x8
+	ldr x4, [x17], #0x8
 	bl x24
 	str s0, [x19], #0x8
 	str d1, [x19], #0x8
@@ -313,50 +313,50 @@ func TestAbiImpl_constructEntryPreamble(t *testing.T) {
 	str x27, [x20, #0x18]
 	str x30, [x20, #0x20]
 	mov sp, x26
-	mov x18, x19
-	ldr q0, [x18], #0x10
-	ldr q1, [x18], #0x10
-	ldr q2, [x18], #0x10
-	ldr x2, [x18], #0x8
-	ldr w3, [x18], #0x8
-	ldr w4, [x18], #0x8
-	ldr x5, [x18], #0x8
-	ldr w6, [x18], #0x8
-	ldr x7, [x18], #0x8
-	ldr s3, [x18], #0x8
-	ldr d4, [x18], #0x8
-	ldr w15, [x18], #0x8
+	mov x17, x19
+	ldr q0, [x17], #0x10
+	ldr q1, [x17], #0x10
+	ldr q2, [x17], #0x10
+	ldr x2, [x17], #0x8
+	ldr w3, [x17], #0x8
+	ldr w4, [x17], #0x8
+	ldr x5, [x17], #0x8
+	ldr w6, [x17], #0x8
+	ldr x7, [x17], #0x8
+	ldr s3, [x17], #0x8
+	ldr d4, [x17], #0x8
+	ldr w15, [x17], #0x8
 	str w15, [sp, #-0xe0]
-	ldr s5, [x18], #0x8
-	ldr x15, [x18], #0x8
+	ldr s5, [x17], #0x8
+	ldr x15, [x17], #0x8
 	str x15, [sp, #-0xd8]
-	ldr w15, [x18], #0x8
+	ldr w15, [x17], #0x8
 	str w15, [sp, #-0xd0]
-	ldr w15, [x18], #0x8
+	ldr w15, [x17], #0x8
 	str w15, [sp, #-0xc8]
-	ldr x15, [x18], #0x8
+	ldr x15, [x17], #0x8
 	str x15, [sp, #-0xc0]
-	ldr w15, [x18], #0x8
+	ldr w15, [x17], #0x8
 	str w15, [sp, #-0xb8]
-	ldr x15, [x18], #0x8
+	ldr x15, [x17], #0x8
 	str x15, [sp, #-0xb0]
-	ldr s6, [x18], #0x8
-	ldr d7, [x18], #0x8
-	ldr d15, [x18], #0x8
+	ldr s6, [x17], #0x8
+	ldr d7, [x17], #0x8
+	ldr d15, [x17], #0x8
 	str d15, [sp, #-0xa8]
-	ldr s15, [x18], #0x8
+	ldr s15, [x17], #0x8
 	str s15, [sp, #-0xa0]
-	ldr d15, [x18], #0x8
+	ldr d15, [x17], #0x8
 	str d15, [sp, #-0x98]
-	ldr q15, [x18], #0x10
+	ldr q15, [x17], #0x10
 	str q15, [sp, #-0x90]
-	ldr q15, [x18], #0x10
+	ldr q15, [x17], #0x10
 	str q15, [sp, #-0x80]
-	ldr q15, [x18], #0x10
+	ldr q15, [x17], #0x10
 	str q15, [sp, #-0x70]
-	ldr q15, [x18], #0x10
+	ldr q15, [x17], #0x10
 	str q15, [sp, #-0x60]
-	ldr q15, [x18], #0x10
+	ldr q15, [x17], #0x10
 	str q15, [sp, #-0x50]
 	bl x24
 	str s0, [x19], #0x8
