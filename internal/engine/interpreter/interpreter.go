@@ -9,6 +9,7 @@ import (
 	"math/bits"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/tetratelabs/wazero/api"
@@ -149,6 +150,17 @@ type callEngine struct {
 
 	// stackiterator for Listeners to walk frames and stack.
 	stackIterator stackIterator
+
+	// yieldState tracks whether this call engine is idle, suspended (yielded),
+	// or currently being resumed. Used to prevent concurrent misuse.
+	yieldState atomic.Int32
+
+	// resumePC, when non-zero, tells callNativeFunc to start the frame at
+	// this pc instead of 0. It is reset to 0 after use. This is used by
+	// yield/resume to avoid duplicating the interpreter loop.
+	resumePC uint64
+	// resumeBase, when resumePC is set, overrides the frame's base.
+	resumeBase int
 }
 
 func (e *moduleEngine) newCallEngine(compiled *function) *callEngine {
@@ -299,6 +311,173 @@ func (s *snapshot) Error() string {
 	return "unhandled snapshot restore, this generally indicates restore was called from a different " +
 		"exported function invocation than snapshot"
 }
+
+// --- Async Yield/Resume ---
+
+// yieldSignal is the panic sentinel used for async yield, analogous to *snapshot
+// for Snapshot/Restore. When a host function calls Yielder.Yield(), the
+// interpreter panics with a *yieldSignal which is caught by callEngine.call().
+type yieldSignal struct {
+	ce *callEngine
+}
+
+func (y *yieldSignal) Error() string {
+	return "unhandled yield signal, this generally indicates yield was called " +
+		"without WithYielder on the call context"
+}
+
+// interpreterYielder implements experimental.Yielder for the interpreter engine.
+type interpreterYielder struct {
+	ce *callEngine
+}
+
+// Yield implements experimental.Yielder.
+func (y *interpreterYielder) Yield() {
+	panic(&yieldSignal{ce: y.ce})
+}
+
+// interpreterResumer implements experimental.Resumer for the interpreter engine.
+// It holds the captured execution state from the yield point.
+type interpreterResumer struct {
+	stack  []uint64
+	frames []*callFrame
+
+	// f is the original callEngine's function, needed to re-enter callFunction.
+	f *function
+
+	// moduleInstance is the module that was executing when yield occurred.
+	moduleInstance *wasm.ModuleInstance
+
+	// ce is the call engine this resumer belongs to.
+	ce *callEngine
+
+	// cancelled tracks whether Cancel has been called.
+	cancelled atomic.Bool
+}
+
+// Resume implements experimental.Resumer.
+func (r *interpreterResumer) Resume(ctx context.Context, hostResults []uint64) (results []uint64, err error) {
+	if r.cancelled.Load() {
+		return nil, errors.New("cannot resume: resumer has been cancelled")
+	}
+
+	// Ensure only one goroutine can resume at a time.
+	if !r.ce.yieldState.CompareAndSwap(yieldStateSuspended, yieldStateResuming) {
+		panic("BUG: concurrent or invalid Resume call on interpreterResumer")
+	}
+
+	// Restore the captured state into the call engine.
+	ce := r.ce
+	ce.stack = r.stack
+	ce.frames = r.frames
+
+	// At yield time, the frame stack has the host function's frame on top
+	// (pushed by callGoFunc but not popped due to the panic). Pop it.
+	if len(ce.frames) > 0 {
+		hostFrame := ce.frames[len(ce.frames)-1]
+		ce.frames = ce.frames[:len(ce.frames)-1]
+
+		// callGoFuncWithStack grows the stack so that it holds max(paramLen, resultLen)
+		// slots starting from the original stack position. The Go function writes
+		// results into the beginning of that region. We need to:
+		// 1. Write the host results into the correct position
+		// 2. Trim the stack to the post-call size
+		hostFuncType := hostFrame.f.funcType
+		paramLen := hostFuncType.ParamNumInUint64
+		resultLen := hostFuncType.ResultNumInUint64
+		stackLen := paramLen
+		if resultLen > paramLen {
+			stackLen = resultLen
+		}
+
+		// The result region starts at hostFrame.base - stackLen.
+		resultBase := hostFrame.base - stackLen
+
+		// Write the host results.
+		if resultLen > 0 && len(hostResults) >= resultLen {
+			copy(ce.stack[resultBase:resultBase+resultLen], hostResults[:resultLen])
+		}
+
+		// Trim the stack to: resultBase + resultLen (what callGoFuncWithStack would leave).
+		ce.stack = ce.stack[:resultBase+resultLen]
+	}
+
+	// Wire yield enablement into the new context.
+	yieldEnabled := ctx.Value(expctxkeys.EnableYielderKey{}) != nil
+	if yieldEnabled {
+		ctx = context.WithValue(ctx, expctxkeys.YielderKey{}, &interpreterYielder{ce: ce})
+	}
+
+	if ctx.Value(expctxkeys.EnableSnapshotterKey{}) != nil {
+		ctx = context.WithValue(ctx, expctxkeys.SnapshotterKey{}, ce)
+	}
+
+	m := r.moduleInstance
+
+	defer func() {
+		if err == nil {
+			err = m.FailIfClosed()
+		}
+
+		if v := recover(); v != nil {
+			// Check for yield signal first.
+			if ys, ok := v.(*yieldSignal); ok && ys.ce == ce {
+				// Another yield! Capture state again.
+				newResumer := &interpreterResumer{
+					stack:          slices.Clone(ce.stack),
+					frames:         slices.Clone(ce.frames),
+					f:              r.f,
+					moduleInstance: m,
+					ce:             ce,
+				}
+				ce.stack, ce.frames = ce.stack[:0], ce.frames[:0]
+				ce.yieldState.Store(yieldStateSuspended)
+				err = experimental.NewYieldError(newResumer)
+				results = nil
+				return
+			}
+			err = ce.recoverOnCall(ctx, m, v)
+		}
+
+		ce.yieldState.Store(yieldStateIdle)
+	}()
+
+	// Re-enter the interpreter loop from the top frame.
+	// Pop the existing frame (callNativeFunc will push a new one) and
+	// set resumePC/resumeBase so callNativeFunc starts at the right state.
+	topFrame := ce.frames[len(ce.frames)-1]
+	resumePC := topFrame.pc + 1 // advance past the call opcode
+	resumeBase := topFrame.base
+	ce.popFrame()
+	ce.resumePC = resumePC
+	ce.resumeBase = resumeBase
+	ce.callNativeFunc(ctx, m, topFrame.f)
+
+	// Execution completed. Pop final results.
+	ft := r.f.funcType
+	if ft.ResultNumInUint64 > 0 {
+		results = make([]uint64, ft.ResultNumInUint64)
+	}
+	ce.popValues(results)
+	ce.yieldState.Store(yieldStateIdle)
+	return results, nil
+}
+
+// Cancel implements experimental.Resumer.
+func (r *interpreterResumer) Cancel() {
+	if r.cancelled.CompareAndSwap(false, true) {
+		r.stack = nil
+		r.frames = nil
+		r.ce.yieldState.Store(yieldStateIdle)
+	}
+}
+
+// yieldState constants for the callEngine.
+const (
+	yieldStateIdle      int32 = 0
+	yieldStateSuspended int32 = 1
+	yieldStateResuming  int32 = 2
+)
 
 // stackIterator implements experimental.StackIterator.
 type stackIterator struct {
@@ -595,6 +774,12 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 		ctx = context.WithValue(ctx, expctxkeys.SnapshotterKey{}, ce)
 	}
 
+	// Enable async yield/resume if requested.
+	yieldEnabled := ctx.Value(expctxkeys.EnableYielderKey{}) != nil
+	if yieldEnabled {
+		ctx = context.WithValue(ctx, expctxkeys.YielderKey{}, &interpreterYielder{ce: ce})
+	}
+
 	defer func() {
 		// If the module closed during the call, and the call didn't err for another reason, set an ExitError.
 		if err == nil {
@@ -603,6 +788,24 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 		// TODO: ^^ Will not fail if the function was imported from a closed module.
 
 		if v := recover(); v != nil {
+			// Check for yield signal before treating as an error.
+			if ys, ok := v.(*yieldSignal); ok && ys.ce == ce {
+				// Cooperative yield: capture execution state and return
+				// a YieldError to the embedder.
+				resumer := &interpreterResumer{
+					stack:          slices.Clone(ce.stack),
+					frames:         slices.Clone(ce.frames),
+					f:              ce.f,
+					moduleInstance: m,
+					ce:             ce,
+				}
+				// Clear the call engine state so it isn't accidentally reused.
+				ce.stack, ce.frames = ce.stack[:0], ce.frames[:0]
+				ce.yieldState.Store(yieldStateSuspended)
+				err = experimental.NewYieldError(resumer)
+				return
+			}
+
 			err = ce.recoverOnCall(ctx, m, v)
 		}
 	}()
@@ -727,6 +930,13 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 	dataInstances := moduleInst.DataInstances
 	elementInstances := moduleInst.ElementInstances
 	ce.pushFrame(frame)
+	// If resumePC is set, start from that pc and base (used by yield/resume).
+	if pc := ce.resumePC; pc != 0 {
+		frame.pc = pc
+		frame.base = ce.resumeBase
+		ce.resumePC = 0
+		ce.resumeBase = 0
+	}
 	body := frame.f.parent.body
 	bodyLen := uint64(len(body))
 	for frame.pc < bodyLen {

@@ -45,6 +45,10 @@ var (
 	// ErrRuntimeMemoryFault indicates that an out-of-bounds memory access was caught
 	// by hardware memory protection (guard pages) rather than software bounds checks.
 	ErrRuntimeMemoryFault = New("memory fault")
+	// ErrRuntimeAsyncYield indicates that execution was cooperatively suspended
+	// by a host function via the async yield protocol. This is a control flow signal,
+	// not an error condition; the caller receives a Resumer to continue execution.
+	ErrRuntimeAsyncYield = New("async yield")
 )
 
 // Error is returned by a wasm.Engine during the execution of Wasm functions, and they indicate that the Wasm runtime
