@@ -86,6 +86,7 @@ type (
 		ensureTermination         bool
 		fuelEnabled               bool
 		fuel                      int64
+		memoryIsolationEnabled    bool
 		listeners                 []experimental.FunctionListener
 		listenerBeforeTrampolines []*byte
 		listenerAfterTrampolines  []*byte
@@ -133,7 +134,7 @@ func NewEngine(ctx context.Context, _ api.CoreFeatures, fc filecache.Cache) wasm
 }
 
 // CompileModule implements wasm.Engine.
-func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listeners []experimental.FunctionListener, ensureTermination bool, fuel int64) (err error) {
+func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listeners []experimental.FunctionListener, ensureTermination bool, fuel int64, secureMode bool) (err error) {
 	if wazevoapi.PerfMapEnabled {
 		wazevoapi.PerfMap.Lock()
 		defer wazevoapi.PerfMap.Unlock()
@@ -148,7 +149,7 @@ func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listene
 	if wazevoapi.DeterministicCompilationVerifierEnabled {
 		ctx = wazevoapi.NewDeterministicCompilationVerifierContext(ctx, len(module.CodeSection))
 	}
-	cm, err := e.compileModule(ctx, module, listeners, ensureTermination, fuel)
+	cm, err := e.compileModule(ctx, module, listeners, ensureTermination, fuel, secureMode)
 	if err != nil {
 		return err
 	}
@@ -158,7 +159,7 @@ func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listene
 
 	if wazevoapi.DeterministicCompilationVerifierEnabled {
 		for i := 0; i < wazevoapi.DeterministicCompilationVerifyingIter; i++ {
-			_, err := e.compileModule(ctx, module, listeners, ensureTermination, fuel)
+			_, err := e.compileModule(ctx, module, listeners, ensureTermination, fuel, secureMode)
 			if err != nil {
 				return err
 			}
@@ -215,7 +216,7 @@ func (exec *executables) compileEntryPreambles(m *wasm.Module, machine backend.M
 	}
 }
 
-func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listeners []experimental.FunctionListener, ensureTermination bool, fuel int64) (*compiledModule, error) {
+func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listeners []experimental.FunctionListener, ensureTermination bool, fuel int64, secureMode bool) (*compiledModule, error) {
 	if module.IsHostModule {
 		return e.compileHostModule(ctx, module, listeners)
 	}
@@ -224,10 +225,11 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 	fuelEnabled := fuel > 0
 	cm := &compiledModule{
 		offsets: wazevoapi.NewModuleContextOffsetData(module, withListener), parent: e, module: module,
-		ensureTermination: ensureTermination,
-		fuelEnabled:       fuelEnabled,
-		fuel:              fuel,
-		executables:       &executables{},
+		ensureTermination:      ensureTermination,
+		fuelEnabled:            fuelEnabled,
+		fuel:                   fuel,
+		memoryIsolationEnabled: secureMode,
+		executables:            &executables{},
 	}
 
 	importedFns, localFns := int(module.ImportFunctionCount), len(module.FunctionSection)
@@ -256,7 +258,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 
 	if workers := experimental.GetCompilationWorkers(ctx); workers <= 1 {
 		// Compile with a single goroutine.
-		fe := frontend.NewFrontendCompiler(module, ssaBuilder, &cm.offsets, ensureTermination, withListener, needSourceInfo, fuelEnabled)
+		fe := frontend.NewFrontendCompiler(module, ssaBuilder, &cm.offsets, ensureTermination, withListener, needSourceInfo, fuelEnabled, cm.memoryIsolationEnabled)
 
 		for i := range module.CodeSection {
 			if wazevoapi.DeterministicCompilationVerifierEnabled {
@@ -304,7 +306,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 				machine := newMachine()
 				ssaBuilder := ssa.NewBuilder()
 				be := backend.NewCompiler(ctx, machine, ssaBuilder)
-				fe := frontend.NewFrontendCompiler(module, ssaBuilder, &cm.offsets, ensureTermination, withListener, needSourceInfo, fuelEnabled)
+				fe := frontend.NewFrontendCompiler(module, ssaBuilder, &cm.offsets, ensureTermination, withListener, needSourceInfo, fuelEnabled, cm.memoryIsolationEnabled)
 
 				for {
 					if err := ctx.Err(); err != nil {

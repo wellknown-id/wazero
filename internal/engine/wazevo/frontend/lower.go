@@ -3760,6 +3760,17 @@ func (c *Compiler) memOpSetup(baseAddr ssa.Value, constOffset, operationSizeInBy
 		Insert(builder).
 		Return()
 
+	if c.memoryIsolationEnabled {
+		if address == ssa.ValueInvalid {
+			memBase := c.getMemoryBaseValue(false)
+			address = builder.AllocateInstruction().
+				AsIadd(memBase, extBaseAddr).Insert(builder).Return()
+		}
+		// Record the bound ceil for this baseAddr is known to be safe for the subsequent memory access in the same block.
+		c.recordKnownSafeBound(baseAddrID, ceil, address)
+		return
+	}
+
 	// Note: memLen is already zero extended to 64-bit space at the load time.
 	memLen := c.getMemoryLenValue(false)
 

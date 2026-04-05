@@ -264,7 +264,7 @@ func (r *runtime) CompileModule(ctx context.Context, binary []byte) (CompiledMod
 		return nil, err
 	}
 	internal.AssignModuleID(binary, listeners, r.ensureTermination)
-	if err = r.store.Engine.CompileModule(ctx, internal, listeners, r.ensureTermination, r.fuel); err != nil {
+	if err = r.store.Engine.CompileModule(ctx, internal, listeners, r.ensureTermination, r.fuel, r.secureMode); err != nil {
 		return nil, err
 	}
 	return c, nil

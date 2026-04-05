@@ -31,6 +31,7 @@ type Compiler struct {
 	memmoveSig             ssa.Signature
 	ensureTermination      bool
 	fuelEnabled            bool
+	memoryIsolationEnabled bool
 
 	// Followings are reset by per function.
 
@@ -88,7 +89,7 @@ type (
 var knownSafeBoundsAtTheEndOfBlockNil = wazevoapi.NewNilVarLength[knownSafeBoundWithID]()
 
 // NewFrontendCompiler returns a frontend Compiler.
-func NewFrontendCompiler(m *wasm.Module, ssaBuilder ssa.Builder, offset *wazevoapi.ModuleContextOffsetData, ensureTermination bool, listenerOn bool, sourceInfo bool, fuelEnabled bool) *Compiler {
+func NewFrontendCompiler(m *wasm.Module, ssaBuilder ssa.Builder, offset *wazevoapi.ModuleContextOffsetData, ensureTermination bool, listenerOn bool, sourceInfo bool, fuelEnabled bool, memoryIsolationEnabled bool) *Compiler {
 	c := &Compiler{
 		m:                                 m,
 		ssaBuilder:                        ssaBuilder,
@@ -96,6 +97,7 @@ func NewFrontendCompiler(m *wasm.Module, ssaBuilder ssa.Builder, offset *wazevoa
 		offset:                            offset,
 		ensureTermination:                 ensureTermination,
 		fuelEnabled:                       fuelEnabled,
+		memoryIsolationEnabled:            memoryIsolationEnabled,
 		needSourceOffsetInfo:              sourceInfo,
 		varLengthKnownSafeBoundWithIDPool: wazevoapi.NewVarLengthPool[knownSafeBoundWithID](),
 	}

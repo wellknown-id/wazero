@@ -377,8 +377,8 @@ func (f internalFunction) SourceOffsetForPC(pc experimental.ProgramCounter) uint
 // interpreter mode doesn't maintain call frames in the stack, so pass the zero size to the IR.
 const callFrameStackSize = 0
 
-// CompileModule implements the same method as documented on wasm.Engine.
-func (e *engine) CompileModule(_ context.Context, module *wasm.Module, listeners []experimental.FunctionListener, ensureTermination bool, _ int64) error {
+// CompileModule implements wasm.Engine.
+func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listeners []experimental.FunctionListener, ensureTermination bool, fuel int64, secureMode bool) error {
 	if _, ok := e.getCompiledFunctions(module, true); ok { // cache hit!
 		return nil
 	}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
+	"runtime/debug"
 	"sync/atomic"
 	"unsafe"
 
@@ -212,6 +213,11 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		defer func() {
 			wazevoapi.CheckStackGuardPage(c.stack)
 		}()
+	}
+
+	if c.parent.parent.memoryIsolationEnabled {
+		old := debug.SetPanicOnFault(true)
+		defer debug.SetPanicOnFault(old)
 	}
 
 	p := c.parent

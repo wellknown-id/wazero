@@ -112,7 +112,7 @@ The wazero `Store`, `Engine`, compilation caches, and type registries are shared
 
 ## Security property matrix
 
-| Property | Linux amd64 (compiler) | Linux arm64 (compiler) | Windows amd64 (compiler) | Other / Interpreter |
+| Property | Linux (amd64/arm64) | MacOS (amd64/arm64) | Windows (amd64) | Other / Interpreter |
 |---|---|---|---|---|
 | Software bounds checks | ✅ | ✅ | ✅ | ✅ |
 | Hardware memory isolation (guard pages) | ✅ secure mode | ✅ secure mode | ✅ secure mode | ❌ software fallback |
