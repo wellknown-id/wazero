@@ -10,6 +10,7 @@
 #define EXECCTX_EXITCODE_OFF 0
 #define EXECCTX_ORIGFP_OFF 16
 #define EXECCTX_ORIGSP_OFF 24
+#define EXECCTX_GORET_OFF 32
 
 // SIGSEGV handler installed via rt_sigaction.
 // Linux delivers args as: (sig int, info *siginfo_t, uctx *ucontext_t).
@@ -65,6 +66,8 @@ jit_fault:
 	MOVD R16, SIGCONTEXT_SP_OFF(R8)
 	MOVD EXECCTX_ORIGFP_OFF(R11), R16
 	MOVD R16, 29*8(R10)
+	MOVD EXECCTX_GORET_OFF(R11), R16
+	MOVD R16, 30*8(R10)
 
 	// Resume at trampoline RET so kernel returns to caller of entrypoint.
 	MOVD $·faultReturnTrampoline(SB), R16

@@ -75,3 +75,29 @@ Before merging changes that touch arm64 trap/fault handling:
 3. At least one end-to-end secure-mode memory OOB trap test passes on native arm64.
 
 If native arm64 capacity is temporarily unavailable, arm64 secure-mode changes should remain behind explicit capability checks and be treated as experimental.
+
+## Parity checklist vs amd64
+
+Track Linux/arm64 against Linux/amd64 in these concrete areas:
+
+- Signal installation parity:
+  - Uses `rt_sigaction` with `SA_SIGINFO`-compatible handler shape.
+  - Preserves and forwards to Go's original SIGSEGV handler for non-JIT faults.
+- Fault classification parity:
+  - JIT range table check uses faulting PC and registered executable ranges.
+  - Non-JIT faults never get converted into Wasm traps.
+- Trap conversion parity:
+  - Sets `ExecutionContext.ExitCode` to memory OOB (`4`).
+  - Restores original Go FP/SP from execution context.
+  - Restores Go return address register (`LR`/x30 on arm64).
+  - Redirects PC to fault return trampoline and returns from handler.
+- Entry path parity:
+  - Execution context pointer is held in a reserved register across JIT execution.
+  - Reserved register is removed from allocator candidates.
+- Capability gating parity:
+  - `secureMode` memory isolation uses `signalHandlerSupported()` gate.
+  - Unsupported targets fail closed to safe fallback mode.
+
+Exit condition for parity:
+
+- Linux/arm64 passes the same secure-mode memory fault integration semantics as Linux/amd64 on native hardware, including non-JIT fault forwarding behavior.
