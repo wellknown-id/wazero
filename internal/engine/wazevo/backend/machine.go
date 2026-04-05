@@ -101,7 +101,7 @@ type (
 
 		// CompileEntryPreamble returns the sequence of instructions shared by multiple functions to
 		// enter the function from Go.
-		CompileEntryPreamble(signature *ssa.Signature) []byte
+		CompileEntryPreamble(signature *ssa.Signature, useGoStack bool) []byte
 
 		// LowerParams lowers the given parameters.
 		LowerParams(params []ssa.Value)

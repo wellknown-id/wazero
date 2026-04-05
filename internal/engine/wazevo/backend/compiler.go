@@ -65,6 +65,9 @@ type Compiler interface {
 	// Init initializes the internal state of the compiler for the next compilation.
 	Init()
 
+	// DisableStackCheck disables the stack check for the current compilation for debugging/testing.
+	DisableStackCheck()
+
 	// AllocateVReg allocates a new virtual register of the given type.
 	AllocateVReg(typ ssa.Type) regalloc.VReg
 
@@ -276,6 +279,11 @@ func (c *compiler) Init() {
 	c.buf = c.buf[:0]
 	c.sourceOffsets = c.sourceOffsets[:0]
 	c.relocations = c.relocations[:0]
+}
+
+// DisableStackCheck implements Compiler.DisableStackCheck.
+func (c *compiler) DisableStackCheck() {
+	c.mach.DisableStackCheck()
 }
 
 // ValueDefinition implements Compiler.ValueDefinition.

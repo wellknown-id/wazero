@@ -38,7 +38,7 @@ func (m mockMachine) LowerParams(params []ssa.Value) { panic("implement me") }
 
 func (m mockMachine) LowerReturns(returns []ssa.Value) { panic("implement me") }
 
-func (m mockMachine) CompileEntryPreamble(signature *ssa.Signature) []byte {
+func (m mockMachine) CompileEntryPreamble(signature *ssa.Signature, useGoStack bool) []byte {
 	panic("TODO")
 }
 

@@ -168,3 +168,5 @@ func (m *mockCompiler) MatchInstrOneOf(def backend.SSAValueDefinition, opcodes [
 func (m *mockCompiler) Compile(context.Context) (_ []byte, _ []backend.RelocationInfo, _ error) {
 	return
 }
+
+func (m *mockCompiler) DisableStackCheck() {}

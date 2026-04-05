@@ -137,6 +137,8 @@ func (m *mockCompiler) Compile(context.Context) (_ []byte, _ []backend.Relocatio
 	return
 }
 
+func (m *mockCompiler) DisableStackCheck() {}
+
 func formatEmittedInstructionsInCurrentBlock(m *machine) string {
 	m.FlushPendingInstructions()
 	var strs []string

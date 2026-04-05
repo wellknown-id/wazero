@@ -15,8 +15,8 @@ import (
 //  4. Function executable in x24.
 //
 // also SP and FP are correct Go-runtime-based values, and LR is the return address to the Go-side caller.
-func (m *machine) CompileEntryPreamble(signature *ssa.Signature) []byte {
-	root := m.constructEntryPreamble(signature)
+func (m *machine) CompileEntryPreamble(signature *ssa.Signature, useGoStack bool) []byte {
+	root := m.constructEntryPreamble(signature, useGoStack)
 	m.encode(root)
 	return m.compiler.Buf()
 }
@@ -136,7 +136,7 @@ func (m *machine) goEntryPreamblePassResult(cur *instruction, resultSlicePtr reg
 	return cur
 }
 
-func (m *machine) constructEntryPreamble(sig *ssa.Signature) (root *instruction) {
+func (m *machine) constructEntryPreamble(sig *ssa.Signature, useGoStack bool) (root *instruction) {
 	abi := backend.FunctionABI{}
 	abi.Init(sig, intParamResultRegs, floatParamResultRegs)
 
@@ -158,9 +158,11 @@ func (m *machine) constructEntryPreamble(sig *ssa.Signature) (root *instruction)
 	cur = m.loadOrStoreAtExecutionContext(tmpRegVReg, wazevoapi.ExecutionContextOffsetOriginalStackPointer, true, cur)
 	cur = m.loadOrStoreAtExecutionContext(lrVReg, wazevoapi.ExecutionContextOffsetGoReturnAddress, true, cur)
 
-	// Then, move the Go-allocated stack pointer to SP:
-	// 		mov sp, goAllocatedStackPtr
-	cur = m.move64(spVReg, goAllocatedStackPtr, cur)
+	if !useGoStack {
+		// Then, move the Go-allocated stack pointer to SP:
+		// 		mov sp, goAllocatedStackPtr
+		cur = m.move64(spVReg, goAllocatedStackPtr, cur)
+	}
 
 	prReg := paramResultSlicePtr
 	if len(abi.Args) > 2 && len(abi.Rets) > 0 {

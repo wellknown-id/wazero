@@ -397,7 +397,7 @@ func TestAbiImpl_constructEntryPreamble(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, _, m := newSetupWithMockContext()
-			m.rootInstr = m.constructEntryPreamble(tc.sig)
+			m.rootInstr = m.constructEntryPreamble(tc.sig, false)
 			require.Equal(t, tc.exp, m.Format())
 		})
 	}
