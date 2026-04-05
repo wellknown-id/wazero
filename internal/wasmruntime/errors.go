@@ -33,6 +33,18 @@ var (
 	ErrRuntimeExpectedSharedMemory = New("expected shared memory")
 	// ErrRuntimeTooManyWaiters indicates that atomic.wait was called with too many waiters.
 	ErrRuntimeTooManyWaiters = New("too many waiters")
+
+	// se-wazero extended error categories.
+
+	// ErrRuntimeFuelExhausted indicates that the module's fuel budget was consumed
+	// and the Engine terminated execution deterministically.
+	ErrRuntimeFuelExhausted = New("fuel exhausted")
+	// ErrRuntimePolicyDenied indicates that a host-side policy check rejected an
+	// operation requested by the Wasm module (e.g. filesystem access, network egress).
+	ErrRuntimePolicyDenied = New("policy denied")
+	// ErrRuntimeMemoryFault indicates that an out-of-bounds memory access was caught
+	// by hardware memory protection (guard pages) rather than software bounds checks.
+	ErrRuntimeMemoryFault = New("memory fault")
 )
 
 // Error is returned by a wasm.Engine during the execution of Wasm functions, and they indicate that the Wasm runtime

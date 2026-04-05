@@ -30,6 +30,12 @@ const (
 	ExitCodeMemoryWait64
 	ExitCodeMemoryNotify
 	ExitCodeUnalignedAtomic
+
+	// se-wazero extended exit codes.
+
+	ExitCodeFuelExhausted
+	ExitCodePolicyDenied
+	ExitCodeMemoryFault
 	exitCodeMax
 )
 
@@ -86,6 +92,12 @@ func (e ExitCode) String() string {
 		return "memory_wait64"
 	case ExitCodeMemoryNotify:
 		return "memory_notify"
+	case ExitCodeFuelExhausted:
+		return "fuel_exhausted"
+	case ExitCodePolicyDenied:
+		return "policy_denied"
+	case ExitCodeMemoryFault:
+		return "memory_fault"
 	}
 	panic("TODO")
 }

@@ -228,6 +228,23 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			// let it propagate up to be handled by the caller.
 			panic(s)
 		}
+
+		// Detect hardware memory faults from guard pages. When
+		// runtime.SetPanicOnFault is active (the wazevo entrypoint enables it),
+		// an access to a PROT_NONE guard page triggers a runtime.Error whose
+		// message contains "fault". Translate it to the standard Wasm
+		// out-of-bounds trap so callers see the same error regardless of
+		// whether isolation came from software checks or guard pages.
+		if re, ok := r.(runtime.Error); ok {
+			msg := re.Error()
+			for i := 0; i+4 <= len(msg); i++ {
+				if msg[i] == 'f' && msg[i+1] == 'a' && msg[i+2] == 'u' && msg[i+3] == 'l' && i+4 < len(msg) && msg[i+4] == 't' {
+					r = wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess
+					break
+				}
+			}
+		}
+
 		if r != nil {
 			type listenerForAbort struct {
 				def api.FunctionDefinition
@@ -505,6 +522,12 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			panic(wasmruntime.ErrRuntimeInvalidConversionToInteger)
 		case wazevoapi.ExitCodeUnalignedAtomic:
 			panic(wasmruntime.ErrRuntimeUnalignedAtomic)
+		case wazevoapi.ExitCodeFuelExhausted:
+			panic(wasmruntime.ErrRuntimeFuelExhausted)
+		case wazevoapi.ExitCodePolicyDenied:
+			panic(wasmruntime.ErrRuntimePolicyDenied)
+		case wazevoapi.ExitCodeMemoryFault:
+			panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 		default:
 			panic("BUG")
 		}

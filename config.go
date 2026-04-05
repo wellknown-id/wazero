@@ -168,6 +168,20 @@ type RuntimeConfig interface {
 	// When the invocations of api.Function are closed due to this, sys.ExitError is raised to the callers and
 	// the api.Module from which the functions are derived is made closed.
 	WithCloseOnContextDone(bool) RuntimeConfig
+
+	// WithSecureMode enables security-hardened execution for untrusted workloads.
+	// When enabled on supported platforms (Linux amd64/arm64, Windows amd64),
+	// the runtime uses mmap-backed linear memory with guard pages and hardware
+	// fault trapping for out-of-bounds memory access, so that a tenant memory
+	// fault terminates the offending module instance without crashing the host.
+	//
+	// On unsupported platforms, the runtime falls back to software-only bounds
+	// checks and continues operating with reduced isolation guarantees.
+	//
+	// Default: false (upstream-compatible behaviour).
+	//
+	// See THREAT_MODEL.md for the full security property matrix.
+	WithSecureMode(bool) RuntimeConfig
 }
 
 // NewRuntimeConfig returns a RuntimeConfig using the compiler if it is supported in this environment,
@@ -190,6 +204,7 @@ type runtimeConfig struct {
 	cache                 CompilationCache
 	storeCustomSections   bool
 	ensureTermination     bool
+	secureMode            bool
 }
 
 // engineLessConfig helps avoid copy/pasting the wrong defaults.
@@ -301,6 +316,13 @@ func (c *runtimeConfig) WithDebugInfoEnabled(dwarfEnabled bool) RuntimeConfig {
 func (c *runtimeConfig) WithCustomSections(storeCustomSections bool) RuntimeConfig {
 	ret := c.clone()
 	ret.storeCustomSections = storeCustomSections
+	return ret
+}
+
+// WithSecureMode implements RuntimeConfig.WithSecureMode
+func (c *runtimeConfig) WithSecureMode(secureMode bool) RuntimeConfig {
+	ret := c.clone()
+	ret.secureMode = secureMode
 	return ret
 }
 

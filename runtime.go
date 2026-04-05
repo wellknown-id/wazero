@@ -11,6 +11,7 @@ import (
 	"github.com/tetratelabs/wazero/internal/engine/wazevo"
 	"github.com/tetratelabs/wazero/internal/expctxkeys"
 	"github.com/tetratelabs/wazero/internal/platform"
+	"github.com/tetratelabs/wazero/internal/secmem"
 	internalsock "github.com/tetratelabs/wazero/internal/sock"
 	internalsys "github.com/tetratelabs/wazero/internal/sys"
 	"github.com/tetratelabs/wazero/internal/wasm"
@@ -187,6 +188,7 @@ func NewRuntimeWithConfig(ctx context.Context, rConfig RuntimeConfig) Runtime {
 		dwarfDisabled:         config.dwarfDisabled,
 		storeCustomSections:   config.storeCustomSections,
 		ensureTermination:     config.ensureTermination,
+		secureMode:            config.secureMode,
 	}
 }
 
@@ -209,6 +211,7 @@ type runtime struct {
 	closed atomic.Uint64
 
 	ensureTermination bool
+	secureMode        bool
 }
 
 // Module implements Runtime.Module.
@@ -320,6 +323,14 @@ func (r *runtime) InstantiateModule(
 	if !code.module.IsHostModule {
 		if sockConfig, ok := ctx.Value(internalsock.ConfigKey{}).(*internalsock.Config); ok {
 			config.sockConfig = sockConfig
+		}
+	}
+
+	// In secure mode, inject the guard-page memory allocator if the platform
+	// supports it and no custom allocator is already set in the context.
+	if r.secureMode && !code.module.IsHostModule {
+		if ctx.Value(expctxkeys.MemoryAllocatorKey{}) == nil && platform.SupportsGuardPages() {
+			ctx = experimentalapi.WithMemoryAllocator(ctx, secmem.GuardPageAllocator{})
 		}
 	}
 
