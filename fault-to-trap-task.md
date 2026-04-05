@@ -1,0 +1,6 @@
+- [ ] Fix Linux SIGSEGV crash during fault handling
+    - [ ] Update `backend.Machine` interface and implementations (`CompileEntryPreamble`) to support optional Go stack usage
+    - [ ] Update `call_engine.go` to use Go stack when `secureMode` is enabled
+    - [ ] Update `engine.go` to propagate `secureMode` correctly
+- [ ] Verify fix with `secure_test.go`
+- [ ] Update `THREAT_MODEL.md` security property matrix
