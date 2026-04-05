@@ -112,17 +112,17 @@ The wazero `Store`, `Engine`, compilation caches, and type registries are shared
 
 ## Security property matrix
 
-| Property | Linux (amd64/arm64) | MacOS (amd64/arm64) | Windows (amd64) | Other / Interpreter |
-|---|---|---|---|---|
-| Software bounds checks | ✅ | ✅ | ✅ | ✅ |
-| Hardware memory isolation (guard pages) | ✅ secure mode | ✅ secure mode | ✅ secure mode | ❌ software fallback |
-| Context-based termination | ✅ | ✅ | ✅ | ✅ |
-| Deterministic fuel metering | ✅ secure mode | ✅ secure mode | ✅ secure mode | ❌ interpreter unsupported |
-| WASI default-deny filesystem | ❌ Phase 4 | ❌ Phase 4 | ❌ Phase 4 | ❌ Phase 4 |
-| WASI network egress policy | ❌ Phase 4 | ❌ Phase 4 | ❌ Phase 4 | ❌ Phase 4 |
-| Clock coarsening | ❌ Phase 4 | ❌ Phase 4 | ❌ Phase 4 | ❌ Phase 4 |
-| Async yield/resume | ❌ Phase 3 | ❌ Phase 3 | ❌ Phase 3 | ❌ Phase 3 |
-| Indirect call type checks | ✅ | ✅ | ✅ | ✅ |
+| Property                                | Linux (amd64/arm64) | MacOS (amd64/arm64) | Windows (amd64) | Other / Interpreter        |
+| --------------------------------------- | ------------------- | ------------------- | --------------- | -------------------------- |
+| Software bounds checks                  | ✅                  | ✅                  | ✅              | ✅                         |
+| Hardware memory isolation (guard pages) | ✅ secure mode      | ✅ secure mode      | ✅ secure mode  | ❌ software fallback       |
+| Context-based termination               | ✅                  | ✅                  | ✅              | ✅                         |
+| Deterministic fuel metering             | ✅ secure mode      | ✅ secure mode      | ✅ secure mode  | ❌ interpreter unsupported |
+| WASI default-deny filesystem            | ❌ Phase 4          | ❌ Phase 4          | ❌ Phase 4      | ❌ Phase 4                 |
+| WASI network egress policy              | ❌ Phase 4          | ❌ Phase 4          | ❌ Phase 4      | ❌ Phase 4                 |
+| Clock coarsening                        | ❌ Phase 4          | ❌ Phase 4          | ❌ Phase 4      | ❌ Phase 4                 |
+| Async yield/resume                      | ❌ Phase 3          | ❌ Phase 3          | ❌ Phase 3      | ❌ Phase 3                 |
+| Indirect call type checks               | ✅                  | ✅                  | ✅              | ✅                         |
 
 ## Assumptions
 
