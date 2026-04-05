@@ -299,7 +299,7 @@ libsodium:
 #### CLI release related ####
 
 VERSION ?= dev
-non_windows_platforms := darwin_amd64 darwin_arm64 linux_amd64 linux_arm64
+non_windows_platforms := linux_amd64 linux_arm64
 non_windows_archives  := $(non_windows_platforms:%=dist/wazero_$(VERSION)_%.tar.gz)
 windows_platforms     := windows_amd64 # TODO: add arm64 windows once we start testing on it.
 windows_archives      := $(windows_platforms:%=dist/wazero_$(VERSION)_%.zip)
@@ -308,6 +308,9 @@ checksum_txt          := dist/wazero_$(VERSION)_checksums.txt
 # define macros for multi-platform builds. these parse the filename being built
 go-arch = $(if $(findstring amd64,$1),amd64,arm64)
 go-os   = $(if $(findstring .exe,$1),windows,$(if $(findstring linux,$1),linux,darwin))
+zig-os = $(if $(findstring windows,$1),windows-gnu,$(if $(findstring linux,$1),linux-gnu,macos-none))
+zig-arch = $(if $(findstring amd64,$1),x86_64,aarch64)
+zig-target = $(call zig-arch,$1)-$(call zig-os,$1)
 
 build/wazero_%/libwazero.a:
 	$(call go-build,$@,$<)
@@ -317,15 +320,15 @@ dist/wazero_$(VERSION)_%.tar.gz: build/wazero_%/libwazero.a
 	@mkdir -p $(@D)
 # On Windows, we pass the special flag `--mode='+rx' to ensure that we set the executable flag.
 # This is only supported by GNU Tar, so we set it conditionally.
-	@tar -C $(<D) -cpzf $@ $(if $(findstring Windows_NT,$(OS)),--mode='+rx',) $(<F)
+	@tar -C $(<D) -cpzf $@ $(if $(findstring Windows_NT,$(OS)),--mode='+rx',) libwazero.a libwazero.h
 	@echo tar.gz "ok"
 
 define go-build
 	@echo "building $1"
 	@# $(go:go=) removes the trailing 'go', so we can insert cross-build variables
-	@$(go:go=) CGO_ENABLED=0 GOOS=$(call go-os,$1) GOARCH=$(call go-arch,$1) go build \
+	@$(go:go=) CGO_ENABLED=1 CC="zig cc -target $(call zig-target,$1)" CXX="zig c++ -target $(call zig-target,$1)" GOOS=$(call go-os,$1) GOARCH=$(call go-arch,$1) go build \
 		-ldflags "-s -w -X github.com/tetratelabs/wazero/internal/version.version=$(VERSION)" \
-		-buildmode=archive -o $1 .
+		-buildmode=c-archive -o $1 ./cmd/wazero-c
 	@echo build "ok"
 endef
 
@@ -337,7 +340,7 @@ dist/wazero_$(VERSION)_%.zip: build/wazero_%/libwazero.a
 
 # Darwin doesn't have sha256sum. See https://github.com/actions/virtual-environments/issues/90
 sha256sum := $(if $(findstring darwin,$(shell go env GOOS)),shasum -a 256,sha256sum)
-$(checksum_txt): $(non_windows_archives) $(windows_archives)
+$(checksum_txt): $(non_windows_archives)
 	@cd $(@D); touch $(@F); $(sha256sum) * > $(@F)
 
-dist: $(non_windows_archives) $(windows_archives) $(checksum_txt)
+dist: $(non_windows_archives) $(checksum_txt)
