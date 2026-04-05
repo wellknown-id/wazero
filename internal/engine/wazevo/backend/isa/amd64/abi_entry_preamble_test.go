@@ -25,6 +25,7 @@ func TestMachineCompileEntryPreamble(t *testing.T) {
 	mov.q %rsp, 24(%rax)
 	movq %r13, %rsp
 	xor %rbp, %rbp
+	movq %rdx, %r15
 	callq *%r14
 	movq 16(%rdx), %rbp
 	movq 24(%rdx), %rsp
@@ -49,6 +50,7 @@ func TestMachineCompileEntryPreamble(t *testing.T) {
 	movdqu 32(%r12), %xmm2
 	movq 48(%r12), %rsi
 	xor %rbp, %rbp
+	movq %rdx, %r15
 	callq *%r14
 	movq 16(%rdx), %rbp
 	movq 24(%rdx), %rsp
@@ -68,6 +70,7 @@ func TestMachineCompileEntryPreamble(t *testing.T) {
 	mov.q %rsp, 24(%rax)
 	movq %r13, %rsp
 	xor %rbp, %rbp
+	movq %rdx, %r15
 	callq *%r14
 	mov.l %rax, (%r12)
 	movdqu %xmm0, 8(%r12)
@@ -98,6 +101,7 @@ func TestMachineCompileEntryPreamble(t *testing.T) {
 	movdqu 32(%r12), %xmm2
 	movq 48(%r12), %rsi
 	xor %rbp, %rbp
+	movq %rdx, %r15
 	callq *%r14
 	mov.l %rax, (%r12)
 	movdqu %xmm0, 8(%r12)
@@ -155,6 +159,7 @@ func TestMachineCompileEntryPreamble(t *testing.T) {
 	movq 192(%r12), %r15
 	mov.q %r15, 56(%rsp)
 	xor %rbp, %rbp
+	movq %rdx, %r15
 	callq *%r14
 	movq 16(%rdx), %rbp
 	movq 24(%rdx), %rsp
@@ -179,6 +184,7 @@ func TestMachineCompileEntryPreamble(t *testing.T) {
 	movq %r13, %rsp
 	sub $64, %rsp
 	xor %rbp, %rbp
+	movq %rdx, %r15
 	callq *%r14
 	mov.q %rax, (%r12)
 	mov.q %rbx, 8(%r12)
@@ -267,6 +273,7 @@ func TestMachineCompileEntryPreamble(t *testing.T) {
 	movq 192(%r12), %r15
 	mov.q %r15, 56(%rsp)
 	xor %rbp, %rbp
+	movq %rdx, %r15
 	callq *%r14
 	mov.q %rax, (%r12)
 	mov.q %rbx, 8(%r12)
@@ -307,7 +314,7 @@ func TestMachineCompileEntryPreamble(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, _, m := newSetupWithMockContext()
-			m.rootInstr = m.compileEntryPreamble(tc.sig)
+			m.rootInstr = m.compileEntryPreamble(tc.sig, false)
 			require.Equal(t, tc.exp, m.Format())
 		})
 	}

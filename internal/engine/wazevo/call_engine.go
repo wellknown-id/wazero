@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
-	"runtime/debug"
 	"sync/atomic"
 	"unsafe"
 
@@ -215,11 +214,6 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		}()
 	}
 
-	if c.parent.parent.memoryIsolationEnabled {
-		old := debug.SetPanicOnFault(true)
-		defer debug.SetPanicOnFault(old)
-	}
-
 	p := c.parent
 	ensureTermination := p.parent.ensureTermination
 	m := p.module
@@ -265,22 +259,6 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			panic(s)
 		}
 
-		// Detect hardware memory faults from guard pages. When
-		// runtime.SetPanicOnFault is active (the wazevo entrypoint enables it),
-		// an access to a PROT_NONE guard page triggers a runtime.Error whose
-		// message contains "fault". Translate it to the standard Wasm
-		// out-of-bounds trap so callers see the same error regardless of
-		// whether isolation came from software checks or guard pages.
-		if re, ok := r.(runtime.Error); ok {
-			msg := re.Error()
-			for i := 0; i+4 <= len(msg); i++ {
-				if msg[i] == 'f' && msg[i+1] == 'a' && msg[i+2] == 'u' && msg[i+3] == 'l' && i+4 < len(msg) && msg[i+4] == 't' {
-					r = wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess
-					break
-				}
-			}
-		}
-
 		if r != nil {
 			type listenerForAbort struct {
 				def api.FunctionDefinition
@@ -293,16 +271,19 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			if lsn != nil {
 				listeners = append(listeners, listenerForAbort{def, lsn})
 			}
-			returnAddrs := unwindStack(
-				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)),
-				c.execCtx.framePointerBeforeGoCall,
-				c.stackTop,
-				nil,
-			)
-			for _, retAddr := range returnAddrs[:len(returnAddrs)-1] { // the last return addr is the trampoline, so we skip it.
-				def, lsn = c.addFrame(builder, retAddr)
-				if lsn != nil {
-					listeners = append(listeners, listenerForAbort{def, lsn})
+
+			if c.execCtx.stackPointerBeforeGoCall != nil {
+				returnAddrs := unwindStack(
+					uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)),
+					c.execCtx.framePointerBeforeGoCall,
+					c.stackTop,
+					nil,
+				)
+				for _, retAddr := range returnAddrs[:len(returnAddrs)-1] { // the last return addr is the trampoline, so we skip it.
+					def, lsn = c.addFrame(builder, retAddr)
+					if lsn != nil {
+						listeners = append(listeners, listenerForAbort{def, lsn})
+					}
 				}
 			}
 			err = builder.FromRecovered(r)

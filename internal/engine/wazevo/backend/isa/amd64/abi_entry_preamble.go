@@ -26,14 +26,14 @@ var (
 )
 
 // CompileEntryPreamble implements backend.Machine.
-func (m *machine) CompileEntryPreamble(sig *ssa.Signature) []byte {
-	root := m.compileEntryPreamble(sig)
+func (m *machine) CompileEntryPreamble(sig *ssa.Signature, useGoStack bool) []byte {
+	root := m.compileEntryPreamble(sig, useGoStack)
 	m.encodeWithoutSSA(root)
 	buf := m.c.Buf()
 	return buf
 }
 
-func (m *machine) compileEntryPreamble(sig *ssa.Signature) *instruction {
+func (m *machine) compileEntryPreamble(sig *ssa.Signature, useGoStack bool) *instruction {
 	abi := backend.FunctionABI{}
 	abi.Init(sig, intArgResultRegs, floatArgResultRegs)
 
@@ -48,9 +48,11 @@ func (m *machine) compileEntryPreamble(sig *ssa.Signature) *instruction {
 	// Next is to save the original RBP and RSP into the execution context.
 	cur = m.saveOriginalRSPRBP(cur)
 
-	// Now set the RSP to the Go-allocated stack pointer.
-	// 		mov %goAllocatedStackPtr, %rsp
-	cur = m.move64(goAllocatedStackPtr, rspVReg, cur)
+	if !useGoStack {
+		// Now set the RSP to the Go-allocated stack pointer.
+		// 		mov %goAllocatedStackPtr, %rsp
+		cur = m.move64(goAllocatedStackPtr, rspVReg, cur)
+	}
 
 	if stackSlotSize := abi.AlignedArgResultStackSlotSize(); stackSlotSize > 0 {
 		// Allocate stack slots for the arguments and return values.
@@ -74,9 +76,16 @@ func (m *machine) compileEntryPreamble(sig *ssa.Signature) *instruction {
 		}
 	}
 
-	// Zero out RBP so that the unwind/stack growth code can correctly detect the end of the stack.
-	zerosRbp := m.allocateInstr().asAluRmiR(aluRmiROpcodeXor, newOperandReg(rbpVReg), rbpVReg, true)
-	cur = linkInstr(cur, zerosRbp)
+	if !useGoStack {
+		// Zero out RBP so that the unwind/stack growth code can correctly detect the end of the stack.
+		// When we are on a private stack, the frame pointer link ends here.
+		zerosRbp := m.allocateInstr().asAluRmiR(aluRmiROpcodeXor, newOperandReg(rbpVReg), rbpVReg, true)
+		cur = linkInstr(cur, zerosRbp)
+	}
+
+	// r15 is reserved for the signal handler path and must hold execution context ptr
+	// while running JIT code.
+	cur = m.move64(savedExecutionContextPtr, tmpIntReg, cur)
 
 	// Now ready to call the real function. Note that at this point stack pointer is already set to the Go-allocated,
 	// which is aligned to 16 bytes.

@@ -338,7 +338,7 @@ func (m *machine) storeReturnAddressAndExit(cur *instruction, execCtx regalloc.V
 // stack space left. Basically this is the all allocatable registers except for RSP and RBP, and RAX which contains the
 // execution context pointer. ExecCtx pointer is always the first argument so we don't need to save it.
 var stackGrowSaveVRegs = []regalloc.VReg{
-	rdxVReg, r12VReg, r13VReg, r14VReg, r15VReg,
+	rdxVReg, r12VReg, r13VReg, r14VReg,
 	rcxVReg, rbxVReg, rsiVReg, rdiVReg, r8VReg, r9VReg, r10VReg, r11VReg,
 	xmm8VReg, xmm9VReg, xmm10VReg, xmm11VReg, xmm12VReg, xmm13VReg, xmm14VReg, xmm15VReg,
 	xmm0VReg, xmm1VReg, xmm2VReg, xmm3VReg, xmm4VReg, xmm5VReg, xmm6VReg, xmm7VReg,
@@ -390,7 +390,7 @@ func (m *machine) insertStackBoundsCheck(requiredStackSize int64, cur *instructi
 	//		sub $requiredStackSize, %rsp ;; Reverse the temporary update.
 	//      pushq r15 ;; save the temporary.
 	//		mov $requiredStackSize, %r15
-	//		mov %15, ExecutionContextOffsetStackGrowRequiredSize(%rax) ;; Set the required size in the execution context.
+	//		mov %r15, ExecutionContextOffsetStackGrowRequiredSize(%rax) ;; Set the required size in the execution context.
 	//      popq r15 ;; restore the temporary.
 	//		callq *ExecutionContextOffsetStackGrowCallTrampolineAddress(%rax) ;; Call the Go function to grow the stack.
 	//		jmp .cont

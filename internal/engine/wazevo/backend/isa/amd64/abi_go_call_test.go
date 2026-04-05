@@ -408,31 +408,30 @@ func TestMachine_CompileStackGrowCallSequence(t *testing.T) {
 	mov.q %r12, 112(%rax)
 	mov.q %r13, 128(%rax)
 	mov.q %r14, 144(%rax)
-	mov.q %r15, 160(%rax)
-	mov.q %rcx, 176(%rax)
-	mov.q %rbx, 192(%rax)
-	mov.q %rsi, 208(%rax)
-	mov.q %rdi, 224(%rax)
-	mov.q %r8, 240(%rax)
-	mov.q %r9, 256(%rax)
-	mov.q %r10, 272(%rax)
-	mov.q %r11, 288(%rax)
-	movdqu %xmm8, 304(%rax)
-	movdqu %xmm9, 320(%rax)
-	movdqu %xmm10, 336(%rax)
-	movdqu %xmm11, 352(%rax)
-	movdqu %xmm12, 368(%rax)
-	movdqu %xmm13, 384(%rax)
-	movdqu %xmm14, 400(%rax)
-	movdqu %xmm15, 416(%rax)
-	movdqu %xmm0, 432(%rax)
-	movdqu %xmm1, 448(%rax)
-	movdqu %xmm2, 464(%rax)
-	movdqu %xmm3, 480(%rax)
-	movdqu %xmm4, 496(%rax)
-	movdqu %xmm5, 512(%rax)
-	movdqu %xmm6, 528(%rax)
-	movdqu %xmm7, 544(%rax)
+	mov.q %rcx, 160(%rax)
+	mov.q %rbx, 176(%rax)
+	mov.q %rsi, 192(%rax)
+	mov.q %rdi, 208(%rax)
+	mov.q %r8, 224(%rax)
+	mov.q %r9, 240(%rax)
+	mov.q %r10, 256(%rax)
+	mov.q %r11, 272(%rax)
+	movdqu %xmm8, 288(%rax)
+	movdqu %xmm9, 304(%rax)
+	movdqu %xmm10, 320(%rax)
+	movdqu %xmm11, 336(%rax)
+	movdqu %xmm12, 352(%rax)
+	movdqu %xmm13, 368(%rax)
+	movdqu %xmm14, 384(%rax)
+	movdqu %xmm15, 400(%rax)
+	movdqu %xmm0, 416(%rax)
+	movdqu %xmm1, 432(%rax)
+	movdqu %xmm2, 448(%rax)
+	movdqu %xmm3, 464(%rax)
+	movdqu %xmm4, 480(%rax)
+	movdqu %xmm5, 496(%rax)
+	movdqu %xmm6, 512(%rax)
+	movdqu %xmm7, 528(%rax)
 	movl $1, %r12d
 	mov.l %r12, (%rax)
 	mov.q %rsp, 56(%rax)
@@ -445,31 +444,30 @@ L1:
 	movq 112(%rax), %r12
 	movq 128(%rax), %r13
 	movq 144(%rax), %r14
-	movq 160(%rax), %r15
-	movq 176(%rax), %rcx
-	movq 192(%rax), %rbx
-	movq 208(%rax), %rsi
-	movq 224(%rax), %rdi
-	movq 240(%rax), %r8
-	movq 256(%rax), %r9
-	movq 272(%rax), %r10
-	movq 288(%rax), %r11
-	movdqu 304(%rax), %xmm8
-	movdqu 320(%rax), %xmm9
-	movdqu 336(%rax), %xmm10
-	movdqu 352(%rax), %xmm11
-	movdqu 368(%rax), %xmm12
-	movdqu 384(%rax), %xmm13
-	movdqu 400(%rax), %xmm14
-	movdqu 416(%rax), %xmm15
-	movdqu 432(%rax), %xmm0
-	movdqu 448(%rax), %xmm1
-	movdqu 464(%rax), %xmm2
-	movdqu 480(%rax), %xmm3
-	movdqu 496(%rax), %xmm4
-	movdqu 512(%rax), %xmm5
-	movdqu 528(%rax), %xmm6
-	movdqu 544(%rax), %xmm7
+	movq 160(%rax), %rcx
+	movq 176(%rax), %rbx
+	movq 192(%rax), %rsi
+	movq 208(%rax), %rdi
+	movq 224(%rax), %r8
+	movq 240(%rax), %r9
+	movq 256(%rax), %r10
+	movq 272(%rax), %r11
+	movdqu 288(%rax), %xmm8
+	movdqu 304(%rax), %xmm9
+	movdqu 320(%rax), %xmm10
+	movdqu 336(%rax), %xmm11
+	movdqu 352(%rax), %xmm12
+	movdqu 368(%rax), %xmm13
+	movdqu 384(%rax), %xmm14
+	movdqu 400(%rax), %xmm15
+	movdqu 416(%rax), %xmm0
+	movdqu 432(%rax), %xmm1
+	movdqu 448(%rax), %xmm2
+	movdqu 464(%rax), %xmm3
+	movdqu 480(%rax), %xmm4
+	movdqu 496(%rax), %xmm5
+	movdqu 512(%rax), %xmm6
+	movdqu 528(%rax), %xmm7
 	movq %rbp, %rsp
 	popq %rbp
 	ret

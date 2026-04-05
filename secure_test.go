@@ -25,14 +25,14 @@ func TestSecureMode_HardwareFaultToTrap(t *testing.T) {
 	//   )
 	// )
 	m := &wasm.Module{
-		MemorySection: &wasm.Memory{Min: 1, Max: 1},
-		TypeSection:   []wasm.FunctionType{{Results: []wasm.ValueType{wasm.ValueTypeI32}}},
+		MemorySection:   &wasm.Memory{Min: 1, Max: 1},
+		TypeSection:     []wasm.FunctionType{{Results: []wasm.ValueType{wasm.ValueTypeI32}}},
 		FunctionSection: []wasm.Index{0},
 		CodeSection: []wasm.Code{
 			{
 				Body: []byte{
 					wasm.OpcodeI32Const, 0xa0, 0x8d, 0x06, // 100000 in LEB128
-					wasm.OpcodeI32Load, 0x02, 0x00,        // align=2, offset=0
+					wasm.OpcodeI32Load, 0x02, 0x00, // align=2, offset=0
 					wasm.OpcodeEnd,
 				},
 			},

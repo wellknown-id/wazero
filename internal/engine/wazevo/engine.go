@@ -135,12 +135,14 @@ func NewEngine(ctx context.Context, _ api.CoreFeatures, fc filecache.Cache) wasm
 
 // CompileModule implements wasm.Engine.
 func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listeners []experimental.FunctionListener, ensureTermination bool, fuel int64, secureMode bool) (err error) {
+	memoryIsolationEnabled := secureMode && signalHandlerSupported()
+
 	if wazevoapi.PerfMapEnabled {
 		wazevoapi.PerfMap.Lock()
 		defer wazevoapi.PerfMap.Unlock()
 	}
 
-	if _, ok, err := e.getCompiledModule(module, listeners, ensureTermination); ok { // cache hit!
+	if _, ok, err := e.getCompiledModule(module, listeners, ensureTermination, memoryIsolationEnabled); ok { // cache hit!
 		return nil
 	} else if err != nil {
 		return err
@@ -149,7 +151,7 @@ func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listene
 	if wazevoapi.DeterministicCompilationVerifierEnabled {
 		ctx = wazevoapi.NewDeterministicCompilationVerifierContext(ctx, len(module.CodeSection))
 	}
-	cm, err := e.compileModule(ctx, module, listeners, ensureTermination, fuel, secureMode)
+	cm, err := e.compileModule(ctx, module, listeners, ensureTermination, fuel, memoryIsolationEnabled)
 	if err != nil {
 		return err
 	}
@@ -159,7 +161,7 @@ func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listene
 
 	if wazevoapi.DeterministicCompilationVerifierEnabled {
 		for i := 0; i < wazevoapi.DeterministicCompilationVerifyingIter; i++ {
-			_, err := e.compileModule(ctx, module, listeners, ensureTermination, fuel, secureMode)
+			_, err := e.compileModule(ctx, module, listeners, ensureTermination, fuel, memoryIsolationEnabled)
 			if err != nil {
 				return err
 			}
@@ -180,7 +182,7 @@ func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listene
 	return nil
 }
 
-func (exec *executables) compileEntryPreambles(m *wasm.Module, machine backend.Machine, be backend.Compiler) {
+func (exec *executables) compileEntryPreambles(m *wasm.Module, machine backend.Machine, be backend.Compiler, secureMode bool) {
 	if len(m.TypeSection) == 0 {
 		return
 	}
@@ -192,7 +194,7 @@ func (exec *executables) compileEntryPreambles(m *wasm.Module, machine backend.M
 		typ := &m.TypeSection[i]
 		sig := frontend.SignatureForWasmFunctionType(typ)
 		be.Init()
-		buf := machine.CompileEntryPreamble(&sig)
+		buf := machine.CompileEntryPreamble(&sig, false)
 		preambles = append(preambles, buf...)
 		align := 15 & -len(preambles) // Align 16-bytes boundary.
 		preambles = append(preambles, make([]byte, align)...)
@@ -216,7 +218,7 @@ func (exec *executables) compileEntryPreambles(m *wasm.Module, machine backend.M
 	}
 }
 
-func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listeners []experimental.FunctionListener, ensureTermination bool, fuel int64, secureMode bool) (*compiledModule, error) {
+func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listeners []experimental.FunctionListener, ensureTermination bool, fuel int64, memoryIsolationEnabled bool) (*compiledModule, error) {
 	if module.IsHostModule {
 		return e.compileHostModule(ctx, module, listeners)
 	}
@@ -228,7 +230,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 		ensureTermination:      ensureTermination,
 		fuelEnabled:            fuelEnabled,
 		fuel:                   fuel,
-		memoryIsolationEnabled: secureMode,
+		memoryIsolationEnabled: memoryIsolationEnabled,
 		executables:            &executables{},
 	}
 
@@ -247,7 +249,10 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 
 	ssaBuilder := ssa.NewBuilder()
 	be := backend.NewCompiler(ctx, machine, ssaBuilder)
-	cm.executables.compileEntryPreambles(module, machine, be)
+	cm.executables.compileEntryPreambles(module, machine, be, memoryIsolationEnabled)
+	if memoryIsolationEnabled {
+		machine.DisableStackCheck()
+	}
 	cm.functionOffsets = make([]int, localFns)
 
 	var indexes []int
@@ -269,7 +274,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 			fctx := functionContext(ctx, module, i, fidx)
 
 			needListener := len(listeners) > i && listeners[i] != nil
-			body, relsPerFunc, err := e.compileLocalWasmFunction(fctx, module, wasm.Index(i), fe, ssaBuilder, be, needListener)
+			body, relsPerFunc, err := e.compileLocalWasmFunction(fctx, module, wasm.Index(i), fe, ssaBuilder, be, needListener, memoryIsolationEnabled)
 			if err != nil {
 				return nil, fmt.Errorf("compile function %d/%d: %v", i, len(module.CodeSection)-1, err)
 			}
@@ -327,7 +332,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 					fctx := functionContext(ctx, module, i, fidx)
 
 					needListener := len(listeners) > i && listeners[i] != nil
-					body, relsPerFunc, err := e.compileLocalWasmFunction(fctx, module, wasm.Index(i), fe, ssaBuilder, be, needListener)
+					body, relsPerFunc, err := e.compileLocalWasmFunction(fctx, module, wasm.Index(i), fe, ssaBuilder, be, needListener, memoryIsolationEnabled)
 					if err != nil {
 						cancel(fmt.Errorf("compile function %d/%d: %v", i, len(module.CodeSection)-1, err))
 						return
@@ -382,6 +387,12 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 	if err = platform.MprotectCodeSegment(executable); err != nil {
 		return nil, err
 	}
+
+	if memoryIsolationEnabled && len(cm.executable) > 0 {
+		codeStart := uintptr(unsafe.Pointer(&cm.executable[0]))
+		RegisterJITCodeRange(codeStart, codeStart+uintptr(len(cm.executable)))
+	}
+
 	cm.sharedFunctions = e.sharedFunctions
 	e.setFinalizer(cm.executables, executablesFinalizer)
 	return cm, nil
@@ -487,6 +498,7 @@ func (e *engine) compileLocalWasmFunction(
 	ssaBuilder ssa.Builder,
 	be backend.Compiler,
 	needListener bool,
+	memoryIsolationEnabled bool,
 ) (body []byte, rels []backend.RelocationInfo, err error) {
 	typIndex := module.FunctionSection[localFunctionIndex]
 	typ := &module.TypeSection[typIndex]
@@ -495,6 +507,10 @@ func (e *engine) compileLocalWasmFunction(
 	// Initializes both frontend and backend compilers.
 	fe.Init(localFunctionIndex, typIndex, typ, codeSeg.LocalTypes, codeSeg.Body, needListener, codeSeg.BodyOffsetInCodeSection)
 	be.Init()
+
+	if memoryIsolationEnabled {
+		be.DisableStackCheck()
+	}
 
 	// Lower Wasm to SSA.
 	fe.LowerToSSA()
