@@ -182,6 +182,21 @@ type RuntimeConfig interface {
 	//
 	// See THREAT_MODEL.md for the full security property matrix.
 	WithSecureMode(bool) RuntimeConfig
+
+	// WithFuel sets the default fuel budget for each Wasm function call.
+	// Fuel is a deterministic CPU metering mechanism: compiled code decrements
+	// a counter at function entries and loop back-edges, and when the counter
+	// drops below zero, execution terminates with ErrRuntimeFuelExhausted.
+	//
+	// A value of 0 (the default) means unlimited — no fuel metering overhead
+	// is incurred and behavior matches upstream wazero exactly.
+	//
+	// This can be overridden per-call by setting an experimental.FuelController
+	// on the context passed to api.Function.Call. See experimental.WithFuelController.
+	//
+	// Note: fuel metering is currently supported only by the compiler (wazevo)
+	// engine. The interpreter ignores this setting.
+	WithFuel(fuel int64) RuntimeConfig
 }
 
 // NewRuntimeConfig returns a RuntimeConfig using the compiler if it is supported in this environment,
@@ -205,6 +220,7 @@ type runtimeConfig struct {
 	storeCustomSections   bool
 	ensureTermination     bool
 	secureMode            bool
+	fuel                  int64
 }
 
 // engineLessConfig helps avoid copy/pasting the wrong defaults.
@@ -323,6 +339,16 @@ func (c *runtimeConfig) WithCustomSections(storeCustomSections bool) RuntimeConf
 func (c *runtimeConfig) WithSecureMode(secureMode bool) RuntimeConfig {
 	ret := c.clone()
 	ret.secureMode = secureMode
+	return ret
+}
+
+// WithFuel implements RuntimeConfig.WithFuel
+func (c *runtimeConfig) WithFuel(fuel int64) RuntimeConfig {
+	ret := c.clone()
+	if fuel < 0 {
+		fuel = 0
+	}
+	ret.fuel = fuel
 	return ret
 }
 

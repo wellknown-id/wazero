@@ -90,6 +90,16 @@ type (
 		memoryWait64TrampolineAddress *byte
 		// memoryNotifyTrampolineAddress holds the address of the memory_notify trampoline function.
 		memoryNotifyTrampolineAddress *byte
+		// fuel holds the remaining fuel for deterministic CPU metering.
+		// Compiled code decrements this at function entries and loop back-edges.
+		// When fuel drops below zero, the compiled code exits with ExitCodeFuelExhausted.
+		// A value of 0 means fuel metering is disabled for this execution.
+		//
+		// We use int64 (not uint64) so that the exhaustion check in generated native
+		// code is a simple signed comparison: sub + b.lt is a single conditional
+		// branch on both amd64 and arm64, whereas unsigned underflow detection would
+		// require an extra carry/overflow check.
+		fuel int64
 	}
 )
 
@@ -221,6 +231,22 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 	if len(paramResultStack) > 0 {
 		paramResultPtr = &paramResultStack[0]
 	}
+
+	// Initialize fuel for deterministic CPU metering.
+	// Priority: FuelController in context > compiled module fuel config.
+	// Declared before defer so the closure captures these for consumption reporting on trap.
+	var fuelCtrl experimental.FuelController
+	var initialFuel int64
+	if fc, ok := ctx.Value(expctxkeys.FuelControllerKey{}).(experimental.FuelController); ok && fc != nil {
+		fuelCtrl = fc
+		initialFuel = fc.Budget()
+	} else if p.parent.fuelEnabled {
+		initialFuel = p.parent.fuel
+	}
+	if initialFuel > 0 {
+		c.execCtx.fuel = initialFuel
+	}
+
 	defer func() {
 		r := recover()
 		if s, ok := r.(*snapshot); ok {
@@ -281,6 +307,13 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		}
 
 		if err != nil {
+			// Report fuel consumption to the FuelController even on error/trap.
+			if fuelCtrl != nil && initialFuel > 0 {
+				consumed := initialFuel - c.execCtx.fuel
+				if consumed > 0 {
+					fuelCtrl.Consumed(consumed)
+				}
+			}
 			// Ensures that we can reuse this callEngine even after an error.
 			c.execCtx.exitCode = wazevoapi.ExitCodeOK
 		}
@@ -298,6 +331,13 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 	for {
 		switch ec := c.execCtx.exitCode; ec & wazevoapi.ExitCodeMask {
 		case wazevoapi.ExitCodeOK:
+			// Report fuel consumption to the FuelController if active.
+			if fuelCtrl != nil && initialFuel > 0 {
+				consumed := initialFuel - c.execCtx.fuel
+				if consumed > 0 {
+					fuelCtrl.Consumed(consumed)
+				}
+			}
 			return nil
 		case wazevoapi.ExitCodeGrowStack:
 			oldsp := uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall))

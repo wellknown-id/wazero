@@ -117,6 +117,10 @@ Turn prototypes into an experimental runtime that can be evaluated seriously.
 
 This order prioritizes containment and deterministic limits before more invasive coroutine-style execution work.
 
+### Future optimizations
+
+- **SSA `ExitIfTrue` instruction for fuel checks**: Consider adding a first-class `ExitIfTrue(cond, exitCode)` SSA opcode to replace the current branch-to-exit-block pattern used by fuel metering at function entries and loop back-edges. A dedicated opcode would allow the SSA optimizer to reason about fuel check elimination at compile time (e.g., coalescing consecutive checks, hoisting checks out of inner loops with bounded iteration counts). This is not urgent since the current `insertFuelCheck` pattern (load/sub/store/cmp/branch-to-exit) is ~5 native instructions and already efficient, but the optimization would reduce code size and improve instruction cache utilization in fuel-heavy workloads.
+
 ## Main risks and tradeoffs
 
 - Go runtime fault handling is platform-sensitive and may limit portability.

@@ -189,6 +189,7 @@ func NewRuntimeWithConfig(ctx context.Context, rConfig RuntimeConfig) Runtime {
 		storeCustomSections:   config.storeCustomSections,
 		ensureTermination:     config.ensureTermination,
 		secureMode:            config.secureMode,
+		fuel:                  config.fuel,
 	}
 }
 
@@ -212,6 +213,7 @@ type runtime struct {
 
 	ensureTermination bool
 	secureMode        bool
+	fuel              int64
 }
 
 // Module implements Runtime.Module.
@@ -262,7 +264,7 @@ func (r *runtime) CompileModule(ctx context.Context, binary []byte) (CompiledMod
 		return nil, err
 	}
 	internal.AssignModuleID(binary, listeners, r.ensureTermination)
-	if err = r.store.Engine.CompileModule(ctx, internal, listeners, r.ensureTermination); err != nil {
+	if err = r.store.Engine.CompileModule(ctx, internal, listeners, r.ensureTermination, r.fuel); err != nil {
 		return nil, err
 	}
 	return c, nil

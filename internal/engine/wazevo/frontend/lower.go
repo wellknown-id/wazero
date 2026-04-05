@@ -147,6 +147,10 @@ func (l *loweringState) ctrlPeekAt(n int) (ret *controlFrame) {
 func (c *Compiler) lowerBody(entryBlk ssa.BasicBlock) {
 	c.ssaBuilder.Seal(entryBlk)
 
+	if c.fuelEnabled {
+		c.insertFuelCheck()
+	}
+
 	if c.needListener {
 		c.callListenerBefore()
 	}
@@ -1360,6 +1364,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 			builder.AllocateInstruction().
 				AsCallIndirect(checkModuleExitCodePtr, &c.checkModuleExitCodeSig, args).
 				Insert(builder)
+		}
+
+		if c.fuelEnabled {
+			c.insertFuelCheck()
 		}
 	case wasm.OpcodeIf:
 		bt := c.readBlockType()
@@ -4356,5 +4364,46 @@ func (c *Compiler) boundsCheckInMemory(memLen, offset, size ssa.Value) {
 		Return()
 	builder.AllocateInstruction().
 		AsExitIfTrueWithCode(c.execCtxPtrValue, cmp, wazevoapi.ExitCodeMemoryOutOfBounds).
+		Insert(builder)
+}
+
+// insertFuelCheck emits SSA instructions to decrement the fuel counter and
+// exit with ExitCodeFuelExhausted if the counter drops below zero.
+//
+// The generated code is equivalent to:
+//
+//	fuel := execCtx.fuel       // load i64 from known offset
+//	fuel = fuel - 1            // decrement
+//	execCtx.fuel = fuel        // store back
+//	if fuel < 0 { exit(FuelExhausted) }
+//
+// This uses signed comparison: int64 underflow wraps to a negative value,
+// which is a simple b.lt test on both amd64 and arm64.
+func (c *Compiler) insertFuelCheck() {
+	builder := c.ssaBuilder
+
+	// Load current fuel from executionContext.
+	fuel := builder.AllocateInstruction().
+		AsLoad(c.execCtxPtrValue,
+			wazevoapi.ExecutionContextOffsetFuel.U32(),
+			ssa.TypeI64,
+		).Insert(builder).Return()
+
+	// Subtract 1.
+	one := builder.AllocateInstruction().AsIconst64(1).Insert(builder).Return()
+	decremented := builder.AllocateInstruction().AsIsub(fuel, one).Insert(builder).Return()
+
+	// Store decremented fuel back to executionContext.
+	builder.AllocateInstruction().
+		AsStore(ssa.OpcodeStore, decremented, c.execCtxPtrValue, wazevoapi.ExecutionContextOffsetFuel.U32()).
+		Insert(builder)
+
+	// Check: if decremented < 0, exit with FuelExhausted.
+	zero := builder.AllocateInstruction().AsIconst64(0).Insert(builder).Return()
+	cmp := builder.AllocateInstruction().
+		AsIcmp(decremented, zero, ssa.IntegerCmpCondSignedLessThan).
+		Insert(builder).Return()
+	builder.AllocateInstruction().
+		AsExitIfTrueWithCode(c.execCtxPtrValue, cmp, wazevoapi.ExitCodeFuelExhausted).
 		Insert(builder)
 }

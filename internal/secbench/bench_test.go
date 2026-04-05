@@ -176,5 +176,100 @@ func BenchmarkGuardPageAllocatorGrow(b *testing.B) {
 	}
 }
 
+// BenchmarkFuelOverhead measures the performance impact of fuel metering on
+// compute-bound workloads. By comparing execution with and without fuel enabled,
+// we can quantify the overhead of the inline fuel checks.
+func BenchmarkFuelOverhead(b *testing.B) {
+	facWasm := loadTestWasm(b, "fac.wasm")
+
+	for _, tc := range []struct {
+		name string
+		fuel int64
+	}{
+		{"no_fuel", 0},                // No fuel metering — baseline
+		{"fuel_1M", 1_000_000},        // Generous budget — won't exhaust
+		{"fuel_100M", 100_000_000},    // Very generous
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			ctx := context.Background()
+			config := wazero.NewRuntimeConfig().WithFuel(tc.fuel)
+			r := wazero.NewRuntimeWithConfig(ctx, config)
+			defer r.Close(ctx)
+
+			mod, err := r.InstantiateWithConfig(ctx, facWasm,
+				wazero.NewModuleConfig().WithStartFunctions())
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			fac := mod.ExportedFunction("fac-ssa")
+			if fac == nil {
+				b.Fatal("fac-ssa not exported")
+			}
+
+			b.ResetTimer()
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				results, err := fac.Call(ctx, 20)
+				if err != nil {
+					b.Fatal(err)
+				}
+				_ = results
+			}
+		})
+	}
+}
+
+// BenchmarkFuelOverheadWithController measures fuel overhead when using
+// a FuelController from the experimental package.
+func BenchmarkFuelOverheadWithController(b *testing.B) {
+	facWasm := loadTestWasm(b, "fac.wasm")
+
+	for _, tc := range []struct {
+		name   string
+		budget int64
+	}{
+		{"simple_1M", 1_000_000},
+		{"aggregating_1M", 1_000_000},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			ctx := context.Background()
+			// Enable fuel in the runtime config (any non-zero value enables compilation).
+			config := wazero.NewRuntimeConfig().WithFuel(1)
+			r := wazero.NewRuntimeWithConfig(ctx, config)
+			defer r.Close(ctx)
+
+			mod, err := r.InstantiateWithConfig(ctx, facWasm,
+				wazero.NewModuleConfig().WithStartFunctions())
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			fac := mod.ExportedFunction("fac-ssa")
+			if fac == nil {
+				b.Fatal("fac-ssa not exported")
+			}
+
+			b.ResetTimer()
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				var fc experimental.FuelController
+				if tc.name == "aggregating_1M" {
+					parent := experimental.NewSimpleFuelController(10_000_000)
+					fc = experimental.NewAggregatingFuelController(parent, tc.budget)
+				} else {
+					fc = experimental.NewSimpleFuelController(tc.budget)
+				}
+				callCtx := experimental.WithFuelController(ctx, fc)
+				results, err := fac.Call(callCtx, 20)
+				if err != nil {
+					b.Fatal(err)
+				}
+				_ = results
+			}
+		})
+	}
+}
+
 // compile-time interface checks
 var _ experimental.MemoryAllocator = secmem.GuardPageAllocator{}
