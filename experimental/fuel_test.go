@@ -3,6 +3,8 @@ package experimental
 import (
 	"context"
 	"testing"
+
+	"github.com/tetratelabs/wazero/internal/expctxkeys"
 )
 
 func TestSimpleFuelController_Budget(t *testing.T) {
@@ -142,5 +144,79 @@ func TestWithFuelController_Override(t *testing.T) {
 	got := GetFuelController(ctx)
 	if got.Budget() != 200 {
 		t.Fatalf("Budget() = %d, want 200 (overridden)", got.Budget())
+	}
+}
+
+func TestAddFuel_NoAccessor(t *testing.T) {
+	ctx := context.Background()
+	err := AddFuel(ctx, 100)
+	if err != ErrNoFuelAccessor {
+		t.Fatalf("AddFuel without accessor: got %v, want ErrNoFuelAccessor", err)
+	}
+}
+
+func TestRemainingFuel_NoAccessor(t *testing.T) {
+	ctx := context.Background()
+	remaining, err := RemainingFuel(ctx)
+	if err != ErrNoFuelAccessor {
+		t.Fatalf("RemainingFuel without accessor: got %v, want ErrNoFuelAccessor", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("RemainingFuel without accessor: got %d, want 0", remaining)
+	}
+}
+
+func TestAddFuel_WithAccessor(t *testing.T) {
+	var fuel int64 = 1000
+	ctx := context.WithValue(context.Background(),
+		expctxkeys.FuelAccessorKey{},
+		&expctxkeys.FuelAccessor{Ptr: &fuel},
+	)
+
+	// Check initial remaining.
+	remaining, err := RemainingFuel(ctx)
+	if err != nil {
+		t.Fatalf("RemainingFuel: %v", err)
+	}
+	if remaining != 1000 {
+		t.Fatalf("RemainingFuel = %d, want 1000", remaining)
+	}
+
+	// Add fuel.
+	if err := AddFuel(ctx, 500); err != nil {
+		t.Fatalf("AddFuel: %v", err)
+	}
+	remaining, _ = RemainingFuel(ctx)
+	if remaining != 1500 {
+		t.Fatalf("after AddFuel(500): remaining = %d, want 1500", remaining)
+	}
+
+	// The underlying fuel field was mutated.
+	if fuel != 1500 {
+		t.Fatalf("underlying fuel = %d, want 1500", fuel)
+	}
+}
+
+func TestAddFuel_Negative(t *testing.T) {
+	var fuel int64 = 1000
+	ctx := context.WithValue(context.Background(),
+		expctxkeys.FuelAccessorKey{},
+		&expctxkeys.FuelAccessor{Ptr: &fuel},
+	)
+
+	// Debit fuel.
+	if err := AddFuel(ctx, -300); err != nil {
+		t.Fatalf("AddFuel(-300): %v", err)
+	}
+	if fuel != 700 {
+		t.Fatalf("after debit: fuel = %d, want 700", fuel)
+	}
+
+	// Debit below zero (will cause trap at next check).
+	if err := AddFuel(ctx, -800); err != nil {
+		t.Fatalf("AddFuel(-800): %v", err)
+	}
+	if fuel != -100 {
+		t.Fatalf("after over-debit: fuel = %d, want -100", fuel)
 	}
 }

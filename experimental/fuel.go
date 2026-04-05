@@ -2,6 +2,7 @@ package experimental
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 
 	"github.com/tetratelabs/wazero/internal/expctxkeys"
@@ -56,6 +57,63 @@ func WithFuelController(ctx context.Context, fc FuelController) context.Context 
 func GetFuelController(ctx context.Context) FuelController {
 	fc, _ := ctx.Value(expctxkeys.FuelControllerKey{}).(FuelController)
 	return fc
+}
+
+// ErrNoFuelAccessor is returned by AddFuel and RemainingFuel when the
+// context does not contain a fuel accessor. This happens when fuel metering
+// is not enabled or when the function is called outside a host function
+// callback (i.e., outside Wasm execution).
+var ErrNoFuelAccessor = errors.New("no fuel accessor in context: fuel not enabled or not in a host function")
+
+// AddFuel adds the given amount of fuel to the currently executing module's
+// fuel budget. This is intended to be called from within a host function
+// (api.GoFunction or api.GoModuleFunction) to recharge fuel mid-execution.
+//
+// The amount may be negative to debit fuel. If the resulting fuel counter
+// drops below zero, the module will trap with ErrRuntimeFuelExhausted at
+// the next fuel check (function entry or loop back-edge).
+//
+// Returns ErrNoFuelAccessor if the context does not have an active fuel
+// accessor (fuel not enabled, or called outside a host function callback).
+//
+// Example (from a host function):
+//
+//	func myHostFn(ctx context.Context, mod api.Module, stack []uint64) {
+//	    // Add 10,000 more fuel units to the executing module.
+//	    if err := experimental.AddFuel(ctx, 10_000); err != nil {
+//	        // fuel not enabled — handle or ignore
+//	    }
+//	}
+func AddFuel(ctx context.Context, amount int64) error {
+	accessor, _ := ctx.Value(expctxkeys.FuelAccessorKey{}).(*expctxkeys.FuelAccessor)
+	if accessor == nil || accessor.Ptr == nil {
+		return ErrNoFuelAccessor
+	}
+	*accessor.Ptr += amount
+	return nil
+}
+
+// RemainingFuel returns the remaining fuel for the currently executing module.
+// This is intended to be called from within a host function to inspect how
+// much fuel the module has left before it will exhaust.
+//
+// Returns (0, ErrNoFuelAccessor) if the context does not have an active fuel
+// accessor.
+//
+// Example (from a host function):
+//
+//	func myHostFn(ctx context.Context, mod api.Module, stack []uint64) {
+//	    remaining, err := experimental.RemainingFuel(ctx)
+//	    if err == nil && remaining < 1000 {
+//	        experimental.AddFuel(ctx, 10_000) // recharge
+//	    }
+//	}
+func RemainingFuel(ctx context.Context) (int64, error) {
+	accessor, _ := ctx.Value(expctxkeys.FuelAccessorKey{}).(*expctxkeys.FuelAccessor)
+	if accessor == nil || accessor.Ptr == nil {
+		return 0, ErrNoFuelAccessor
+	}
+	return *accessor.Ptr, nil
 }
 
 // SimpleFuelController provides a fixed budget per call with

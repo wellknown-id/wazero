@@ -66,7 +66,7 @@ The wazero `Store`, `Engine`, compilation caches, and type registries are shared
 
 **Current mitigation**: `WithCloseOnContextDone(true)` inserts periodic exit-code checks at loop headers and function entries. Combined with `context.WithTimeout`, this terminates runaway modules. However, this relies on wall-clock time, not deterministic instruction counting.
 
-**Planned mitigation (Phase 2)**: Deterministic fuel metering will inject fuel counters at function entries and loop back-edges. Fuel exhaustion triggers `ErrRuntimeFuelExhausted` without relying on wall-clock timing.
+**Mitigation (fuel metering, compiler path)**: Deterministic fuel metering injects fuel counters at function entries and loop back-edges. Fuel exhaustion triggers `ErrRuntimeFuelExhausted` without relying on wall-clock timing. Host functions can inspect remaining fuel via `experimental.RemainingFuel()` and recharge via `experimental.AddFuel()`. Multi-tenant budgets are supported via `FuelController` and `AggregatingFuelController`.
 
 ### T3 — Resource exhaustion (memory growth)
 
@@ -117,7 +117,7 @@ The wazero `Store`, `Engine`, compilation caches, and type registries are shared
 | Software bounds checks | ✅ | ✅ | ✅ | ✅ |
 | Hardware memory isolation (guard pages) | ✅ secure mode | ✅ secure mode | ✅ secure mode | ❌ software fallback |
 | Context-based termination | ✅ | ✅ | ✅ | ✅ |
-| Deterministic fuel metering | ❌ Phase 2 | ❌ Phase 2 | ❌ Phase 2 | ❌ Phase 2 |
+| Deterministic fuel metering | ✅ secure mode | ✅ secure mode | ✅ secure mode | ❌ interpreter unsupported |
 | WASI default-deny filesystem | ❌ Phase 4 | ❌ Phase 4 | ❌ Phase 4 | ❌ Phase 4 |
 | WASI network egress policy | ❌ Phase 4 | ❌ Phase 4 | ❌ Phase 4 | ❌ Phase 4 |
 | Clock coarsening | ❌ Phase 4 | ❌ Phase 4 | ❌ Phase 4 | ❌ Phase 4 |

@@ -245,6 +245,10 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 	}
 	if initialFuel > 0 {
 		c.execCtx.fuel = initialFuel
+		// Inject a FuelAccessor into the context so that host functions called
+		// during this execution can inspect and modify the fuel counter via
+		// experimental.AddFuel / experimental.RemainingFuel.
+		ctx = context.WithValue(ctx, expctxkeys.FuelAccessorKey{}, &expctxkeys.FuelAccessor{Ptr: &c.execCtx.fuel})
 	}
 
 	defer func() {

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/tetratelabs/wazero"
+	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/experimental"
 	"github.com/tetratelabs/wazero/internal/platform"
 	"github.com/tetratelabs/wazero/internal/testing/binaryencoding"
@@ -206,4 +207,134 @@ func loadFuelTestdata(name string) ([]byte, error) {
 	_, f, _, _ := runtime.Caller(0)
 	root := filepath.Join(filepath.Dir(f), "..", "..", "..")
 	return os.ReadFile(filepath.Join(root, "testdata", name))
+}
+
+// TestFuelAddFuelFromHostFunction verifies that a host function can add
+// fuel mid-execution via experimental.AddFuel, allowing an otherwise
+// fuel-exhausting module to complete.
+func TestFuelAddFuelFromHostFunction(t *testing.T) {
+	if !platform.CompilerSupported() {
+		t.Skip("fuel metering requires the compiler engine")
+	}
+
+	ctx := context.Background()
+	// Use a small fuel budget that the loop alone would exhaust.
+	config := wazero.NewRuntimeConfig().WithFuel(50)
+	r := wazero.NewRuntimeWithConfig(ctx, config)
+	defer r.Close(ctx)
+
+	// Host function that adds fuel.
+	rechargeFn := func(callCtx context.Context, mod api.Module) {
+		err := experimental.AddFuel(callCtx, 100)
+		if err != nil {
+			panic("AddFuel failed: " + err.Error())
+		}
+	}
+
+	_, err := r.NewHostModuleBuilder("env").
+		NewFunctionBuilder().WithFunc(rechargeFn).Export("recharge").
+		Instantiate(ctx)
+	require.NoError(t, err)
+
+	// Build a Wasm module:
+	//   (import "env" "recharge" (func))
+	//   (func (export "run")
+	//     call $recharge    ;; refills fuel
+	//     call $recharge    ;; refills again
+	//   )
+	runWasm := binaryencoding.EncodeModule(&wasm.Module{
+		TypeSection: []wasm.FunctionType{{}},
+		ImportSection: []wasm.Import{
+			{Module: "env", Name: "recharge", Type: wasm.ExternTypeFunc, DescFunc: 0},
+		},
+		FunctionSection: []wasm.Index{0},
+		ExportSection: []wasm.Export{
+			{Name: "run", Type: wasm.ExternTypeFunc, Index: 1},
+		},
+		CodeSection: []wasm.Code{
+			{Body: []byte{
+				wasm.OpcodeCall, 0, // call $recharge (index 0 = import)
+				wasm.OpcodeCall, 0, // call $recharge again
+				wasm.OpcodeEnd,
+			}},
+		},
+	})
+
+	mod, err := r.InstantiateWithConfig(ctx, runWasm,
+		wazero.NewModuleConfig().WithName("addfuel-test").WithStartFunctions())
+	require.NoError(t, err)
+
+	fn := mod.ExportedFunction("run")
+	require.NotNil(t, fn)
+
+	// Should succeed because the host function recharges fuel.
+	_, err = fn.Call(ctx)
+	require.NoError(t, err)
+}
+
+// TestFuelRemainingFuelFromHostFunction verifies that a host function can
+// inspect remaining fuel via experimental.RemainingFuel.
+func TestFuelRemainingFuelFromHostFunction(t *testing.T) {
+	if !platform.CompilerSupported() {
+		t.Skip("fuel metering requires the compiler engine")
+	}
+
+	ctx := context.Background()
+	config := wazero.NewRuntimeConfig().WithFuel(10_000)
+	r := wazero.NewRuntimeWithConfig(ctx, config)
+	defer r.Close(ctx)
+
+	var capturedRemaining int64
+	inspectFn := func(callCtx context.Context, mod api.Module) {
+		remaining, err := experimental.RemainingFuel(callCtx)
+		if err != nil {
+			panic("RemainingFuel failed: " + err.Error())
+		}
+		capturedRemaining = remaining
+	}
+
+	_, err := r.NewHostModuleBuilder("env").
+		NewFunctionBuilder().WithFunc(inspectFn).Export("inspect").
+		Instantiate(ctx)
+	require.NoError(t, err)
+
+	// Build a Wasm module:
+	//   (import "env" "inspect" (func))
+	//   (func (export "run") call $inspect)
+	inspectWasm := binaryencoding.EncodeModule(&wasm.Module{
+		TypeSection: []wasm.FunctionType{{}},
+		ImportSection: []wasm.Import{
+			{Module: "env", Name: "inspect", Type: wasm.ExternTypeFunc, DescFunc: 0},
+		},
+		FunctionSection: []wasm.Index{0},
+		ExportSection: []wasm.Export{
+			{Name: "run", Type: wasm.ExternTypeFunc, Index: 1},
+		},
+		CodeSection: []wasm.Code{
+			{Body: []byte{
+				wasm.OpcodeCall, 0, // call $inspect
+				wasm.OpcodeEnd,
+			}},
+		},
+	})
+
+	mod, err := r.InstantiateWithConfig(ctx, inspectWasm,
+		wazero.NewModuleConfig().WithName("remaining-test").WithStartFunctions())
+	require.NoError(t, err)
+
+	fn := mod.ExportedFunction("run")
+	require.NotNil(t, fn)
+
+	_, err = fn.Call(ctx)
+	require.NoError(t, err)
+
+	// The host function should have seen some reduced fuel (after function
+	// entry costs). It should be strictly less than the initial budget.
+	if capturedRemaining <= 0 {
+		t.Fatalf("expected positive remaining fuel, got %d", capturedRemaining)
+	}
+	if capturedRemaining >= 10_000 {
+		t.Fatalf("remaining fuel should be less than initial budget, got %d", capturedRemaining)
+	}
+	t.Logf("remaining fuel when host function ran: %d / 10000", capturedRemaining)
 }
