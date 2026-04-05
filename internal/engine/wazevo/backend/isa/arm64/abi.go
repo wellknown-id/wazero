@@ -19,11 +19,12 @@ var regInfo = &regalloc.RegisterInfo{
 	AllocatableRegisters: [regalloc.NumRegType][]regalloc.RealReg{
 		// We don't allocate:
 		// - x18: Reserved by the macOS: https://developer.apple.com/documentation/xcode/writing-arm64-code-for-apple-platforms#Respect-the-purpose-of-specific-CPU-registers
+		// - x25: Reserved to hold executionContext pointer for Linux/arm64 SIGSEGV trap recovery.
 		// - x28: Reserved by Go runtime.
 		// - x27(=tmpReg): because of the reason described on tmpReg.
 		regalloc.RegTypeInt: {
 			x8, x9, x10, x11, x12, x13, x14, x15,
-			x16, x17, x19, x20, x21, x22, x23, x24, x25,
+			x16, x17, x19, x20, x21, x22, x23, x24,
 			x26, x29, x30,
 			// These are the argument/return registers. Less preferred in the allocation.
 			x7, x6, x5, x4, x3, x2, x1, x0,

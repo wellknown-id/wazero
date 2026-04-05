@@ -10,12 +10,14 @@ TEXT ·entrypoint(SB), NOSPLIT|NOFRAME, $0-48
 	MOVD executionContextPtr+16(FP), R0
 	MOVD moduleContextPtr+24(FP), R1
 	MOVD paramResultSlicePtr+32(FP), R19
+	MOVD R0, R25
 	MOVD goAllocatedStackSlicePtr+40(FP), R26
 	JMP  (R27)
 
 TEXT ·afterGoFunctionCallEntrypoint(SB), NOSPLIT|NOFRAME, $0-32
 	MOVD goCallReturnAddress+0(FP), R20
 	MOVD executionContextPtr+8(FP), R0
+	MOVD R0, R25
 	MOVD stackPointer+16(FP), R19
 
 	// Save the current FP(R29), SP and LR(R30) into the wazevo.executionContext (stored in R0).

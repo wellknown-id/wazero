@@ -29,7 +29,8 @@ var (
 	// goAllocatedStackPtr is not used in the epilogue.
 	goAllocatedStackPtr = x26VReg
 	// paramResultSliceCopied is not used in the epilogue.
-	paramResultSliceCopied = x25VReg
+	// x18 is not allocatable, so this won't conflict with compiled function bodies.
+	paramResultSliceCopied = x18VReg
 	// tmpRegVReg is not used in the epilogue.
 	functionExecutable = x24VReg
 )
