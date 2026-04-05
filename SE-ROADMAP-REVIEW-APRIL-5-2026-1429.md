@@ -24,6 +24,10 @@
 - **No end-to-end integration tests** for memory fault-to-Wasm-trap translation (platform tests use `debug.SetPanicOnFault` but don't verify the full Wasm trap path)
 - **Interpreter lacks fuel support** — fuel metering is compiler-only
 
+### Update since last review (April 5, second review)
+
+A second review was conducted after the initial assessment. **No new progress was found** — all percentages remain unchanged. The prior review's conclusions were confirmed through deeper investigation of each workstream's implementation files, tests, and benchmarks.
+
 ### Update since last review (April 5)
 
 - Fuel metering moved from ~70% to ~85% — all tests and benchmarks from `phase-2-tasks.md` are now implemented and passing. This was the most urgent gap at the time of the prior review.
