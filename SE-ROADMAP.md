@@ -34,7 +34,7 @@ Establish the baseline needed to evaluate all later work.
 
 - Document the threat model for untrusted tenant code, host functions, and shared infrastructure.
 - Define supported and unsupported security properties for each runtime mode and platform.
-- Identify the wazero subsystems that will change first: memory management, compiler backends, trap handling, and WASI-facing host interfaces.
+- Identify the wazero subsystems that will change first: memory management, compiler backends, and trap handling.
 - Define new error and trap categories for memory faults, fuel exhaustion, policy denials, and async yield/resume transitions.
 - Add benchmark and regression baselines for compile time, execution time, memory growth, and trap overhead.
 
@@ -85,18 +85,16 @@ Introduce cooperative suspension for Wasm execution that waits on host-side asyn
 
 ### 5. Zero-trust host interface
 
-Harden the default host surface exposed to tenant modules.
+Harden the runtime by remaining completely unopinionated about system functionality.
 
-- Introduce a default-deny filesystem model based on synthetic or tightly scoped virtual filesystems.
-- Enforce path normalization and traversal protection before requests reach the underlying OS.
-- Route network access through an explicit egress policy layer that can decide by tenant, destination, and port.
-- Reduce timer precision or inject jitter for WASI clock APIs to limit high-resolution timing side channels.
-- Ensure policy denials are surfaced as explicit runtime errors instead of silently falling back to host behavior.
+- Remove all WASI implementation code, OS dependencies, and system-level `Context` structures from the core engine.
+- Establish an architecture where embedders are strictly responsible for providing any required host interfaces, including filesystems, network egress policies, and clock resolution controls.
+- Explicitly fail-closed by removing platform-specific adapter layers and system wrappers that bypass host application policies.
 
 **Exit criteria**
 
-- Filesystem and network access are mediated through explicit policy.
-- WASI clock behavior is intentionally constrained in secure mode.
+- The core engine contains absolutely zero system or OS coupling.
+- WASI layers (P1/P2) must be supplied strictly externally by the embedder.
 
 ### 6. Validation, hardening, and operational readiness
 
@@ -113,7 +111,7 @@ Turn prototypes into an experimental runtime that can be evaluated seriously.
 1. Foundation and threat model
 2. Hardware-assisted memory sandboxing prototype
 3. Deterministic CPU metering
-4. Hardened host interface basics
+4. Pure core engine (WASI decoupling)
 5. Async yield and resume
 6. Broader validation and platform expansion
 
@@ -128,7 +126,7 @@ This order prioritizes containment and deterministic limits before more invasive
 - Go runtime fault handling is platform-sensitive and may limit portability.
 - Large virtual memory reservations and guard-page strategies may behave differently across kernels and operating systems.
 - Fuel injection and async stack handling will increase compiler complexity, compile time, and runtime overhead.
-- Security-oriented defaults may reduce compatibility with existing WASI expectations.
+- Strict uncoupling from system APIs means embedders must meticulously provide their own WASI or host functionality.
 - Some features may remain compiler-only, leaving the interpreter with a different security profile.
 
 ## Near-term deliverables
@@ -136,5 +134,5 @@ This order prioritizes containment and deterministic limits before more invasive
 - A written threat model and support matrix for secure mode.
 - A Linux-first memory sandboxing prototype.
 - A compiler prototype with fuel metering and resource exhaustion traps.
-- A hardened WASI policy surface for filesystem, networking, and time.
+- A minimalist, pure WebAssembly core engine completely decoupled from system, OS, and WASI dependencies.
 - An experimental status report describing what is safe, what is incomplete, and what remains research.
