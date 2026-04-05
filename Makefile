@@ -309,13 +309,10 @@ checksum_txt          := dist/wazero_$(VERSION)_checksums.txt
 go-arch = $(if $(findstring amd64,$1),amd64,arm64)
 go-os   = $(if $(findstring .exe,$1),windows,$(if $(findstring linux,$1),linux,darwin))
 
-build/wazero_%/wazero:
+build/wazero_%/libwazero.a:
 	$(call go-build,$@,$<)
 
-build/wazero_%/wazero.exe:
-	$(call go-build,$@,$<)
-
-dist/wazero_$(VERSION)_%.tar.gz: build/wazero_%/wazero
+dist/wazero_$(VERSION)_%.tar.gz: build/wazero_%/libwazero.a
 	@echo tar.gz "tarring $@"
 	@mkdir -p $(@D)
 # On Windows, we pass the special flag `--mode='+rx' to ensure that we set the executable flag.
@@ -328,11 +325,11 @@ define go-build
 	@# $(go:go=) removes the trailing 'go', so we can insert cross-build variables
 	@$(go:go=) CGO_ENABLED=0 GOOS=$(call go-os,$1) GOARCH=$(call go-arch,$1) go build \
 		-ldflags "-s -w -X github.com/tetratelabs/wazero/internal/version.version=$(VERSION)" \
-		-o $1 $2 ./cmd/wazero
+		-buildmode=archive -o $1 .
 	@echo build "ok"
 endef
 
-dist/wazero_$(VERSION)_%.zip: build/wazero_%/wazero.exe
+dist/wazero_$(VERSION)_%.zip: build/wazero_%/libwazero.a
 	@echo zip "zipping $@"
 	@mkdir -p $(@D)
 	@zip -qj $@ $<
