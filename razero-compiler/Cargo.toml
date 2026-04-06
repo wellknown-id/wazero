@@ -1,0 +1,12 @@
+[package]
+name = "razero-compiler"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+razero-wasm.workspace = true

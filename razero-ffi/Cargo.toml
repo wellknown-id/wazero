@@ -1,0 +1,13 @@
+[package]
+name = "razero-ffi"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[dependencies]
+razero.workspace = true

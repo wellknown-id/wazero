@@ -1,0 +1,13 @@
+[package]
+name = "razero-decoder"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+razero = { workspace = true }
+razero-wasm = { workspace = true }

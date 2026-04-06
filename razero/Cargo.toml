@@ -1,0 +1,9 @@
+[package]
+name = "razero"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+version.workspace = true
+
+[lib]
+path = "src/lib.rs"

@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = [
+    "razero",
+    "razero-wasm",
+    "razero-decoder",
+    "razero-interp",
+    "razero-compiler",
+    "razero-platform",
+    "razero-secmem",
+    "razero-ffi",
+]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+version = "0.0.0"
+
+[workspace.dependencies]
+razero = { path = "razero", version = "0.0.0" }
+razero-wasm = { path = "razero-wasm", version = "0.0.0" }
+razero-decoder = { path = "razero-decoder", version = "0.0.0" }
+razero-interp = { path = "razero-interp", version = "0.0.0" }
+razero-compiler = { path = "razero-compiler", version = "0.0.0" }
+razero-platform = { path = "razero-platform", version = "0.0.0" }
+razero-secmem = { path = "razero-secmem", version = "0.0.0" }
+razero-ffi = { path = "razero-ffi", version = "0.0.0" }
