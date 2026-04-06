@@ -22,10 +22,8 @@ pub use api::{
 };
 pub use assemblyscript::{
     host_module_builder as assemblyscript_host_module_builder,
-    ABORT_NAME as ASSEMBLYSCRIPT_ABORT_NAME,
-    MODULE_NAME as ASSEMBLYSCRIPT_MODULE_NAME,
-    SEED_NAME as ASSEMBLYSCRIPT_SEED_NAME,
-    TRACE_NAME as ASSEMBLYSCRIPT_TRACE_NAME,
+    ABORT_NAME as ASSEMBLYSCRIPT_ABORT_NAME, MODULE_NAME as ASSEMBLYSCRIPT_MODULE_NAME,
+    SEED_NAME as ASSEMBLYSCRIPT_SEED_NAME, TRACE_NAME as ASSEMBLYSCRIPT_TRACE_NAME,
 };
 pub use builder::{HostFunction, HostFunctionBuilder, HostModuleBuilder};
 pub use cache::{CompilationCache, InMemoryCompilationCache};
@@ -35,7 +33,7 @@ pub use experimental::{
     add_fuel, get_close_notifier, get_fuel_controller, get_memory_allocator, get_snapshotter,
     get_yielder, remaining_fuel, with_close_notifier, with_fuel_controller,
     with_function_listener_factory, with_memory_allocator, with_snapshotter, with_yielder,
-    AggregatingFuelController, CloseNotifyFn, CloseNotifier, DefaultMemoryAllocator,
+    AggregatingFuelController, CloseNotifier, CloseNotifyFn, DefaultMemoryAllocator,
     FuelController, FunctionListener, FunctionListenerFactory, FunctionListenerFactoryFn,
     LinearMemory, MemoryAllocator, Resumer, SimpleFuelController, Snapshot, Snapshotter, Table,
     YieldError, Yielder,

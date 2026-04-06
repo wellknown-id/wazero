@@ -3,7 +3,7 @@
 use crate::const_expr::{decode_const_expr_with_extended_const, read_var_u32_raw};
 use crate::decoder::Decoder;
 use crate::errors::{require_feature, DecodeError, DecodeResult};
-use razero::CoreFeatures;
+use razero_features::CoreFeatures;
 use razero_wasm::module::DataSegment;
 
 const DATA_SEGMENT_PREFIX_ACTIVE: u32 = 0x0;
@@ -75,7 +75,7 @@ pub fn decode_data_segment_with_extended_const(
 mod tests {
     use super::decode_data_segment;
     use crate::decoder::Decoder;
-    use razero::CoreFeatures;
+    use razero_features::CoreFeatures;
     use razero_wasm::const_expr::ConstExpr;
     use razero_wasm::instruction::{OPCODE_END, OPCODE_I32_CONST};
     use razero_wasm::module::DataSegment;

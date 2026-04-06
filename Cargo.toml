@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "razero-features",
     "razero",
     "razero-wasm",
     "razero-decoder",
@@ -18,6 +19,7 @@ publish = false
 version = "0.0.0"
 
 [workspace.dependencies]
+razero-features = { path = "razero-features", version = "0.0.0" }
 razero = { path = "razero", version = "0.0.0" }
 razero-wasm = { path = "razero-wasm", version = "0.0.0" }
 razero-decoder = { path = "razero-decoder", version = "0.0.0" }

@@ -119,7 +119,19 @@ pub fn lower_abi_params(abi: &FunctionAbi, params: &[VReg]) -> Vec<Amd64Instr> {
     let mut out = Vec::new();
     for (ssa_reg, arg) in params.iter().zip(&abi.args) {
         if arg.kind == crate::backend::AbiArgKind::Reg {
-            out.push(Amd64Instr::mov_rr(arg.reg, *ssa_reg, arg.ty.is_int()));
+            if arg.ty.is_int() {
+                out.push(Amd64Instr::mov_rr(arg.reg, *ssa_reg, arg.ty.bits() == 64));
+            } else {
+                out.push(Amd64Instr::xmm_unary_rm_r(
+                    match arg.ty {
+                        crate::ssa::Type::F32 => SseOpcode::Movss,
+                        crate::ssa::Type::F64 => SseOpcode::Movsd,
+                        _ => SseOpcode::Movdqu,
+                    },
+                    Operand::reg(arg.reg),
+                    *ssa_reg,
+                ));
+            }
         } else if arg.ty.is_int() {
             out.push(Amd64Instr::mov64_mr(
                 Operand::mem(AddressMode::imm_rbp((arg.offset + 16) as u32)),

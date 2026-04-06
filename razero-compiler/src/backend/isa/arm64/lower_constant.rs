@@ -102,6 +102,9 @@ mod tests {
     fn type_driven_lowering_preserves_scalar_shapes() {
         let dst = VReg(128).set_reg_type(RegType::Int);
         assert_eq!(lower_constant(dst, Type::I32, 10, 0).len(), 1);
-        assert_eq!(lower_constant(dst, Type::F64, 0x3ff0_0000_0000_0000, 0).len(), 1);
+        assert_eq!(
+            lower_constant(dst, Type::F64, 0x3ff0_0000_0000_0000, 0).len(),
+            1
+        );
     }
 }

@@ -25,10 +25,16 @@ pub fn install_signal_handler() {}
 pub fn register_jit_code_range(start: usize, end: usize) {
     assert!(start != 0 && end > start, "invalid JIT code range");
     let mut guard = ranges().lock().unwrap();
-    if guard.iter().any(|range| range.start == start && range.end == end) {
+    if guard
+        .iter()
+        .any(|range| range.start == start && range.end == end)
+    {
         return;
     }
-    assert!(guard.len() < MAX_JIT_CODE_RANGES, "too many JIT code ranges");
+    assert!(
+        guard.len() < MAX_JIT_CODE_RANGES,
+        "too many JIT code ranges"
+    );
     guard.push(JitCodeRange { start, end });
     guard.sort_by_key(|range| range.start);
 }
@@ -45,7 +51,9 @@ mod tests {
     fn registers_unique_ranges() {
         register_jit_code_range(100, 200);
         register_jit_code_range(100, 200);
-        assert!(registered_jit_code_ranges().iter().any(|range| range.start == 100 && range.end == 200));
+        assert!(registered_jit_code_ranges()
+            .iter()
+            .any(|range| range.start == 100 && range.end == 200));
     }
 
     #[test]

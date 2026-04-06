@@ -75,10 +75,7 @@ impl FuelController for AggregatingFuelController {
     }
 }
 
-pub fn with_fuel_controller(
-    ctx: &Context,
-    controller: impl FuelController + 'static,
-) -> Context {
+pub fn with_fuel_controller(ctx: &Context, controller: impl FuelController + 'static) -> Context {
     let mut cloned = ctx.clone();
     cloned.fuel_controller = Some(Arc::new(controller));
     cloned
@@ -94,7 +91,11 @@ pub fn add_fuel(ctx: &Context, amount: i64) -> Result<()> {
         .as_ref()
         .and_then(|invocation| invocation.fuel_remaining.as_ref())
         .cloned()
-        .ok_or_else(|| RuntimeError::new("no fuel accessor in context: fuel not enabled or not in a host function"))?;
+        .ok_or_else(|| {
+            RuntimeError::new(
+                "no fuel accessor in context: fuel not enabled or not in a host function",
+            )
+        })?;
     accessor.fetch_add(amount, Ordering::SeqCst);
     Ok(())
 }
@@ -105,6 +106,10 @@ pub fn remaining_fuel(ctx: &Context) -> Result<i64> {
         .as_ref()
         .and_then(|invocation| invocation.fuel_remaining.as_ref())
         .cloned()
-        .ok_or_else(|| RuntimeError::new("no fuel accessor in context: fuel not enabled or not in a host function"))?;
+        .ok_or_else(|| {
+            RuntimeError::new(
+                "no fuel accessor in context: fuel not enabled or not in a host function",
+            )
+        })?;
     Ok(accessor.load(Ordering::SeqCst))
 }

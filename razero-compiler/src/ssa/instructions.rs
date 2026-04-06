@@ -7,6 +7,7 @@ use crate::ssa::funcref::FuncRef;
 use crate::ssa::signature::SignatureId;
 use crate::ssa::types::Type;
 use crate::ssa::vs::{Value, Values};
+use crate::wazevoapi::ExitCode;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct InstructionId(pub u32);
@@ -409,6 +410,37 @@ impl Instruction {
         self
     }
 
+    pub fn as_load(mut self, ptr: Value, offset: u32, typ: Type) -> Self {
+        self.opcode = Opcode::Load;
+        self.v = ptr;
+        self.u1 = offset as u64;
+        self.typ = typ;
+        self
+    }
+
+    pub fn as_store(mut self, store_op: Opcode, value: Value, ptr: Value, offset: u32) -> Self {
+        self.opcode = store_op;
+        self.v = value;
+        self.v2 = ptr;
+        let size = match store_op {
+            Opcode::Store => value.ty().bits() as u64,
+            Opcode::Istore8 => 8,
+            Opcode::Istore16 => 16,
+            Opcode::Istore32 => 32,
+            _ => panic!("invalid store opcode: {:?}", store_op),
+        };
+        self.u1 = offset as u64 | (size << 32);
+        self
+    }
+
+    pub fn as_exit_if_true_with_code(mut self, ctx: Value, cond: Value, code: ExitCode) -> Self {
+        self.opcode = Opcode::ExitIfTrueWithCode;
+        self.v = ctx;
+        self.v2 = cond;
+        self.u1 = code.raw() as u64;
+        self
+    }
+
     pub fn call_data(&self) -> (FuncRef, SignatureId, &[Value]) {
         (
             FuncRef(self.u1 as u32),
@@ -419,6 +451,22 @@ impl Instruction {
 
     pub fn call_indirect_data(&self) -> (Value, SignatureId, &[Value]) {
         (self.v, SignatureId(self.u1 as u32), self.vs.as_slice())
+    }
+
+    pub fn load_data(&self) -> (Value, u32, Type) {
+        (self.v, self.u1 as u32, self.typ)
+    }
+
+    pub fn store_data(&self) -> (Value, Value, u32, u8) {
+        (self.v, self.v2, self.u1 as u32, (self.u1 >> 32) as u8)
+    }
+
+    pub fn exit_with_code_data(&self) -> (Value, ExitCode) {
+        (self.v, ExitCode::new(self.u1 as u32))
+    }
+
+    pub fn exit_if_true_with_code_data(&self) -> (Value, Value, ExitCode) {
+        (self.v, self.v2, ExitCode::new(self.u1 as u32))
     }
 
     pub fn iconst_data(&self) -> u64 {
@@ -639,6 +687,37 @@ impl Instruction {
                             .join(", "),
                     );
                 }
+            }
+            Opcode::Load
+            | Opcode::Uload8
+            | Opcode::Sload8
+            | Opcode::Uload16
+            | Opcode::Sload16
+            | Opcode::Uload32
+            | Opcode::Sload32 => {
+                let (ptr, offset, _) = self.load_data();
+                s.push_str(&format!(" {}, {offset:#x}", builder.format_value(ptr)));
+            }
+            Opcode::Store | Opcode::Istore8 | Opcode::Istore16 | Opcode::Istore32 => {
+                let (value, ptr, offset, _) = self.store_data();
+                s.push_str(&format!(
+                    " {}, {}, {offset:#x}",
+                    builder.format_value(value),
+                    builder.format_value(ptr)
+                ));
+            }
+            Opcode::ExitWithCode => {
+                let (ctx, code) = self.exit_with_code_data();
+                s.push_str(&format!(" {}, {}", builder.format_value(ctx), code));
+            }
+            Opcode::ExitIfTrueWithCode => {
+                let (ctx, cond, code) = self.exit_if_true_with_code_data();
+                s.push_str(&format!(
+                    " {}, {}, {}",
+                    builder.format_value(cond),
+                    builder.format_value(ctx),
+                    code
+                ));
             }
             _ => {
                 let mut args = Vec::new();

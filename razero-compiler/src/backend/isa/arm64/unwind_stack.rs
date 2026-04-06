@@ -1,10 +1,6 @@
 use std::slice;
 
-pub unsafe fn unwind_stack(
-    sp: usize,
-    top: usize,
-    mut return_addresses: Vec<usize>,
-) -> Vec<usize> {
+pub unsafe fn unwind_stack(sp: usize, top: usize, mut return_addresses: Vec<usize>) -> Vec<usize> {
     let len = top - sp;
     let stack = unsafe { slice::from_raw_parts(sp as *const u8, len) };
     let mut index = 0usize;

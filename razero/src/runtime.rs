@@ -6,12 +6,24 @@ use std::{
     },
 };
 
+use razero_decoder::decoder::decode_module;
+use razero_interp::engine::InterpModuleEngine;
+use razero_secmem::GuardPageAllocator;
+use razero_wasm::{
+    function_definition::FunctionDefinition as WasmFunctionDefinition,
+    memory_definition::MemoryDefinition as WasmMemoryDefinition,
+    module::{ExternType as WasmExternType, Module as WasmModule, ValueType as WasmValueType},
+    store::Store as WasmStore,
+    store_module_list::ModuleInstanceId,
+};
+
 use crate::{
     api::{
         error::{ExitError, Result, RuntimeError},
         wasm::{
-            CustomSection, FunctionDefinition, Global, GlobalValue, HostCallback, Memory,
-            MemoryDefinition, Module, RuntimeModuleRegistry, ValueType,
+            active_invocation, with_active_invocation, CustomSection, FunctionDefinition, Global,
+            GlobalValue, HostCallback, Memory, MemoryDefinition, Module, RuntimeModuleRegistry,
+            ValueType,
         },
     },
     builder::HostModuleBuilder,
@@ -28,6 +40,7 @@ pub struct Runtime {
 struct RuntimeInner {
     config: RuntimeConfig,
     modules: RuntimeModuleRegistry,
+    store: Arc<Mutex<WasmStore<razero_interp::engine::InterpEngine>>>,
     closed: AtomicBool,
 }
 
@@ -47,6 +60,9 @@ impl Runtime {
             inner: Arc::new(RuntimeInner {
                 config,
                 modules: Arc::new(Mutex::new(BTreeMap::new())),
+                store: Arc::new(Mutex::new(WasmStore::new(
+                    razero_interp::engine::InterpEngine::new(),
+                ))),
                 closed: AtomicBool::new(false),
             }),
         }
@@ -61,13 +77,13 @@ impl Runtime {
         if let Some(cache) = self.inner.config.compilation_cache() {
             let key = cache_key(bytes);
             if let Some(cached) = cache.get(&key) {
-                return parse_binary_module(&cached, &self.inner.config);
+                return compile_binary_module(&cached, &self.inner.config);
             }
-            let compiled = parse_binary_module(bytes, &self.inner.config)?;
+            let compiled = compile_binary_module(bytes, &self.inner.config)?;
             cache.insert(&key, bytes);
             return Ok(compiled);
         }
-        parse_binary_module(bytes, &self.inner.config)
+        compile_binary_module(bytes, &self.inner.config)
     }
 
     pub fn instantiate(&self, compiled: &CompiledModule, config: ModuleConfig) -> Result<Module> {
@@ -98,22 +114,11 @@ impl Runtime {
             }
         }
 
-        let memory = instantiate_memory(
-            ctx,
-            compiled.inner().exported_memories.values().next().cloned(),
-            &self.inner.config,
-        )?;
-        let globals = compiled.inner().exported_globals.clone();
-        let module = Module::new(
-            name.clone(),
-            compiled.inner().exported_functions.clone(),
-            compiled.inner().host_callbacks.clone(),
-            self.inner.config.fuel(),
-            memory,
-            globals,
-            ctx.close_notifier.clone(),
-            Some(Arc::downgrade(&self.inner.modules)),
-        );
+        let module = if compiled.inner().host_callbacks.is_empty() {
+            self.instantiate_guest_module(ctx, compiled, name.clone())?
+        } else {
+            self.instantiate_host_module(ctx, compiled, name.clone())?
+        };
 
         if let Some(name) = name {
             self.inner
@@ -167,6 +172,12 @@ impl Runtime {
             .lock()
             .expect("runtime modules poisoned")
             .clear();
+        self.inner
+            .store
+            .lock()
+            .expect("runtime store poisoned")
+            .close_with_exit_code(exit_code)
+            .map_err(|err| RuntimeError::new(err.to_string()))?;
         Ok(())
     }
 
@@ -177,8 +188,80 @@ impl Runtime {
             Ok(())
         }
     }
+
+    fn instantiate_host_module(
+        &self,
+        ctx: &Context,
+        compiled: &CompiledModule,
+        name: Option<String>,
+    ) -> Result<Module> {
+        let store_module_id = compiled
+            .inner()
+            .lower_module
+            .clone()
+            .map(|module| instantiate_in_store(&self.inner.store, module, name.as_deref()))
+            .transpose()?;
+        let close_hook = store_module_id.map(|module_id| {
+            let store = self.inner.store.clone();
+            Arc::new(move |_exit_code| {
+                let _ = delete_from_store(&store, module_id);
+            }) as Arc<dyn Fn(u32) + Send + Sync>
+        });
+        Ok(Module::new(
+            name,
+            compiled.inner().exported_functions.clone(),
+            compiled.inner().host_callbacks.clone(),
+            self.inner.config.fuel(),
+            None,
+            compiled.inner().exported_globals.clone(),
+            ctx.close_notifier.clone(),
+            close_hook,
+            Some(Arc::downgrade(&self.inner.modules)),
+        ))
+    }
+
+    fn instantiate_guest_module(
+        &self,
+        ctx: &Context,
+        compiled: &CompiledModule,
+        name: Option<String>,
+    ) -> Result<Module> {
+        let lower_module =
+            compiled.inner().lower_module.clone().ok_or_else(|| {
+                RuntimeError::new("compiled module is missing lower runtime state")
+            })?;
+        let module_id =
+            instantiate_in_store(&self.inner.store, lower_module.clone(), name.as_deref())?;
+        let callbacks = build_guest_callbacks(&self.inner.store, module_id, &lower_module)?;
+        let memory = compiled
+            .inner()
+            .exported_memories
+            .values()
+            .next()
+            .cloned()
+            .map(|definition| guest_memory(self.inner.store.clone(), module_id, definition));
+        let globals = guest_globals(&self.inner.store, module_id, &lower_module)?;
+        let close_hook = Some({
+            let store = self.inner.store.clone();
+            Arc::new(move |_exit_code| {
+                let _ = delete_from_store(&store, module_id);
+            }) as Arc<dyn Fn(u32) + Send + Sync>
+        });
+        Ok(Module::new(
+            name,
+            compiled.inner().exported_functions.clone(),
+            callbacks,
+            self.inner.config.fuel(),
+            memory,
+            globals,
+            ctx.close_notifier.clone(),
+            close_hook,
+            Some(Arc::downgrade(&self.inner.modules)),
+        ))
+    }
 }
 
+#[allow(dead_code)]
 fn instantiate_memory(
     ctx: &Context,
     definition: Option<MemoryDefinition>,
@@ -191,7 +274,7 @@ fn instantiate_memory(
     {
         allocator
     } else if config.secure_mode() {
-        Arc::new(DefaultMemoryAllocator)
+        Arc::new(GuardPageMemoryAllocator)
     } else {
         Arc::new(DefaultMemoryAllocator)
     };
@@ -205,6 +288,23 @@ fn instantiate_memory(
     Ok(Some(Memory::new(definition, linear_memory)))
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+#[allow(dead_code)]
+struct GuardPageMemoryAllocator;
+
+impl MemoryAllocator for GuardPageMemoryAllocator {
+    fn allocate(
+        &self,
+        cap: usize,
+        max: usize,
+    ) -> Option<crate::experimental::memory::LinearMemory> {
+        let allocation = GuardPageAllocator.allocate_zeroed(max).ok()?;
+        Some(crate::experimental::memory::LinearMemory::from_guarded(
+            allocation, cap, max,
+        ))
+    }
+}
+
 fn cache_key(bytes: &[u8]) -> String {
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in bytes {
@@ -214,342 +314,355 @@ fn cache_key(bytes: &[u8]) -> String {
     format!("{hash:016x}-{:x}", bytes.len())
 }
 
-fn parse_binary_module(bytes: &[u8], config: &RuntimeConfig) -> Result<CompiledModule> {
-    if bytes.len() < 8 || &bytes[..4] != b"\0asm" {
-        return Err(RuntimeError::new("invalid magic number"));
-    }
-    if &bytes[4..8] != [0x01, 0x00, 0x00, 0x00] {
-        return Err(RuntimeError::new("invalid version header"));
-    }
-
-    let mut reader = Reader::new(&bytes[8..]);
-    let mut custom_sections = Vec::new();
-    let mut module_name = None;
-    let mut types = Vec::<(Vec<ValueType>, Vec<ValueType>)>::new();
-    let mut imported_functions = Vec::new();
-    let mut defined_type_indices = Vec::new();
-    let mut imported_memories = Vec::new();
-    let mut defined_memory = None;
-    let mut globals = Vec::new();
-    let mut exports = Vec::<(String, u8, u32)>::new();
-    let mut import_function_count = 0_u32;
-
-    while !reader.is_empty() {
-        let section_id = reader.byte()?;
-        let section_len = reader.var_u32()? as usize;
-        let section_bytes = reader.bytes(section_len)?;
-        let mut section = Reader::new(section_bytes);
-        match section_id {
-            0 => {
-                let name = section.name()?;
-                let payload = section.remaining().to_vec();
-                if config.custom_sections() {
-                    custom_sections.push(CustomSection::new(name.clone(), payload.clone()));
-                }
-                if name == "name" {
-                    let mut subsection = Reader::new(&payload);
-                    while !subsection.is_empty() {
-                        let id = subsection.byte()?;
-                        let len = subsection.var_u32()? as usize;
-                        let bytes = subsection.bytes(len)?;
-                        if id == 0 {
-                            module_name = Some(Reader::new(bytes).name()?);
-                        }
-                    }
-                }
-            }
-            1 => {
-                let count = section.var_u32()? as usize;
-                for _ in 0..count {
-                    if section.byte()? != 0x60 {
-                        return Err(RuntimeError::new("unsupported function type"));
-                    }
-                    let params = read_value_types(&mut section)?;
-                    let results = read_value_types(&mut section)?;
-                    types.push((params, results));
-                }
-            }
-            2 => {
-                let count = section.var_u32()? as usize;
-                for _ in 0..count {
-                    let import_module = section.name()?;
-                    let import_name = section.name()?;
-                    match section.byte()? {
-                        0x00 => {
-                            let type_index = section.var_u32()? as usize;
-                            let (params, results) = types
-                                .get(type_index)
-                                .cloned()
-                                .ok_or_else(|| RuntimeError::new("function type out of range"))?;
-                            imported_functions.push(
-                                FunctionDefinition::new(import_name.clone())
-                                    .with_module_name(module_name.clone())
-                                    .with_signature(params, results)
-                                    .with_import(import_module, import_name),
-                            );
-                            import_function_count += 1;
-                        }
-                        0x02 => {
-                            imported_memories.push(parse_memory_definition(
-                                &mut section,
-                                module_name.clone(),
-                                Some((import_module, import_name)),
-                                config,
-                            )?);
-                        }
-                        0x03 => {
-                            globals.push(parse_global(&mut section)?);
-                        }
-                        _ => skip_import_desc(&mut section)?,
-                    }
-                }
-            }
-            3 => {
-                let count = section.var_u32()? as usize;
-                for _ in 0..count {
-                    defined_type_indices.push(section.var_u32()?);
-                }
-            }
-            5 => {
-                let count = section.var_u32()? as usize;
-                if count > 0 {
-                    defined_memory = Some(parse_memory_definition(
-                        &mut section,
-                        module_name.clone(),
-                        None,
-                        config,
-                    )?);
-                }
-            }
-            6 => {
-                let count = section.var_u32()? as usize;
-                for _ in 0..count {
-                    globals.push(parse_global(&mut section)?);
-                }
-            }
-            7 => {
-                let count = section.var_u32()? as usize;
-                for _ in 0..count {
-                    exports.push((section.name()?, section.byte()?, section.var_u32()?));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let mut exported_functions = BTreeMap::new();
-    let mut exported_memories = BTreeMap::new();
-    let mut exported_globals = BTreeMap::new();
-    for (name, kind, index) in exports {
-        match kind {
-            0x00 => {
-                let definition = if index < import_function_count {
-                    imported_functions
-                        .get(index as usize)
-                        .cloned()
-                        .unwrap_or_else(|| FunctionDefinition::new(name.clone()))
-                        .with_export_name(name.clone())
-                } else {
-                    let type_index = defined_type_indices
-                        .get((index - import_function_count) as usize)
-                        .copied()
-                        .ok_or_else(|| RuntimeError::new("exported function index out of range"))?
-                        as usize;
-                    let (params, results) = types
-                        .get(type_index)
-                        .cloned()
-                        .ok_or_else(|| RuntimeError::new("exported function type out of range"))?;
-                    FunctionDefinition::new(name.clone())
-                        .with_module_name(module_name.clone())
-                        .with_signature(params, results)
-                        .with_export_name(name.clone())
-                };
-                exported_functions.insert(name, definition);
-            }
-            0x02 => {
-                let definition = defined_memory
-                    .clone()
-                    .unwrap_or_else(|| {
-                        MemoryDefinition::new(0, None).with_module_name(module_name.clone())
-                    })
-                    .with_export_name(name.clone());
-                exported_memories.insert(name, definition);
-            }
-            0x03 => {
-                if let Some(global) = globals.get(index as usize) {
-                    exported_globals.insert(name, global.clone());
-                }
-            }
-            _ => {}
-        }
-    }
+fn compile_binary_module(bytes: &[u8], config: &RuntimeConfig) -> Result<CompiledModule> {
+    let mut module = decode_module(bytes, config.core_features())
+        .map_err(|err| RuntimeError::new(err.to_string()))?;
+    module.assign_module_id(bytes, &[], false);
+    module.build_memory_definitions();
+    let imported_functions = module
+        .imported_functions()
+        .into_iter()
+        .map(convert_function_definition)
+        .collect();
+    let exported_functions = module
+        .exported_functions()
+        .into_iter()
+        .map(|(name, definition)| (name, convert_function_definition(definition)))
+        .collect();
+    let imported_memories = module
+        .imported_memories()
+        .into_iter()
+        .map(convert_memory_definition)
+        .collect();
+    let exported_memories = module
+        .exported_memories()
+        .into_iter()
+        .map(|(name, definition)| (name, convert_memory_definition(definition)))
+        .collect();
+    let custom_sections = if config.custom_sections() {
+        module
+            .custom_sections
+            .iter()
+            .map(|section| CustomSection::new(section.name.clone(), section.data.clone()))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let name = module
+        .name_section
+        .as_ref()
+        .and_then(|names| (!names.module_name.is_empty()).then_some(names.module_name.clone()));
 
     Ok(CompiledModule::new(CompiledModuleInner {
-        name: module_name,
+        name,
         bytes: bytes.to_vec(),
         imported_functions,
         exported_functions,
         imported_memories,
         exported_memories,
-        exported_globals,
+        exported_globals: BTreeMap::new(),
         custom_sections,
-        host_callbacks: BTreeMap::<String, HostCallback>::new(),
+        host_callbacks: BTreeMap::new(),
+        lower_module: Some(module),
         closed: std::sync::atomic::AtomicBool::new(false),
     }))
 }
 
-fn parse_memory_definition(
-    reader: &mut Reader<'_>,
-    module_name: Option<String>,
-    import: Option<(String, String)>,
-    config: &RuntimeConfig,
-) -> Result<MemoryDefinition> {
-    let flags = reader.byte()?;
-    let minimum_pages = reader.var_u32()?;
-    let maximum_pages = if flags & 0x01 != 0 {
-        Some(reader.var_u32()?.min(config.memory_limit_pages()))
+pub(crate) fn lower_host_function_callback(
+    callback: HostCallback,
+    param_count: usize,
+    result_count: usize,
+) -> razero_wasm::host_func::HostFuncRef {
+    razero_wasm::host_func::host_func(move |_caller, stack| {
+        let (ctx, module) = active_invocation().ok_or_else(|| {
+            razero_wasm::host_func::HostFuncError::new(
+                "host functions require an active public invocation context",
+            )
+        })?;
+        let params = stack[..param_count].to_vec();
+        let results = callback(ctx, module, &params)
+            .map_err(|err| razero_wasm::host_func::HostFuncError::new(err.to_string()))?;
+        if results.len() != result_count {
+            return Err(razero_wasm::host_func::HostFuncError::new(format!(
+                "expected {result_count} results, received {}",
+                results.len()
+            )));
+        }
+        stack[..result_count].copy_from_slice(&results);
+        Ok(())
+    })
+}
+
+fn instantiate_in_store(
+    store: &Arc<Mutex<WasmStore<razero_interp::engine::InterpEngine>>>,
+    module: WasmModule,
+    name: Option<&str>,
+) -> Result<ModuleInstanceId> {
+    store
+        .lock()
+        .expect("runtime store poisoned")
+        .instantiate(module, name.unwrap_or_default(), None)
+        .map_err(|err| RuntimeError::new(err.to_string()))
+}
+
+fn delete_from_store(
+    store: &Arc<Mutex<WasmStore<razero_interp::engine::InterpEngine>>>,
+    module_id: ModuleInstanceId,
+) -> Result<()> {
+    store
+        .lock()
+        .expect("runtime store poisoned")
+        .delete_module(module_id)
+        .map_err(|err| RuntimeError::new(err.to_string()))
+}
+
+fn build_guest_callbacks(
+    store: &Arc<Mutex<WasmStore<razero_interp::engine::InterpEngine>>>,
+    module_id: ModuleInstanceId,
+    module: &WasmModule,
+) -> Result<BTreeMap<String, HostCallback>> {
+    let mut callbacks = BTreeMap::new();
+    for export in module
+        .export_section
+        .iter()
+        .filter(|export| export.ty == WasmExternType::FUNC)
+    {
+        let store = store.clone();
+        let function_index = export.index;
+        let export_name = export.name.clone();
+        callbacks.insert(
+            export_name,
+            Arc::new(move |ctx: Context, module: Module, params: &[u64]| {
+                let params = params.to_vec();
+                with_active_invocation(&ctx, &module, || {
+                    let store = store.lock().expect("runtime store poisoned");
+                    let engine = store
+                        .module_engine(module_id)
+                        .and_then(|engine| engine.as_any().downcast_ref::<InterpModuleEngine>())
+                        .ok_or_else(|| RuntimeError::new("module engine is unavailable"))?;
+                    engine
+                        .call(function_index, &params)
+                        .map_err(|err| RuntimeError::new(err.to_string()))
+                })
+            }) as HostCallback,
+        );
+    }
+    Ok(callbacks)
+}
+
+fn guest_memory(
+    store: Arc<Mutex<WasmStore<razero_interp::engine::InterpEngine>>>,
+    module_id: ModuleInstanceId,
+    definition: MemoryDefinition,
+) -> Memory {
+    let read_store = store.clone();
+    let write_store = store.clone();
+    let grow_store = store.clone();
+    Memory::dynamic(
+        definition,
+        move || interp_memory_size(&store, module_id).unwrap_or_default(),
+        move |offset, len| interp_memory_read(&read_store, module_id, offset, len),
+        move |offset, value| interp_memory_write_u32(&write_store, module_id, offset, value),
+        move |delta, maximum| interp_memory_grow(&grow_store, module_id, delta, maximum),
+    )
+}
+
+fn guest_globals(
+    store: &Arc<Mutex<WasmStore<razero_interp::engine::InterpEngine>>>,
+    module_id: ModuleInstanceId,
+    module: &WasmModule,
+) -> Result<BTreeMap<String, Global>> {
+    let locked = store.lock().expect("runtime store poisoned");
+    let instance = locked
+        .instance(module_id)
+        .cloned()
+        .ok_or_else(|| RuntimeError::new("module instance is unavailable"))?;
+    drop(locked);
+
+    let mut globals = BTreeMap::new();
+    for export in module
+        .export_section
+        .iter()
+        .filter(|export| export.ty == WasmExternType::GLOBAL)
+    {
+        let index = export.index as usize;
+        let ty = *instance
+            .global_types
+            .get(index)
+            .ok_or_else(|| RuntimeError::new(format!("global[{index}] type missing")))?;
+        let fallback = export_global_value(&instance, index)
+            .ok_or_else(|| RuntimeError::new(format!("global[{index}] value missing")))?;
+        let store = store.clone();
+        globals.insert(
+            export.name.clone(),
+            Global::dynamic(ty.mutable, move || {
+                current_global_value(&store, module_id, index).unwrap_or(fallback)
+            }),
+        );
+    }
+    Ok(globals)
+}
+
+fn interp_memory_size(
+    store: &Arc<Mutex<WasmStore<razero_interp::engine::InterpEngine>>>,
+    module_id: ModuleInstanceId,
+) -> Option<u32> {
+    let store = store.lock().ok()?;
+    let engine = store
+        .module_engine(module_id)?
+        .as_any()
+        .downcast_ref::<InterpModuleEngine>()?;
+    engine.memory_size()
+}
+
+fn interp_memory_read(
+    store: &Arc<Mutex<WasmStore<razero_interp::engine::InterpEngine>>>,
+    module_id: ModuleInstanceId,
+    offset: usize,
+    len: usize,
+) -> Option<Vec<u8>> {
+    let store = store.lock().ok()?;
+    let engine = store
+        .module_engine(module_id)?
+        .as_any()
+        .downcast_ref::<InterpModuleEngine>()?;
+    engine.memory_read(offset, len)
+}
+
+fn interp_memory_write_u32(
+    store: &Arc<Mutex<WasmStore<razero_interp::engine::InterpEngine>>>,
+    module_id: ModuleInstanceId,
+    offset: u32,
+    value: u32,
+) -> bool {
+    let store = match store.lock() {
+        Ok(store) => store,
+        Err(_) => return false,
+    };
+    let Some(engine) = store
+        .module_engine(module_id)
+        .and_then(|engine| engine.as_any().downcast_ref::<InterpModuleEngine>())
+    else {
+        return false;
+    };
+    engine.memory_write_u32(offset, value)
+}
+
+fn interp_memory_grow(
+    store: &Arc<Mutex<WasmStore<razero_interp::engine::InterpEngine>>>,
+    module_id: ModuleInstanceId,
+    delta: u32,
+    maximum: Option<u32>,
+) -> Option<u32> {
+    let store = store.lock().ok()?;
+    let engine = store
+        .module_engine(module_id)?
+        .as_any()
+        .downcast_ref::<InterpModuleEngine>()?;
+    engine.memory_grow(delta, maximum)
+}
+
+fn current_global_value(
+    store: &Arc<Mutex<WasmStore<razero_interp::engine::InterpEngine>>>,
+    module_id: ModuleInstanceId,
+    index: usize,
+) -> Option<GlobalValue> {
+    let store = store.lock().ok()?;
+    let engine = store
+        .module_engine(module_id)?
+        .as_any()
+        .downcast_ref::<InterpModuleEngine>()?;
+    engine
+        .global_value(index as u32)
+        .map(|(lo, _hi, ty)| convert_global_value(ty, lo))
+        .or_else(|| {
+            store
+                .instance(module_id)
+                .and_then(|instance| export_global_value(instance, index))
+        })
+}
+
+fn export_global_value(
+    instance: &razero_wasm::module_instance::ModuleInstance,
+    index: usize,
+) -> Option<GlobalValue> {
+    let global = instance.globals.get(index)?;
+    Some(convert_global_value(global.ty.val_type, global.value))
+}
+
+fn convert_global_value(value_type: WasmValueType, lo: u64) -> GlobalValue {
+    match value_type {
+        WasmValueType::I32 => GlobalValue::I32(lo as i32),
+        WasmValueType::I64 => GlobalValue::I64(lo as i64),
+        WasmValueType::F32 => GlobalValue::F32(lo as u32),
+        WasmValueType::F64 => GlobalValue::F64(lo),
+        _ => GlobalValue::I64(lo as i64),
+    }
+}
+
+fn convert_function_definition(definition: &WasmFunctionDefinition) -> FunctionDefinition {
+    let mut converted = FunctionDefinition::new(if definition.name().is_empty() {
+        definition
+            .export_names()
+            .first()
+            .cloned()
+            .unwrap_or_default()
     } else {
-        Some(config.memory_limit_pages())
-    };
-    if minimum_pages > config.memory_limit_pages() {
-        return Err(RuntimeError::new(format!(
-            "section memory: min {minimum_pages} pages over limit of {} pages",
-            config.memory_limit_pages()
-        )));
+        definition.name().to_string()
+    })
+    .with_module_name(
+        (!definition.module_name().is_empty()).then_some(definition.module_name().to_string()),
+    )
+    .with_signature(
+        definition
+            .param_types()
+            .iter()
+            .copied()
+            .map(convert_value_type)
+            .collect(),
+        definition
+            .result_types()
+            .iter()
+            .copied()
+            .map(convert_value_type)
+            .collect(),
+    )
+    .with_parameter_names(definition.param_names().to_vec())
+    .with_result_names(definition.result_names().to_vec());
+    if let Some((module, name)) = definition.import() {
+        converted = converted.with_import(module.to_string(), name.to_string());
     }
-    let mut definition =
-        MemoryDefinition::new(minimum_pages, maximum_pages).with_module_name(module_name);
-    if let Some((import_module, import_name)) = import {
-        definition = definition.with_import(import_module, import_name);
+    for export_name in definition.export_names() {
+        converted = converted.with_export_name(export_name.clone());
     }
-    Ok(definition)
+    converted
 }
 
-fn parse_global(reader: &mut Reader<'_>) -> Result<Global> {
-    let value_type = match reader.byte()? {
-        0x7f => ValueType::I32,
-        0x7e => ValueType::I64,
-        0x7d => ValueType::F32,
-        0x7c => ValueType::F64,
-        _ => return Err(RuntimeError::new("unsupported global type")),
-    };
-    let mutable = reader.byte()? != 0;
-    let opcode = reader.byte()?;
-    let value = match (value_type, opcode) {
-        (ValueType::I32, 0x41) => GlobalValue::I32(reader.var_i32()?),
-        (ValueType::I64, 0x42) => GlobalValue::I64(reader.var_i64()?),
-        (ValueType::F32, 0x43) => GlobalValue::F32(u32::from_le_bytes(
-            reader.bytes(4)?.try_into().expect("len"),
-        )),
-        (ValueType::F64, 0x44) => GlobalValue::F64(u64::from_le_bytes(
-            reader.bytes(8)?.try_into().expect("len"),
-        )),
-        _ => return Err(RuntimeError::new("unsupported global initializer")),
-    };
-    let _end = reader.byte()?;
-    Ok(Global::new(value, mutable))
+fn convert_memory_definition(definition: &WasmMemoryDefinition) -> MemoryDefinition {
+    let (maximum_pages, has_max) = definition.max();
+    let mut converted = MemoryDefinition::new(definition.min(), has_max.then_some(maximum_pages))
+        .with_module_name(
+            (!definition.module_name().is_empty()).then_some(definition.module_name().to_string()),
+        );
+    if let Some((module, name)) = definition.import() {
+        converted = converted.with_import(module.to_string(), name.to_string());
+    }
+    for export_name in definition.export_names() {
+        converted = converted.with_export_name(export_name.clone());
+    }
+    converted
 }
 
-fn skip_import_desc(reader: &mut Reader<'_>) -> Result<()> {
-    match reader.byte()? {
-        _ => Ok(()),
-    }
-}
-
-fn read_value_types(reader: &mut Reader<'_>) -> Result<Vec<ValueType>> {
-    let count = reader.var_u32()? as usize;
-    let mut value_types = Vec::with_capacity(count);
-    for _ in 0..count {
-        value_types.push(match reader.byte()? {
-            0x7f => ValueType::I32,
-            0x7e => ValueType::I64,
-            0x7d => ValueType::F32,
-            0x7c => ValueType::F64,
-            0x7b => ValueType::V128,
-            0x6f => ValueType::ExternRef,
-            0x70 => ValueType::FuncRef,
-            _ => return Err(RuntimeError::new("unsupported value type")),
-        });
-    }
-    Ok(value_types)
-}
-
-struct Reader<'a> {
-    bytes: &'a [u8],
-    position: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, position: 0 }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.position >= self.bytes.len()
-    }
-
-    fn remaining(&self) -> &'a [u8] {
-        &self.bytes[self.position..]
-    }
-
-    fn byte(&mut self) -> Result<u8> {
-        let byte = *self
-            .bytes
-            .get(self.position)
-            .ok_or_else(|| RuntimeError::new("unexpected end of input"))?;
-        self.position += 1;
-        Ok(byte)
-    }
-
-    fn bytes(&mut self, len: usize) -> Result<&'a [u8]> {
-        let end = self
-            .position
-            .checked_add(len)
-            .ok_or_else(|| RuntimeError::new("unexpected end of input"))?;
-        let bytes = self
-            .bytes
-            .get(self.position..end)
-            .ok_or_else(|| RuntimeError::new("unexpected end of input"))?;
-        self.position = end;
-        Ok(bytes)
-    }
-
-    fn name(&mut self) -> Result<String> {
-        let len = self.var_u32()? as usize;
-        let bytes = self.bytes(len)?;
-        let value =
-            std::str::from_utf8(bytes).map_err(|_| RuntimeError::new("name is not valid UTF-8"))?;
-        Ok(value.to_string())
-    }
-
-    fn var_u32(&mut self) -> Result<u32> {
-        let mut result = 0_u32;
-        let mut shift = 0_u32;
-        loop {
-            let byte = self.byte()?;
-            result |= u32::from(byte & 0x7f) << shift;
-            if byte & 0x80 == 0 {
-                return Ok(result);
-            }
-            shift += 7;
-        }
-    }
-
-    fn var_i32(&mut self) -> Result<i32> {
-        Ok(self.var_u32()? as i32)
-    }
-
-    fn var_i64(&mut self) -> Result<i64> {
-        let mut result = 0_u64;
-        let mut shift = 0_u32;
-        loop {
-            let byte = self.byte()?;
-            result |= u64::from(byte & 0x7f) << shift;
-            if byte & 0x80 == 0 {
-                return Ok(result as i64);
-            }
-            shift += 7;
-        }
+fn convert_value_type(value_type: WasmValueType) -> ValueType {
+    match value_type {
+        WasmValueType::I32 => ValueType::I32,
+        WasmValueType::I64 => ValueType::I64,
+        WasmValueType::F32 => ValueType::F32,
+        WasmValueType::F64 => ValueType::F64,
+        WasmValueType::V128 => ValueType::V128,
+        WasmValueType::EXTERNREF => ValueType::ExternRef,
+        WasmValueType::FUNCREF => ValueType::FuncRef,
+        _ => ValueType::I32,
     }
 }
 
@@ -670,6 +783,61 @@ mod tests {
     }
 
     #[test]
+    fn guest_exports_execute_through_public_api() {
+        let runtime = Runtime::new();
+        let compiled = runtime
+            .compile(&[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f,
+                0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00,
+                0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x41, 0x01, 0x6a, 0x0b,
+            ])
+            .unwrap();
+        let module = runtime.instantiate(&compiled, ModuleConfig::new()).unwrap();
+
+        assert_eq!(
+            vec![42],
+            module
+                .exported_function("run")
+                .unwrap()
+                .call(&[41])
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn guest_modules_can_call_public_host_imports() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("env")
+            .new_function_builder()
+            .with_func(
+                |_ctx, _module, params| Ok(vec![params[0] + 1]),
+                &[ValueType::I32],
+                &[ValueType::I32],
+            )
+            .export("inc")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                &[
+                    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01,
+                    0x7f, 0x01, 0x7f, 0x02, 0x0b, 0x01, 0x03, b'e', b'n', b'v', 0x03, b'i', b'n',
+                    b'c', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u',
+                    b'n', 0x00, 0x01, 0x0a, 0x08, 0x01, 0x06, 0x00, 0x20, 0x00, 0x10, 0x00, 0x0b,
+                ],
+                ModuleConfig::new(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            vec![42],
+            guest.exported_function("run").unwrap().call(&[41]).unwrap()
+        );
+    }
+
+    #[test]
     fn host_module_calls_listeners_and_tracks_fuel() {
         let runtime = Runtime::new();
         let module = runtime
@@ -768,7 +936,11 @@ mod tests {
 
         assert_eq!(
             vec![42],
-            module.exported_function("add").unwrap().call(&[20, 22]).unwrap()
+            module
+                .exported_function("add")
+                .unwrap()
+                .call(&[20, 22])
+                .unwrap()
         );
     }
 

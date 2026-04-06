@@ -4,7 +4,7 @@ use crate::const_expr::decode_const_expr_with_extended_const;
 use crate::decoder::Decoder;
 use crate::errors::{DecodeError, DecodeResult, ERR_INVALID_BYTE};
 use crate::value::decode_value_types;
-use razero::CoreFeatures;
+use razero_features::CoreFeatures;
 use razero_wasm::module::{Global, GlobalType};
 
 pub fn decode_global(
@@ -56,7 +56,7 @@ pub fn decode_global_type(decoder: &mut Decoder<'_>) -> DecodeResult<GlobalType>
 mod tests {
     use super::{decode_global, decode_global_type};
     use crate::decoder::Decoder;
-    use razero::CoreFeatures;
+    use razero_features::CoreFeatures;
     use razero_wasm::const_expr::ConstExpr;
     use razero_wasm::instruction::{OPCODE_END, OPCODE_I32_CONST};
     use razero_wasm::module::{Global, GlobalType, ValueType};

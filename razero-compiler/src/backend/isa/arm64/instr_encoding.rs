@@ -54,7 +54,14 @@ pub fn encode_alu_rrr(op: AluOp, rd: u32, rn: u32, rm: u32, bits: u8, set_flags:
     let sf = encode_bits_64(bits) << 31;
     match op {
         AluOp::Add => sf | ((set_flags as u32) << 29) | 0x0b00_0000 | (rm << 16) | (rn << 5) | rd,
-        AluOp::Sub => sf | (0b10 << 29) | ((set_flags as u32) << 29) | 0x4b00_0000 | (rm << 16) | (rn << 5) | rd,
+        AluOp::Sub => {
+            sf | (0b10 << 29)
+                | ((set_flags as u32) << 29)
+                | 0x4b00_0000
+                | (rm << 16)
+                | (rn << 5)
+                | rd
+        }
         AluOp::Orr => sf | 0x2a00_0000 | (rm << 16) | (rn << 5) | rd,
         AluOp::And => sf | 0x0a00_0000 | (rm << 16) | (rn << 5) | rd,
         AluOp::Eor => sf | 0x4a00_0000 | (rm << 16) | (rn << 5) | rd,
@@ -62,13 +69,28 @@ pub fn encode_alu_rrr(op: AluOp, rd: u32, rn: u32, rm: u32, bits: u8, set_flags:
     }
 }
 
-pub fn encode_alu_rr_imm12(op: AluOp, rd: u32, rn: u32, imm12: u32, bits: u8, set_flags: bool) -> u32 {
+pub fn encode_alu_rr_imm12(
+    op: AluOp,
+    rd: u32,
+    rn: u32,
+    imm12: u32,
+    bits: u8,
+    set_flags: bool,
+) -> u32 {
     let sf = encode_bits_64(bits) << 31;
     let shift = ((imm12 >> 12) & 1) << 22;
     let imm = (imm12 & 0xfff) << 10;
     match op {
         AluOp::Add => sf | ((set_flags as u32) << 29) | 0x1100_0000 | shift | imm | (rn << 5) | rd,
-        AluOp::Sub => sf | (0b10 << 29) | ((set_flags as u32) << 29) | 0x5100_0000 | shift | imm | (rn << 5) | rd,
+        AluOp::Sub => {
+            sf | (0b10 << 29)
+                | ((set_flags as u32) << 29)
+                | 0x5100_0000
+                | shift
+                | imm
+                | (rn << 5)
+                | rd
+        }
         _ => panic!("immediate encoding only implemented for add/sub"),
     }
 }
@@ -98,8 +120,40 @@ pub fn encode_cond_br(cond: Cond, offset: i64, bits64: bool) -> u32 {
     }
 }
 
-pub fn encode_load_or_store(kind_load: bool, bits: u8, reg: u32, mem: AddressMode, signed: bool, fp: bool) -> u32 {
+pub fn encode_load_or_store(
+    kind_load: bool,
+    bits: u8,
+    reg: u32,
+    mem: AddressMode,
+    signed: bool,
+    fp: bool,
+) -> u32 {
     match mem.kind {
+        AddressModeKind::RegSignedImm9 => {
+            let size_field = match bits {
+                8 => 0,
+                16 => 1,
+                32 => 2,
+                64 | 128 => 3,
+                _ => panic!("unsupported arm64 memory width"),
+            } << 30;
+            let imm9 = ((mem.imm as i32 as u32) & 0x1ff) << 12;
+            let rn = encoding_reg_number(mem.rn.real_reg()) << 5;
+            let base = if fp {
+                if kind_load {
+                    0x3c40_0000
+                } else {
+                    0x3c00_0000
+                }
+            } else if signed && bits == 32 {
+                0xb880_0000
+            } else if kind_load {
+                0x3840_0000
+            } else {
+                0x3800_0000
+            };
+            size_field | base | imm9 | rn | reg
+        }
         AddressModeKind::RegUnsignedImm12 => {
             let size_field = match bits {
                 8 => 0,
@@ -112,7 +166,11 @@ pub fn encode_load_or_store(kind_load: bool, bits: u8, reg: u32, mem: AddressMod
             let imm12 = ((mem.imm / scale) as u32 & 0xfff) << 10;
             let rn = encoding_reg_number(mem.rn.real_reg()) << 5;
             let base = if fp {
-                if kind_load { 0x3d40_0000 } else { 0x3d00_0000 }
+                if kind_load {
+                    0x3d40_0000
+                } else {
+                    0x3d00_0000
+                }
             } else if signed && bits == 32 {
                 0xb980_0000
             } else if kind_load {
@@ -131,15 +189,24 @@ pub fn encode_instruction(instr: &Arm64Instr) -> Result<Vec<u32>, BackendError> 
         Arm64Instr::Nop => 0xd503_201f,
         Arm64Instr::Label(_) => return Ok(Vec::new()),
         Arm64Instr::Adr { rd, offset } => encode_adr(encoding_reg_number(rd.real_reg()), *offset),
-        Arm64Instr::MovZ { rd, imm, shift, bits } => {
-            encode_movz(*bits, encoding_reg_number(rd.real_reg()), *imm, *shift)
-        }
-        Arm64Instr::MovK { rd, imm, shift, bits } => {
-            encode_movk(*bits, encoding_reg_number(rd.real_reg()), *imm, *shift)
-        }
-        Arm64Instr::MovN { rd, imm, shift, bits } => {
-            encode_movn(*bits, encoding_reg_number(rd.real_reg()), *imm, *shift)
-        }
+        Arm64Instr::MovZ {
+            rd,
+            imm,
+            shift,
+            bits,
+        } => encode_movz(*bits, encoding_reg_number(rd.real_reg()), *imm, *shift),
+        Arm64Instr::MovK {
+            rd,
+            imm,
+            shift,
+            bits,
+        } => encode_movk(*bits, encoding_reg_number(rd.real_reg()), *imm, *shift),
+        Arm64Instr::MovN {
+            rd,
+            imm,
+            shift,
+            bits,
+        } => encode_movn(*bits, encoding_reg_number(rd.real_reg()), *imm, *shift),
         Arm64Instr::Move { rd, rn, bits } => encode_alu_rrr(
             AluOp::Orr,
             encoding_reg_number(rd.real_reg()),
@@ -149,9 +216,18 @@ pub fn encode_instruction(instr: &Arm64Instr) -> Result<Vec<u32>, BackendError> 
             false,
         ),
         Arm64Instr::FpuMove { .. } => {
-            return Err(BackendError::new("arm64 FPU move encoding is not implemented yet"));
+            return Err(BackendError::new(
+                "arm64 FPU move encoding is not implemented yet",
+            ));
         }
-        Arm64Instr::AluRRR { op, rd, rn, rm, bits, set_flags } => encode_alu_rrr(
+        Arm64Instr::AluRRR {
+            op,
+            rd,
+            rn,
+            rm,
+            bits,
+            set_flags,
+        } => encode_alu_rrr(
             *op,
             encoding_reg_number(rd.real_reg()),
             encoding_reg_number(rn.real_reg()),
@@ -159,7 +235,14 @@ pub fn encode_instruction(instr: &Arm64Instr) -> Result<Vec<u32>, BackendError> 
             *bits,
             *set_flags,
         ),
-        Arm64Instr::AluRRImm12 { op, rd, rn, imm, bits, set_flags } => encode_alu_rr_imm12(
+        Arm64Instr::AluRRImm12 {
+            op,
+            rd,
+            rn,
+            imm,
+            bits,
+            set_flags,
+        } => encode_alu_rr_imm12(
             *op,
             encoding_reg_number(rd.real_reg()),
             encoding_reg_number(rn.real_reg()),
@@ -175,7 +258,12 @@ pub fn encode_instruction(instr: &Arm64Instr) -> Result<Vec<u32>, BackendError> 
             *bits,
             true,
         ),
-        Arm64Instr::Load { kind, rd, mem, bits } => encode_load_or_store(
+        Arm64Instr::Load {
+            kind,
+            rd,
+            mem,
+            bits,
+        } => encode_load_or_store(
             true,
             *bits,
             encoding_reg_number(rd.real_reg()),
@@ -183,7 +271,12 @@ pub fn encode_instruction(instr: &Arm64Instr) -> Result<Vec<u32>, BackendError> 
             matches!(kind, LoadKind::SLoad),
             matches!(kind, LoadKind::FpuLoad),
         ),
-        Arm64Instr::Store { kind, src, mem, bits } => encode_load_or_store(
+        Arm64Instr::Store {
+            kind,
+            src,
+            mem,
+            bits,
+        } => encode_load_or_store(
             false,
             *bits,
             encoding_reg_number(src.real_reg()),
@@ -194,15 +287,23 @@ pub fn encode_instruction(instr: &Arm64Instr) -> Result<Vec<u32>, BackendError> 
         Arm64Instr::CSet { rd, flag } => encode_cset(encoding_reg_number(rd.real_reg()), *flag),
         Arm64Instr::Br { offset, link } => encode_unconditional_branch(*link, *offset),
         Arm64Instr::Call { offset, .. } => encode_unconditional_branch(true, *offset),
-        Arm64Instr::BrReg { rn, link } => encode_unconditional_branch_reg(encoding_reg_number(rn.real_reg()), *link),
-        Arm64Instr::CondBr { cond, offset, bits64 } => encode_cond_br(*cond, *offset, *bits64),
+        Arm64Instr::BrReg { rn, link } => {
+            encode_unconditional_branch_reg(encoding_reg_number(rn.real_reg()), *link)
+        }
+        Arm64Instr::CondBr {
+            cond,
+            offset,
+            bits64,
+        } => encode_cond_br(*cond, *offset, *bits64),
         Arm64Instr::CallReg { rn, tail, .. } => {
             encode_unconditional_branch_reg(encoding_reg_number(rn.real_reg()), !*tail)
         }
         Arm64Instr::Ret => 0xd65f_03c0,
         Arm64Instr::Udf { imm } => 0x0000_0000 | ((*imm as u32) << 5),
         Arm64Instr::LoadConstBlockArg { .. } => {
-            return Err(BackendError::new("load-const-block-arg must be lowered before encoding"));
+            return Err(BackendError::new(
+                "load-const-block-arg must be lowered before encoding",
+            ));
         }
         Arm64Instr::Raw32(word) => *word,
     };
@@ -237,8 +338,25 @@ mod tests {
         assert_eq!(encode_unconditional_branch_reg(12, false), 0xd61f_0180);
         assert_eq!(encode_unconditional_branch(true, 16), 0x9400_0004);
         assert_eq!(encode_adr(27, 16), 0x1000_009b);
-        assert_eq!(encode_alu_rrr(AluOp::Add, 27, 27, 12, 64, false), 0x8b0c_037b);
-        assert_eq!(encode_alu_rr_imm12(AluOp::Add, 31, 31, Imm12 { bits: 0x10, shift12: false }.encode(), 64, false), 0x9100_43ff);
+        assert_eq!(
+            encode_alu_rrr(AluOp::Add, 27, 27, 12, 64, false),
+            0x8b0c_037b
+        );
+        assert_eq!(
+            encode_alu_rr_imm12(
+                AluOp::Add,
+                31,
+                31,
+                Imm12 {
+                    bits: 0x10,
+                    shift12: false
+                }
+                .encode(),
+                64,
+                false
+            ),
+            0x9100_43ff
+        );
         assert_eq!(encode_movz(64, 0, 0xa, 0), 0xd280_0140);
         assert_eq!(encode_movk(64, 0, 0xbeef, 16), 0xf2b7_dde0);
         assert_eq!(encode_movn(64, 0, 0, 0), 0x9280_0000);
@@ -248,9 +366,18 @@ mod tests {
     #[test]
     fn branch_condition_encodings_match_go_patterns() {
         let x0 = vreg_for_real_reg(X0);
-        assert_eq!(encode_cond_br(Cond::from_flag(CondFlag::Ge), 16, true), 0x5400_008a);
-        assert_eq!(encode_cond_br(Cond::from_reg_zero(x0), 16, true), 0xb400_0080);
-        assert_eq!(encode_cond_br(Cond::from_reg_not_zero(x0), 16, true), 0xb500_0080);
+        assert_eq!(
+            encode_cond_br(Cond::from_flag(CondFlag::Ge), 16, true),
+            0x5400_008a
+        );
+        assert_eq!(
+            encode_cond_br(Cond::from_reg_zero(x0), 16, true),
+            0xb400_0080
+        );
+        assert_eq!(
+            encode_cond_br(Cond::from_reg_not_zero(x0), 16, true),
+            0xb500_0080
+        );
     }
 
     #[test]
@@ -265,6 +392,20 @@ mod tests {
         })
         .unwrap();
         assert_eq!(word, vec![0xf940_0420]);
+    }
+
+    #[test]
+    fn signed_immediate_loads_encode() {
+        let x0 = vreg_for_real_reg(X0);
+        let x1 = vreg_for_real_reg(X1);
+        let word = encode_instruction(&Arm64Instr::Load {
+            kind: LoadKind::ULoad,
+            rd: x0,
+            mem: AddressMode::reg_signed_imm9(x1, -16),
+            bits: 64,
+        })
+        .unwrap();
+        assert_eq!(word, vec![0xf85f_0020]);
     }
 
     #[test]

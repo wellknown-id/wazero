@@ -166,7 +166,9 @@ impl Arm64Instr {
             Self::Call { abi, .. } | Self::CallReg { abi, .. } => {
                 let (_, _, ret_ints, ret_floats, _) = abi_info_from_u64(*abi);
                 for index in 0..ret_ints as usize {
-                    out.push(super::reg::vreg_for_real_reg(super::reg::ARG_RESULT_INT_REGS[index]));
+                    out.push(super::reg::vreg_for_real_reg(
+                        super::reg::ARG_RESULT_INT_REGS[index],
+                    ));
                 }
                 for index in 0..ret_floats as usize {
                     out.push(super::reg::vreg_for_real_reg(
@@ -218,7 +220,9 @@ impl Arm64Instr {
                 out.push(*rn);
                 let (arg_ints, arg_floats, _, _, _) = abi_info_from_u64(*abi);
                 for index in 0..arg_ints as usize {
-                    out.push(super::reg::vreg_for_real_reg(super::reg::ARG_RESULT_INT_REGS[index]));
+                    out.push(super::reg::vreg_for_real_reg(
+                        super::reg::ARG_RESULT_INT_REGS[index],
+                    ));
                 }
                 for index in 0..arg_floats as usize {
                     out.push(super::reg::vreg_for_real_reg(
@@ -229,7 +233,9 @@ impl Arm64Instr {
             Self::Call { abi, .. } => {
                 let (arg_ints, arg_floats, _, _, _) = abi_info_from_u64(*abi);
                 for index in 0..arg_ints as usize {
-                    out.push(super::reg::vreg_for_real_reg(super::reg::ARG_RESULT_INT_REGS[index]));
+                    out.push(super::reg::vreg_for_real_reg(
+                        super::reg::ARG_RESULT_INT_REGS[index],
+                    ));
                 }
                 for index in 0..arg_floats as usize {
                     out.push(super::reg::vreg_for_real_reg(
@@ -262,22 +268,39 @@ impl fmt::Display for Arm64Instr {
         match self {
             Self::Nop => f.write_str("nop"),
             Self::Label(label) => write!(f, "L{label}:"),
-            Self::Adr { rd, offset } => write!(f, "adr {}, #0x{offset:x}", format_vreg_sized(*rd, 64)),
-            Self::MovZ { rd, imm, shift, bits } => write!(
+            Self::Adr { rd, offset } => {
+                write!(f, "adr {}, #0x{offset:x}", format_vreg_sized(*rd, 64))
+            }
+            Self::MovZ {
+                rd,
+                imm,
+                shift,
+                bits,
+            } => write!(
                 f,
                 "movz {}, #0x{:x}, lsl {}",
                 format_vreg_sized(*rd, *bits),
                 imm,
                 shift
             ),
-            Self::MovK { rd, imm, shift, bits } => write!(
+            Self::MovK {
+                rd,
+                imm,
+                shift,
+                bits,
+            } => write!(
                 f,
                 "movk {}, #0x{:x}, lsl {}",
                 format_vreg_sized(*rd, *bits),
                 imm,
                 shift
             ),
-            Self::MovN { rd, imm, shift, bits } => write!(
+            Self::MovN {
+                rd,
+                imm,
+                shift,
+                bits,
+            } => write!(
                 f,
                 "movn {}, #0x{:x}, lsl {}",
                 format_vreg_sized(*rd, *bits),
@@ -296,7 +319,14 @@ impl fmt::Display for Arm64Instr {
                 format_vreg_sized(*rd, *bits),
                 format_vreg_sized(*rn, *bits)
             ),
-            Self::AluRRR { op, rd, rn, rm, bits, .. } => write!(
+            Self::AluRRR {
+                op,
+                rd,
+                rn,
+                rm,
+                bits,
+                ..
+            } => write!(
                 f,
                 "{} {}, {}, {}",
                 op,
@@ -304,7 +334,14 @@ impl fmt::Display for Arm64Instr {
                 format_vreg_sized(*rn, *bits),
                 format_vreg_sized(*rm, *bits)
             ),
-            Self::AluRRImm12 { op, rd, rn, imm, bits, .. } => write!(
+            Self::AluRRImm12 {
+                op,
+                rd,
+                rn,
+                imm,
+                bits,
+                ..
+            } => write!(
                 f,
                 "{} {}, {}, #0x{:x}",
                 op,
@@ -318,14 +355,24 @@ impl fmt::Display for Arm64Instr {
                 format_vreg_sized(*rn, *bits),
                 format_vreg_sized(*rm, *bits)
             ),
-            Self::Load { kind, rd, mem, bits } => write!(
+            Self::Load {
+                kind,
+                rd,
+                mem,
+                bits,
+            } => write!(
                 f,
                 "{} {}, {}",
                 kind,
                 format_vreg_sized(*rd, *bits),
                 mem.format(*bits)
             ),
-            Self::Store { kind, src, mem, bits } => write!(
+            Self::Store {
+                kind,
+                src,
+                mem,
+                bits,
+            } => write!(
                 f,
                 "{} {}, {}",
                 kind,
@@ -348,9 +395,17 @@ impl fmt::Display for Arm64Instr {
                 }
             }
             Self::CondBr { cond, offset, .. } => match cond.kind() {
-                CondKind::RegisterZero => write!(f, "cbz {}, #0x{offset:x}", format_vreg_sized(cond.register(), 64)),
+                CondKind::RegisterZero => write!(
+                    f,
+                    "cbz {}, #0x{offset:x}",
+                    format_vreg_sized(cond.register(), 64)
+                ),
                 CondKind::RegisterNotZero => {
-                    write!(f, "cbnz {}, #0x{offset:x}", format_vreg_sized(cond.register(), 64))
+                    write!(
+                        f,
+                        "cbnz {}, #0x{offset:x}",
+                        format_vreg_sized(cond.register(), 64)
+                    )
                 }
                 CondKind::CondFlagSet => write!(f, "b.{} #0x{offset:x}", cond.flag()),
             },
@@ -365,7 +420,11 @@ impl fmt::Display for Arm64Instr {
             Self::Ret => f.write_str("ret"),
             Self::Udf { imm } => write!(f, "udf #0x{imm:x}"),
             Self::LoadConstBlockArg { dst, value } => {
-                write!(f, "load-const-block-arg {}, #0x{value:x}", format_vreg_sized(*dst, 64))
+                write!(
+                    f,
+                    "load-const-block-arg {}, #0x{value:x}",
+                    format_vreg_sized(*dst, 64)
+                )
             }
             Self::Raw32(word) => write!(f, ".word 0x{word:08x}"),
         }
@@ -407,8 +466,8 @@ impl fmt::Display for StoreKind {
 #[cfg(test)]
 mod tests {
     use super::{AluOp, Arm64Instr, LoadKind, StoreKind};
-    use crate::backend::isa::arm64::lower_mem::AddressMode;
     use crate::backend::isa::arm64::cond::{Cond, CondFlag};
+    use crate::backend::isa::arm64::lower_mem::AddressMode;
     use crate::backend::isa::arm64::reg::{vreg_for_real_reg, V0, X0, X1, X2};
     use crate::backend::{FunctionAbi, RegType};
     use crate::ssa::{Signature, SignatureId, Type};
@@ -464,7 +523,11 @@ mod tests {
 
     #[test]
     fn call_defs_and_uses_follow_backend_abi_info() {
-        let sig = Signature::new(SignatureId(0), vec![Type::I64, Type::F64], vec![Type::I64, Type::F64]);
+        let sig = Signature::new(
+            SignatureId(0),
+            vec![Type::I64, Type::F64],
+            vec![Type::I64, Type::F64],
+        );
         let mut abi = FunctionAbi::default();
         abi.init(
             &sig,
@@ -483,8 +546,18 @@ mod tests {
     fn copy_detection_matches_move_instructions() {
         let x0 = vreg_for_real_reg(X0);
         let x1 = vreg_for_real_reg(X1);
-        assert!(Arm64Instr::Move { rd: x0, rn: x1, bits: 64 }.is_copy_instr());
-        assert!(Arm64Instr::FpuMove { rd: x0.set_reg_type(RegType::Float), rn: x1.set_reg_type(RegType::Float), bits: 128 }.is_copy_instr());
+        assert!(Arm64Instr::Move {
+            rd: x0,
+            rn: x1,
+            bits: 64
+        }
+        .is_copy_instr());
+        assert!(Arm64Instr::FpuMove {
+            rd: x0.set_reg_type(RegType::Float),
+            rn: x1.set_reg_type(RegType::Float),
+            bits: 128
+        }
+        .is_copy_instr());
         assert!(!Arm64Instr::Ret.is_copy_instr());
     }
 }

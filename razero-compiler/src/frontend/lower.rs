@@ -2,8 +2,16 @@ use crate::frontend::{function_index_to_func_ref, Compiler, ControlFrame, Contro
 use crate::ssa::{
     BasicBlock, FloatCmpCond, IntegerCmpCond, Opcode, SourceOffset, Type, Value, Values,
 };
+use crate::wazevoapi::offsetdata::EXECUTION_CONTEXT_OFFSET_CALLER_MODULE_CONTEXT_PTR;
+use crate::wazevoapi::{
+    ExitCode, FUNCTION_INSTANCE_EXECUTABLE_OFFSET,
+    FUNCTION_INSTANCE_MODULE_CONTEXT_OPAQUE_PTR_OFFSET, FUNCTION_INSTANCE_TYPE_ID_OFFSET,
+};
 use razero_wasm::instruction::*;
 use razero_wasm::{leb128, module as wasm};
+
+const TABLE_INSTANCE_BASE_ADDRESS_OFFSET: u32 = 0;
+const TABLE_INSTANCE_LEN_OFFSET: u32 = TABLE_INSTANCE_BASE_ADDRESS_OFFSET + 8;
 
 impl super::LoweringState {
     pub(super) fn reset(&mut self) {
@@ -400,6 +408,26 @@ impl<'a> Compiler<'a> {
                     self.ssa_builder.set_current_block(else_block);
                 }
             }
+            OPCODE_BR_TABLE => {
+                let label_count = self.read_u32() as usize;
+                let mut labels = Vec::with_capacity(label_count + 1);
+                for _ in 0..label_count {
+                    labels.push(self.read_u32());
+                }
+                labels.push(self.read_u32());
+                if !self.lowering_state.unreachable {
+                    let index = self.lowering_state.pop();
+                    if label_count == 0 {
+                        let (target_block, arg_num) =
+                            self.lowering_state.br_target_arg_num_for(labels[0]);
+                        let args = self.n_peek_dup(arg_num);
+                        self.insert_jump_to_block(args, target_block);
+                    } else {
+                        self.lower_br_table(&labels, index);
+                    }
+                    self.lowering_state.unreachable = true;
+                }
+            }
             OPCODE_RETURN => {
                 if !self.lowering_state.unreachable {
                     self.lower_return();
@@ -410,6 +438,13 @@ impl<'a> Compiler<'a> {
                 let function_index = self.read_u32();
                 if !self.lowering_state.unreachable {
                     self.lower_call(function_index);
+                }
+            }
+            OPCODE_CALL_INDIRECT => {
+                let type_index = self.read_u32();
+                let table_index = self.read_u32();
+                if !self.lowering_state.unreachable {
+                    self.lower_call_indirect(type_index, table_index);
                 }
             }
             _ => panic!(
@@ -488,13 +523,25 @@ impl<'a> Compiler<'a> {
             .insert_instruction(self.ssa_builder.allocate_instruction().as_return(results));
     }
 
+    fn function_type_index(&self, function_index: wasm::Index) -> wasm::Index {
+        if function_index < self.module.import_function_count {
+            self.module
+                .import_section
+                .iter()
+                .filter_map(|import| match import.desc {
+                    wasm::ImportDesc::Func(type_index) => Some(type_index),
+                    _ => None,
+                })
+                .nth(function_index as usize)
+                .unwrap_or_else(|| panic!("missing import type for function {function_index}"))
+        } else {
+            self.module.function_section
+                [(function_index - self.module.import_function_count) as usize]
+        }
+    }
+
     fn lower_call(&mut self, function_index: wasm::Index) {
-        assert!(
-            function_index >= self.module.import_function_count,
-            "imported calls are not supported by the Rust frontend yet"
-        );
-        let defined_index = (function_index - self.module.import_function_count) as usize;
-        let type_index = self.module.function_section[defined_index];
+        let type_index = self.function_type_index(function_index);
         let function_type = &self.module.type_section[type_index as usize];
         let arg_count = function_type.params.len();
         let tail = self.lowering_state.values.len() - arg_count;
@@ -503,16 +550,39 @@ impl<'a> Compiler<'a> {
 
         let mut args = Vec::with_capacity(2 + wasm_args.len());
         args.push(self.exec_ctx_ptr_value);
-        args.push(self.module_ctx_ptr_value);
-        args.extend(wasm_args);
-
-        let call_id =
+        let call_id = if function_index < self.module.import_function_count {
+            let (func_ptr_offset, module_ctx_ptr_offset, _) = self
+                .offset
+                .as_ref()
+                .expect("module context offsets are required for imported calls")
+                .imported_function_offset(function_index);
+            self.store_caller_module_context();
+            let func_ptr =
+                self.emit_load(self.module_ctx_ptr_value, func_ptr_offset.u32(), Type::I64);
+            let callee_module_ctx = self.emit_load(
+                self.module_ctx_ptr_value,
+                module_ctx_ptr_offset.u32(),
+                Type::I64,
+            );
+            args.push(callee_module_ctx);
+            args.extend(wasm_args);
+            self.ssa_builder.insert_instruction(
+                self.ssa_builder.allocate_instruction().as_call_indirect(
+                    func_ptr,
+                    self.signatures[type_index as usize].id,
+                    Values::from_vec(args),
+                ),
+            )
+        } else {
+            args.push(self.module_ctx_ptr_value);
+            args.extend(wasm_args);
             self.ssa_builder
                 .insert_instruction(self.ssa_builder.allocate_instruction().as_call(
                     function_index_to_func_ref(function_index),
                     self.signatures[type_index as usize].id,
                     Values::from_vec(args),
-                ));
+                ))
+        };
         let instr = self.ssa_builder.instruction(call_id);
         if instr.return_().valid() {
             self.lowering_state.push(instr.return_());
@@ -520,6 +590,145 @@ impl<'a> Compiler<'a> {
         self.lowering_state
             .values
             .extend(instr.r_values.as_slice().iter().copied());
+    }
+
+    fn lower_call_indirect(&mut self, type_index: wasm::Index, table_index: wasm::Index) {
+        let arg_count = self.module.type_section[type_index as usize].params.len();
+        let element_offset = self.lowering_state.pop();
+        let function_instance_ptr_address =
+            self.lower_access_table_with_bounds_check(table_index, element_offset);
+        let function_instance_ptr = self.emit_load(function_instance_ptr_address, 0, Type::I64);
+
+        let zero = self.emit_iconst64(0);
+        let is_null = self.emit_icmp(function_instance_ptr, zero, IntegerCmpCond::Equal);
+        self.emit_exit_if_true_with_code(
+            self.exec_ctx_ptr_value,
+            is_null,
+            ExitCode::INDIRECT_CALL_NULL_POINTER,
+        );
+
+        let actual_type_id = self.emit_load(
+            function_instance_ptr,
+            FUNCTION_INSTANCE_TYPE_ID_OFFSET.u32(),
+            Type::I32,
+        );
+        let type_ids_offset = self
+            .offset
+            .as_ref()
+            .expect("module context offsets are required for call_indirect")
+            .type_ids_1st_element
+            .u32();
+        let type_ids_begin = self.emit_load(self.module_ctx_ptr_value, type_ids_offset, Type::I64);
+        let expected_type_id = self.emit_load(type_ids_begin, type_index * 4, Type::I32);
+        let mismatched = self.emit_icmp(actual_type_id, expected_type_id, IntegerCmpCond::NotEqual);
+        self.emit_exit_if_true_with_code(
+            self.exec_ctx_ptr_value,
+            mismatched,
+            ExitCode::INDIRECT_CALL_TYPE_MISMATCH,
+        );
+
+        let executable_ptr = self.emit_load(
+            function_instance_ptr,
+            FUNCTION_INSTANCE_EXECUTABLE_OFFSET.u32(),
+            Type::I64,
+        );
+        let callee_module_ctx = self.emit_load(
+            function_instance_ptr,
+            FUNCTION_INSTANCE_MODULE_CONTEXT_OPAQUE_PTR_OFFSET.u32(),
+            Type::I64,
+        );
+
+        let tail = self.lowering_state.values.len() - arg_count;
+        let wasm_args = self.lowering_state.values[tail..].to_vec();
+        self.lowering_state.values.truncate(tail);
+
+        self.store_caller_module_context();
+
+        let mut args = Vec::with_capacity(2 + wasm_args.len());
+        args.push(self.exec_ctx_ptr_value);
+        args.push(callee_module_ctx);
+        args.extend(wasm_args);
+        let call_id = self.ssa_builder.insert_instruction(
+            self.ssa_builder.allocate_instruction().as_call_indirect(
+                executable_ptr,
+                self.signatures[type_index as usize].id,
+                Values::from_vec(args),
+            ),
+        );
+        let instr = self.ssa_builder.instruction(call_id);
+        if instr.return_().valid() {
+            self.lowering_state.push(instr.return_());
+        }
+        self.lowering_state
+            .values
+            .extend(instr.r_values.as_slice().iter().copied());
+    }
+
+    fn lower_access_table_with_bounds_check(
+        &mut self,
+        table_index: wasm::Index,
+        element_offset_in_table: Value,
+    ) -> Value {
+        let table_offset = self
+            .offset
+            .as_ref()
+            .expect("module context offsets are required for table access")
+            .table_offset(table_index as usize)
+            .u32();
+        let table_instance_ptr = self.emit_load(self.module_ctx_ptr_value, table_offset, Type::I64);
+        let table_len = self.emit_load(table_instance_ptr, TABLE_INSTANCE_LEN_OFFSET, Type::I32);
+        let out_of_bounds = self.emit_icmp(
+            element_offset_in_table,
+            table_len,
+            IntegerCmpCond::UnsignedGreaterThanOrEqual,
+        );
+        self.emit_exit_if_true_with_code(
+            self.exec_ctx_ptr_value,
+            out_of_bounds,
+            ExitCode::TABLE_OUT_OF_BOUNDS,
+        );
+        let table_base = self.emit_load(
+            table_instance_ptr,
+            TABLE_INSTANCE_BASE_ADDRESS_OFFSET,
+            Type::I64,
+        );
+        let shift = self.emit_iconst64(3);
+        let scaled = self.emit_binary(
+            Opcode::Ishl,
+            element_offset_in_table,
+            shift,
+            element_offset_in_table.ty(),
+        );
+        self.emit_binary(Opcode::Iadd, table_base, scaled, table_base.ty())
+    }
+
+    fn lower_br_table(&mut self, labels: &[u32], index: Value) {
+        let (_, arg_num) = self.lowering_state.br_target_arg_num_for(labels[0]);
+        let current_block = self
+            .ssa_builder
+            .current_block()
+            .expect("br_table requires a current block");
+        let mut targets = Vec::with_capacity(labels.len());
+
+        for &label in labels {
+            let args = self.n_peek_dup(arg_num);
+            let (target_block, _) = self.lowering_state.br_target_arg_num_for(label);
+            let trampoline = self.ssa_builder.allocate_basic_block();
+            self.ssa_builder.set_current_block(trampoline);
+            self.insert_jump_to_block(args, target_block);
+            targets.push(Value(trampoline.0 as u64));
+        }
+
+        self.ssa_builder.set_current_block(current_block);
+        self.ssa_builder.insert_instruction(
+            self.ssa_builder
+                .allocate_instruction()
+                .as_br_table(index, Values::from_vec(targets.clone())),
+        );
+        for target in targets {
+            self.ssa_builder
+                .seal(crate::ssa::BasicBlockId(target.0 as u32));
+        }
     }
 
     fn insert_jump_to_block(&mut self, args: Values, target_block: BasicBlock) {
@@ -560,6 +769,55 @@ impl<'a> Compiler<'a> {
         instr.typ = result_ty;
         let id = self.ssa_builder.insert_instruction(instr);
         self.ssa_builder.instruction(id).return_()
+    }
+
+    fn emit_load(&mut self, ptr: Value, offset: u32, ty: Type) -> Value {
+        let id = self.ssa_builder.insert_instruction(
+            self.ssa_builder
+                .allocate_instruction()
+                .as_load(ptr, offset, ty),
+        );
+        self.ssa_builder.instruction(id).return_()
+    }
+
+    fn emit_store(&mut self, value: Value, ptr: Value, offset: u32) {
+        self.ssa_builder
+            .insert_instruction(self.ssa_builder.allocate_instruction().as_store(
+                Opcode::Store,
+                value,
+                ptr,
+                offset,
+            ));
+    }
+
+    fn emit_iconst64(&mut self, value: u64) -> Value {
+        let id = self
+            .ssa_builder
+            .insert_instruction(self.ssa_builder.allocate_instruction().as_iconst64(value));
+        self.ssa_builder.instruction(id).return_()
+    }
+
+    fn emit_icmp(&mut self, x: Value, y: Value, cond: IntegerCmpCond) -> Value {
+        let id = self
+            .ssa_builder
+            .insert_instruction(self.ssa_builder.allocate_instruction().as_icmp(x, y, cond));
+        self.ssa_builder.instruction(id).return_()
+    }
+
+    fn emit_exit_if_true_with_code(&mut self, ctx: Value, cond: Value, code: ExitCode) {
+        self.ssa_builder.insert_instruction(
+            self.ssa_builder
+                .allocate_instruction()
+                .as_exit_if_true_with_code(ctx, cond, code),
+        );
+    }
+
+    fn store_caller_module_context(&mut self) {
+        self.emit_store(
+            self.module_ctx_ptr_value,
+            self.exec_ctx_ptr_value,
+            EXECUTION_CONTEXT_OFFSET_CALLER_MODULE_CONTEXT_PTR.u32(),
+        );
     }
 
     fn emit_ternary(
@@ -654,6 +912,7 @@ mod tests {
     use super::*;
     use crate::frontend::{signature_for_wasm_function_type, Compiler};
     use crate::ssa::{Builder, Signature, SignatureId, Type};
+    use crate::wazevoapi::ModuleContextOffsetData;
     use razero_wasm::module::{Code, FunctionType, Module, ValueType};
 
     fn function_type(params: &[ValueType], results: &[ValueType]) -> FunctionType {
@@ -667,7 +926,7 @@ mod tests {
         Compiler::new(
             module,
             Builder::new(),
-            None,
+            Some(ModuleContextOffsetData::new(module, false)),
             false,
             false,
             false,
@@ -771,6 +1030,141 @@ mod tests {
         assert_eq!(
             compiler.format(),
             "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32)\n\tv3:i32 = Iconst 7\n\tv4:i32 = Call f0, sig0, exec_ctx, module_ctx, v3\n\tJump blk_ret, v4\n"
+        );
+    }
+
+    #[test]
+    fn lowers_imported_call_via_module_context_indirection() {
+        let ty = function_type(&[ValueType::I32], &[ValueType::I32]);
+        let module = Module {
+            type_section: vec![ty.clone()],
+            import_section: vec![wasm::Import {
+                ty: wasm::ExternType::FUNC,
+                module: "env".into(),
+                name: "f".into(),
+                desc: wasm::ImportDesc::Func(0),
+                index_per_type: 0,
+            }],
+            import_function_count: 1,
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_I32_CONST, 7, OPCODE_CALL, 0, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(1, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32)\n\tv3:i32 = Iconst 7\n\tStore module_ctx, exec_ctx, 0x8\n\tv4:i64 = Load module_ctx, 0x8\n\tv5:i64 = Load module_ctx, 0x10\n\tv6:i32 = CallIndirect sig0, v4, exec_ctx, v5, v3\n\tJump blk_ret, v6\n"
+        );
+    }
+
+    #[test]
+    fn lowers_call_indirect_with_table_checks() {
+        let empty = function_type(&[], &[]);
+        let callee = function_type(&[], &[ValueType::I32]);
+        let caller = function_type(&[ValueType::I32], &[ValueType::I32]);
+        let module = Module {
+            type_section: vec![empty.clone(), empty, callee.clone(), caller],
+            function_section: vec![3],
+            table_section: vec![wasm::Table {
+                min: 1,
+                max: None,
+                ty: wasm::RefType::FUNCREF,
+            }],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_CALL_INDIRECT, 2, 0, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32)\n\tv3:i64 = Load module_ctx, 0x10\n\tv4:i32 = Load v3, 0x8\n\tv5:i32 = Icmp v2, v4\n\tExitIfTrueWithCode v5, exec_ctx, table_out_of_bounds\n\tv6:i64 = Load v3, 0x0\n\tv7:i64 = Iconst 3\n\tv8:i32 = Ishl v2, v7\n\tv9:i64 = Iadd v6, v8\n\tv10:i64 = Load v9, 0x0\n\tv11:i64 = Iconst 0\n\tv12:i32 = Icmp v10, v11\n\tExitIfTrueWithCode v12, exec_ctx, indirect_call_null_pointer\n\tv13:i32 = Load v10, 0x10\n\tv14:i64 = Load module_ctx, 0x8\n\tv15:i32 = Load v14, 0x8\n\tv16:i32 = Icmp v13, v15\n\tExitIfTrueWithCode v16, exec_ctx, indirect_call_type_mismatch\n\tv17:i64 = Load v10, 0x0\n\tv18:i64 = Load v10, 0x8\n\tStore module_ctx, exec_ctx, 0x8\n\tv19:i32 = CallIndirect sig2, v17, exec_ctx, v18\n\tJump blk_ret, v19\n"
+        );
+    }
+
+    #[test]
+    fn lowers_br_table_with_trampoline_blocks() {
+        let module = Module {
+            type_section: vec![
+                function_type(&[ValueType::I32], &[ValueType::I32]),
+                function_type(&[], &[]),
+            ],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![
+                    OPCODE_BLOCK,
+                    1,
+                    OPCODE_BLOCK,
+                    1,
+                    OPCODE_BLOCK,
+                    1,
+                    OPCODE_BLOCK,
+                    1,
+                    OPCODE_BLOCK,
+                    1,
+                    OPCODE_BLOCK,
+                    1,
+                    OPCODE_LOCAL_GET,
+                    0,
+                    OPCODE_BR_TABLE,
+                    6,
+                    0,
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    0,
+                    OPCODE_END,
+                    OPCODE_I32_CONST,
+                    11,
+                    OPCODE_RETURN,
+                    OPCODE_END,
+                    OPCODE_I32_CONST,
+                    12,
+                    OPCODE_RETURN,
+                    OPCODE_END,
+                    OPCODE_I32_CONST,
+                    13,
+                    OPCODE_RETURN,
+                    OPCODE_END,
+                    OPCODE_I32_CONST,
+                    14,
+                    OPCODE_RETURN,
+                    OPCODE_END,
+                    OPCODE_I32_CONST,
+                    15,
+                    OPCODE_RETURN,
+                    OPCODE_END,
+                    OPCODE_I32_CONST,
+                    16,
+                    OPCODE_RETURN,
+                    OPCODE_END,
+                ],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32)\n\tBrTable v2, [blk7, blk8, blk9, blk10, blk11, blk12, blk13]\n\nblk1: () <-- (blk12)\n\tv8:i32 = Iconst 16\n\tReturn v8\n\nblk2: () <-- (blk11)\n\tv7:i32 = Iconst 15\n\tReturn v7\n\nblk3: () <-- (blk10)\n\tv6:i32 = Iconst 14\n\tReturn v6\n\nblk4: () <-- (blk9)\n\tv5:i32 = Iconst 13\n\tReturn v5\n\nblk5: () <-- (blk8)\n\tv4:i32 = Iconst 12\n\tReturn v4\n\nblk6: () <-- (blk7, blk13)\n\tv3:i32 = Iconst 11\n\tReturn v3\n\nblk7: () <-- (blk0)\n\tv6:invalid = Jump blk6\n\nblk8: () <-- (blk0)\n\tv5:invalid = Jump blk5\n\nblk9: () <-- (blk0)\n\tv4:invalid = Jump blk4\n\nblk10: () <-- (blk0)\n\tv3:invalid = Jump blk3\n\nblk11: () <-- (blk0)\n\tv2:invalid = Jump blk2\n\nblk12: () <-- (blk0)\n\tmodule_ctx:invalid = Jump blk1\n\nblk13: () <-- (blk0)\n\tv6:invalid = Jump blk6\n"
         );
     }
 

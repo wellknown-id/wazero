@@ -3,7 +3,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::engine::NullEngine;
+use crate::engine::{
+    Engine as WasmEngine, EngineError, ModuleEngine as WasmModuleEngine, NullEngine,
+};
 use crate::module::{ExternType, FunctionType, ImportDesc, Module};
 use crate::module_instance::{
     FunctionTypeId, ModuleInstance, ModuleInstantiationError, MAXIMUM_FUNCTION_TYPES,
@@ -15,6 +17,7 @@ pub const NAME_TO_MODULE_SHRINK_THRESHOLD: usize = 100;
 
 pub struct Store<E = NullEngine> {
     pub module_list: StoreModuleList,
+    pub module_engines: BTreeMap<ModuleInstanceId, Box<dyn WasmModuleEngine>>,
     pub name_to_module: BTreeMap<String, ModuleInstanceId>,
     pub name_to_module_cap: usize,
     pub engine: E,
@@ -75,6 +78,12 @@ impl From<ModuleInstantiationError> for StoreError {
     }
 }
 
+impl From<EngineError> for StoreError {
+    fn from(value: EngineError) -> Self {
+        Self::Instantiation(value.to_string())
+    }
+}
+
 impl<E: Default> Default for Store<E> {
     fn default() -> Self {
         Self::new(E::default())
@@ -85,6 +94,7 @@ impl<E> Store<E> {
     pub fn new(engine: E) -> Self {
         Self {
             module_list: StoreModuleList::default(),
+            module_engines: BTreeMap::new(),
             name_to_module: BTreeMap::new(),
             name_to_module_cap: NAME_TO_MODULE_SHRINK_THRESHOLD,
             engine,
@@ -122,6 +132,19 @@ impl<E> Store<E> {
 
     pub fn instance_mut(&mut self, id: ModuleInstanceId) -> Option<&mut ModuleInstance> {
         self.modules.get_mut(&id)
+    }
+
+    pub fn module_engine(&self, id: ModuleInstanceId) -> Option<&dyn WasmModuleEngine> {
+        self.module_engines.get(&id).map(Box::as_ref)
+    }
+
+    pub fn module_engine_mut(
+        &mut self,
+        id: ModuleInstanceId,
+    ) -> Option<&mut (dyn WasmModuleEngine + '_)> {
+        self.module_engines
+            .get_mut(&id)
+            .map(|engine| engine.as_mut() as &mut (dyn WasmModuleEngine + '_))
     }
 
     pub fn get_function_type_ids(
@@ -185,6 +208,7 @@ impl<E> Store<E> {
         };
 
         let removed_links = self.module_list.remove(id);
+        self.module_engines.remove(&id);
         self.modules.remove(&id);
 
         if !module.module_name.is_empty() {
@@ -233,40 +257,10 @@ impl<E> Store<E> {
         self.name_to_module.clear();
         self.name_to_module_cap = 0;
         self.type_ids.clear();
+        self.module_engines.clear();
         self.modules.clear();
         self.closed = true;
         Ok(())
-    }
-
-    pub fn instantiate(
-        &mut self,
-        mut module: Module,
-        name: impl Into<String>,
-        type_ids: Option<Vec<FunctionTypeId>>,
-    ) -> Result<ModuleInstanceId, StoreError> {
-        if self.closed {
-            return Err(StoreError::AlreadyClosed);
-        }
-
-        let type_ids = match type_ids {
-            Some(type_ids) => {
-                if type_ids.len() != module.type_section.len() {
-                    return Err(StoreError::TypeIdCountMismatch {
-                        expected: module.type_section.len(),
-                        actual: type_ids.len(),
-                    });
-                }
-                type_ids
-            }
-            None => self.get_function_type_ids(&mut module.type_section)?,
-        };
-
-        let id = self.next_module_id;
-        self.next_module_id += 1;
-
-        let mut instance = ModuleInstance::new(id, name, module, type_ids);
-        self.instantiate_module(&mut instance)?;
-        self.register_module(instance)
     }
 
     fn instantiate_module(&self, instance: &mut ModuleInstance) -> Result<(), StoreError> {
@@ -492,14 +486,154 @@ impl<E> Store<E> {
     }
 }
 
+impl<E: WasmEngine> Store<E> {
+    pub fn instantiate(
+        &mut self,
+        mut module: Module,
+        name: impl Into<String>,
+        type_ids: Option<Vec<FunctionTypeId>>,
+    ) -> Result<ModuleInstanceId, StoreError> {
+        if self.closed {
+            return Err(StoreError::AlreadyClosed);
+        }
+
+        self.engine.compile_module(&module)?;
+
+        let type_ids = match type_ids {
+            Some(type_ids) => {
+                if type_ids.len() != module.type_section.len() {
+                    return Err(StoreError::TypeIdCountMismatch {
+                        expected: module.type_section.len(),
+                        actual: type_ids.len(),
+                    });
+                }
+                type_ids
+            }
+            None => self.get_function_type_ids(&mut module.type_section)?,
+        };
+
+        let id = self.next_module_id;
+        self.next_module_id += 1;
+
+        let mut instance = ModuleInstance::new(id, name, module, type_ids);
+        self.instantiate_module(&mut instance)?;
+        let module_engine = self.instantiate_module_engine(&instance)?;
+        let id = self.register_module(instance)?;
+        self.module_engines.insert(id, module_engine);
+        Ok(id)
+    }
+
+    fn instantiate_module_engine(
+        &self,
+        instance: &ModuleInstance,
+    ) -> Result<Box<dyn WasmModuleEngine>, StoreError> {
+        let mut module_engine = self.engine.new_module_engine(&instance.source, instance)?;
+        for import in &instance.source.import_section {
+            let imported_module = self.module(&import.module)?;
+            let imported = imported_module.get_export(&import.name, import.ty)?;
+            let imported_module_engine =
+                self.module_engine(imported_module.id).ok_or_else(|| {
+                    StoreError::Instantiation(format!(
+                        "module[{}] missing engine state",
+                        import.module
+                    ))
+                })?;
+            match &import.desc {
+                ImportDesc::Func(type_index) => module_engine.resolve_imported_function(
+                    import.index_per_type,
+                    *type_index,
+                    imported.index,
+                    imported_module_engine,
+                ),
+                ImportDesc::Memory(_) => {
+                    module_engine.resolve_imported_memory(imported_module_engine);
+                }
+                _ => {}
+            }
+        }
+        Ok(module_engine)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
     use crate::const_expr::ConstExpr;
+    use crate::engine::{EngineError, FunctionHandle, ModuleEngine, NullFunctionHandle};
     use crate::module::{
-        DataSegment, ElementMode, ElementSegment, Export, FunctionType, Global, GlobalType, Memory,
-        Module, RefType, Table, ValueType,
+        Code, DataSegment, ElementMode, ElementSegment, Export, ExternType, FunctionType, Global,
+        GlobalType, Memory, Module, RefType, Table, ValueType,
     };
+
+    #[derive(Clone, Default)]
+    struct TestEngine {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[derive(Clone, Default)]
+    struct TestModuleEngine {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl ModuleEngine for TestModuleEngine {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+
+        fn new_function(&self, index: u32) -> Box<dyn FunctionHandle> {
+            Box::new(NullFunctionHandle::new(index))
+        }
+
+        fn resolve_imported_function(
+            &mut self,
+            index: u32,
+            desc_func: u32,
+            index_in_imported_module: u32,
+            _imported_module_engine: &dyn ModuleEngine,
+        ) {
+            self.events.lock().unwrap().push(format!(
+                "resolve-func:{index}:{desc_func}:{index_in_imported_module}"
+            ));
+        }
+
+        fn resolve_imported_memory(&mut self, _imported_module_engine: &dyn ModuleEngine) {
+            self.events
+                .lock()
+                .unwrap()
+                .push("resolve-memory".to_string());
+        }
+    }
+
+    impl crate::engine::Engine for TestEngine {
+        fn compile_module(&mut self, module: &Module) -> Result<(), EngineError> {
+            self.events.lock().unwrap().push(format!(
+                "compile:{}:{}",
+                module.import_section.len(),
+                module.function_section.len()
+            ));
+            Ok(())
+        }
+
+        fn new_module_engine(
+            &self,
+            _module: &Module,
+            instance: &ModuleInstance,
+        ) -> Result<Box<dyn ModuleEngine>, EngineError> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("new-engine:{}", instance.id));
+            Ok(Box::new(TestModuleEngine {
+                events: self.events.clone(),
+            }))
+        }
+    }
 
     #[test]
     fn register_delete_and_lookup_module_match_go_behavior() {
@@ -644,6 +778,79 @@ mod tests {
             )),
             store.instantiate(importing, "consumer", None)
         );
+    }
+
+    #[test]
+    fn instantiate_wires_module_engine_and_resolves_imports() {
+        let engine = TestEngine::default();
+        let events = engine.events.clone();
+        let mut store = Store::new(engine);
+        let host = Module {
+            type_section: vec![FunctionType::default()],
+            function_section: vec![0],
+            code_section: vec![Code::default()],
+            memory_section: Some(Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                ..Memory::default()
+            }),
+            export_section: vec![
+                Export {
+                    ty: ExternType::FUNC,
+                    name: "run".to_string(),
+                    index: 0,
+                },
+                Export {
+                    ty: ExternType::MEMORY,
+                    name: "memory".to_string(),
+                    index: 0,
+                },
+            ],
+            ..Module::default()
+        };
+        store.instantiate(host, "env", None).unwrap();
+
+        let consumer = Module {
+            type_section: vec![FunctionType::default()],
+            import_section: vec![
+                crate::module::Import::function("env", "run", 0),
+                crate::module::Import::memory(
+                    "env",
+                    "memory",
+                    Memory {
+                        min: 1,
+                        cap: 1,
+                        max: 1,
+                        is_max_encoded: true,
+                        ..Memory::default()
+                    },
+                ),
+            ],
+            import_function_count: 1,
+            import_memory_count: 1,
+            function_section: vec![0],
+            code_section: vec![Code::default()],
+            ..Module::default()
+        };
+        let consumer_id = store.instantiate(consumer, "consumer", None).unwrap();
+
+        assert!(store.module_engine(consumer_id).is_some());
+        assert_eq!(
+            vec![
+                "compile:0:1",
+                "new-engine:1",
+                "compile:2:1",
+                "new-engine:2",
+                "resolve-func:0:0:0",
+                "resolve-memory",
+            ],
+            *events.lock().unwrap()
+        );
+
+        store.delete_module(consumer_id).unwrap();
+        assert!(store.module_engine(consumer_id).is_none());
     }
 
     #[test]

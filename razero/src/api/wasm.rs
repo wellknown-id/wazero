@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::BTreeMap,
     fmt::{self, Display, Formatter},
     panic::{self, AssertUnwindSafe},
@@ -25,6 +26,27 @@ pub type HostCallback =
     Arc<dyn Fn(Context, Module, &[u64]) -> Result<Vec<u64>> + Send + Sync + 'static>;
 
 pub type RuntimeModuleRegistry = Arc<Mutex<BTreeMap<String, Module>>>;
+
+thread_local! {
+    static ACTIVE_INVOCATIONS: RefCell<Vec<(Context, Module)>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn with_active_invocation<T>(
+    ctx: &Context,
+    module: &Module,
+    f: impl FnOnce() -> T,
+) -> T {
+    ACTIVE_INVOCATIONS.with(|active| active.borrow_mut().push((ctx.clone(), module.clone())));
+    let result = f();
+    ACTIVE_INVOCATIONS.with(|active| {
+        active.borrow_mut().pop();
+    });
+    result
+}
+
+pub(crate) fn active_invocation() -> Option<(Context, Module)> {
+    ACTIVE_INVOCATIONS.with(|active| active.borrow().last().cloned())
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum ExternType {
@@ -245,44 +267,185 @@ impl GlobalValue {
     }
 }
 
-#[derive(Clone)]
-pub struct Global {
+trait GlobalAccess: Send + Sync {
+    fn get(&self) -> GlobalValue;
+    fn is_mutable(&self) -> bool;
+}
+
+struct OwnedGlobalAccess {
     value: Arc<Mutex<GlobalValue>>,
     mutable: bool,
+}
+
+impl GlobalAccess for OwnedGlobalAccess {
+    fn get(&self) -> GlobalValue {
+        *self.value.lock().expect("global poisoned")
+    }
+
+    fn is_mutable(&self) -> bool {
+        self.mutable
+    }
+}
+
+struct DynamicGlobalAccess {
+    getter: Arc<dyn Fn() -> GlobalValue + Send + Sync>,
+    mutable: bool,
+}
+
+impl GlobalAccess for DynamicGlobalAccess {
+    fn get(&self) -> GlobalValue {
+        (self.getter)()
+    }
+
+    fn is_mutable(&self) -> bool {
+        self.mutable
+    }
+}
+
+#[derive(Clone)]
+pub struct Global {
+    access: Arc<dyn GlobalAccess>,
 }
 
 impl Global {
     pub fn new(value: GlobalValue, mutable: bool) -> Self {
         Self {
-            value: Arc::new(Mutex::new(value)),
-            mutable,
+            access: Arc::new(OwnedGlobalAccess {
+                value: Arc::new(Mutex::new(value)),
+                mutable,
+            }),
+        }
+    }
+
+    pub(crate) fn dynamic(
+        mutable: bool,
+        getter: impl Fn() -> GlobalValue + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            access: Arc::new(DynamicGlobalAccess {
+                getter: Arc::new(getter),
+                mutable,
+            }),
         }
     }
 
     pub fn value_type(&self) -> ValueType {
-        self.value.lock().expect("global poisoned").value_type()
+        self.access.get().value_type()
     }
 
     pub fn is_mutable(&self) -> bool {
-        self.mutable
+        self.access.is_mutable()
     }
 
     pub fn get(&self) -> GlobalValue {
-        *self.value.lock().expect("global poisoned")
+        self.access.get()
+    }
+}
+
+trait MemoryAccess: Send + Sync {
+    fn size(&self) -> u32;
+    fn read(&self, offset: usize, len: usize) -> Option<Vec<u8>>;
+    fn write_u32_le(&self, offset: u32, value: u32) -> bool;
+    fn grow(&self, delta_pages: u32, maximum_pages: Option<u32>) -> Option<u32>;
+}
+
+struct OwnedMemoryAccess {
+    memory: Arc<Mutex<LinearMemory>>,
+}
+
+impl MemoryAccess for OwnedMemoryAccess {
+    fn size(&self) -> u32 {
+        self.memory.lock().expect("memory poisoned").len() as u32
+    }
+
+    fn read(&self, offset: usize, len: usize) -> Option<Vec<u8>> {
+        let memory = self.memory.lock().expect("memory poisoned");
+        let end = offset.checked_add(len)?;
+        memory.bytes().get(offset..end).map(ToOwned::to_owned)
+    }
+
+    fn write_u32_le(&self, offset: u32, value: u32) -> bool {
+        let mut memory = self.memory.lock().expect("memory poisoned");
+        let start = offset as usize;
+        let end = match start.checked_add(4) {
+            Some(end) => end,
+            None => return false,
+        };
+        let Some(slice) = memory.bytes_mut().get_mut(start..end) else {
+            return false;
+        };
+        slice.copy_from_slice(&value.to_le_bytes());
+        true
+    }
+
+    fn grow(&self, delta_pages: u32, maximum_pages: Option<u32>) -> Option<u32> {
+        let mut memory = self.memory.lock().expect("memory poisoned");
+        let previous = (memory.len() / 65_536) as u32;
+        let new_pages = previous.checked_add(delta_pages)?;
+        if maximum_pages.is_some_and(|maximum| new_pages > maximum) {
+            return None;
+        }
+        memory.reallocate(new_pages as usize * 65_536)?;
+        Some(previous)
+    }
+}
+
+struct DynamicMemoryAccess {
+    size: Arc<dyn Fn() -> u32 + Send + Sync>,
+    read: Arc<dyn Fn(usize, usize) -> Option<Vec<u8>> + Send + Sync>,
+    write_u32_le: Arc<dyn Fn(u32, u32) -> bool + Send + Sync>,
+    grow: Arc<dyn Fn(u32, Option<u32>) -> Option<u32> + Send + Sync>,
+}
+
+impl MemoryAccess for DynamicMemoryAccess {
+    fn size(&self) -> u32 {
+        (self.size)()
+    }
+
+    fn read(&self, offset: usize, len: usize) -> Option<Vec<u8>> {
+        (self.read)(offset, len)
+    }
+
+    fn write_u32_le(&self, offset: u32, value: u32) -> bool {
+        (self.write_u32_le)(offset, value)
+    }
+
+    fn grow(&self, delta_pages: u32, maximum_pages: Option<u32>) -> Option<u32> {
+        (self.grow)(delta_pages, maximum_pages)
     }
 }
 
 #[derive(Clone)]
 pub struct Memory {
     definition: MemoryDefinition,
-    bytes: Arc<Mutex<Vec<u8>>>,
+    access: Arc<dyn MemoryAccess>,
 }
 
 impl Memory {
     pub fn new(definition: MemoryDefinition, linear_memory: LinearMemory) -> Self {
         Self {
             definition,
-            bytes: Arc::new(Mutex::new(linear_memory.bytes().to_vec())),
+            access: Arc::new(OwnedMemoryAccess {
+                memory: Arc::new(Mutex::new(linear_memory)),
+            }),
+        }
+    }
+
+    pub(crate) fn dynamic(
+        definition: MemoryDefinition,
+        size: impl Fn() -> u32 + Send + Sync + 'static,
+        read: impl Fn(usize, usize) -> Option<Vec<u8>> + Send + Sync + 'static,
+        write_u32_le: impl Fn(u32, u32) -> bool + Send + Sync + 'static,
+        grow: impl Fn(u32, Option<u32>) -> Option<u32> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            definition,
+            access: Arc::new(DynamicMemoryAccess {
+                size: Arc::new(size),
+                read: Arc::new(read),
+                write_u32_le: Arc::new(write_u32_le),
+                grow: Arc::new(grow),
+            }),
         }
     }
 
@@ -291,7 +454,7 @@ impl Memory {
     }
 
     pub fn size(&self) -> u32 {
-        self.bytes.lock().expect("memory poisoned").len() as u32
+        self.access.size()
     }
 
     pub fn pages(&self) -> u32 {
@@ -299,9 +462,7 @@ impl Memory {
     }
 
     pub fn read(&self, offset: usize, len: usize) -> Option<Vec<u8>> {
-        let bytes = self.bytes.lock().expect("memory poisoned");
-        let end = offset.checked_add(len)?;
-        bytes.get(offset..end).map(ToOwned::to_owned)
+        self.access.read(offset, len)
     }
 
     pub fn read_u32_le(&self, offset: u32) -> Option<u32> {
@@ -310,32 +471,12 @@ impl Memory {
     }
 
     pub fn write_u32_le(&self, offset: u32, value: u32) -> bool {
-        let mut bytes = self.bytes.lock().expect("memory poisoned");
-        let start = offset as usize;
-        let end = match start.checked_add(4) {
-            Some(end) => end,
-            None => return false,
-        };
-        let Some(slice) = bytes.get_mut(start..end) else {
-            return false;
-        };
-        slice.copy_from_slice(&value.to_le_bytes());
-        true
+        self.access.write_u32_le(offset, value)
     }
 
     pub fn grow(&self, delta_pages: u32) -> Option<u32> {
-        let mut bytes = self.bytes.lock().expect("memory poisoned");
-        let previous = (bytes.len() / 65_536) as u32;
-        let new_pages = previous.checked_add(delta_pages)?;
-        if self
-            .definition
-            .maximum_pages()
-            .is_some_and(|maximum| new_pages > maximum)
-        {
-            return None;
-        }
-        bytes.resize(new_pages as usize * 65_536, 0);
-        Some(previous)
+        self.access
+            .grow(delta_pages, self.definition.maximum_pages())
     }
 }
 
@@ -497,6 +638,7 @@ pub(crate) struct ModuleInner {
     memory: Option<Memory>,
     globals: BTreeMap<String, Global>,
     close_notifier: Option<Arc<dyn CloseNotifier>>,
+    close_hook: Option<Arc<dyn Fn(u32) + Send + Sync>>,
     closed: AtomicBool,
     exit_code: AtomicU32,
     runtime_registry: Option<Weak<Mutex<BTreeMap<String, Module>>>>,
@@ -513,6 +655,7 @@ impl Module {
         memory: Option<Memory>,
         globals: BTreeMap<String, Global>,
         close_notifier: Option<Arc<dyn CloseNotifier>>,
+        close_hook: Option<Arc<dyn Fn(u32) + Send + Sync>>,
         runtime_registry: Option<Weak<Mutex<BTreeMap<String, Module>>>>,
     ) -> Self {
         Self {
@@ -537,6 +680,7 @@ impl Module {
                     memory,
                     globals,
                     close_notifier,
+                    close_hook,
                     closed: AtomicBool::new(false),
                     exit_code: AtomicU32::new(0),
                     runtime_registry,
@@ -602,6 +746,9 @@ impl Module {
         self.inner.exit_code.store(exit_code, Ordering::SeqCst);
         if let Some(notifier) = &self.inner.close_notifier {
             notifier.close_notify(ctx, exit_code);
+        }
+        if let Some(hook) = &self.inner.close_hook {
+            hook(exit_code);
         }
         if let (Some(name), Some(registry)) = (&self.inner.name, &self.inner.runtime_registry) {
             if let Some(registry) = registry.upgrade() {

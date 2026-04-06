@@ -4,10 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::{
-    api::error::Result,
-    ctx_keys::Context,
-};
+use crate::{api::error::Result, ctx_keys::Context};
 
 pub trait Yielder: Send + Sync {
     fn r#yield(&self);

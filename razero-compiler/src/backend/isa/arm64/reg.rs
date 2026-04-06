@@ -88,12 +88,12 @@ pub const CALLER_SAVED_FLOAT_REGS: [RealReg; 18] = [
 ];
 
 pub const ALLOCATABLE_INT_REGS: [RealReg; 27] = [
-    X8, X9, X10, X11, X12, X13, X14, X15, X16, X17, X19, X20, X21, X22, X23, X24, X26, X29,
-    X30, X7, X6, X5, X4, X3, X2, X1, X0,
+    X8, X9, X10, X11, X12, X13, X14, X15, X16, X17, X19, X20, X21, X22, X23, X24, X26, X29, X30,
+    X7, X6, X5, X4, X3, X2, X1, X0,
 ];
 pub const ALLOCATABLE_FLOAT_REGS: [RealReg; 31] = [
-    V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21, V22, V23, V24, V25,
-    V26, V27, V28, V29, V30, V7, V6, V5, V4, V3, V2, V1, V0,
+    V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21, V22, V23, V24, V25, V26,
+    V27, V28, V29, V30, V7, V6, V5, V4, V3, V2, V1, V0,
 ];
 
 pub fn reg_type(reg: RealReg) -> RegType {

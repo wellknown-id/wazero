@@ -1,43 +1,107 @@
 use std::sync::Arc;
 
+use razero_secmem::GuardedAllocation;
+
 use crate::ctx_keys::Context;
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LinearMemory {
-    bytes: Vec<u8>,
+    backing: LinearMemoryBacking,
+    len: usize,
     max: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum LinearMemoryBacking {
+    Vec(Vec<u8>),
+    Guarded(GuardedAllocation),
+}
+
+impl Default for LinearMemoryBacking {
+    fn default() -> Self {
+        Self::Vec(Vec::new())
+    }
+}
+
+impl Default for LinearMemory {
+    fn default() -> Self {
+        Self {
+            backing: LinearMemoryBacking::default(),
+            len: 0,
+            max: 0,
+        }
+    }
 }
 
 impl LinearMemory {
     pub fn new(initial: usize, max: usize) -> Self {
         Self {
-            bytes: vec![0; initial],
+            backing: LinearMemoryBacking::Vec(vec![0; initial]),
+            len: initial,
+            max,
+        }
+    }
+
+    pub fn from_guarded(allocation: GuardedAllocation, initial: usize, max: usize) -> Self {
+        Self {
+            backing: LinearMemoryBacking::Guarded(allocation),
+            len: initial,
             max,
         }
     }
 
     pub fn len(&self) -> usize {
-        self.bytes.len()
+        self.len
     }
 
     pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
+        self.len() == 0
     }
 
     pub fn bytes(&self) -> &[u8] {
-        &self.bytes
+        match &self.backing {
+            LinearMemoryBacking::Vec(bytes) => &bytes[..self.len],
+            LinearMemoryBacking::Guarded(allocation) => &allocation.as_slice()[..self.len],
+        }
+    }
+
+    pub fn bytes_mut(&mut self) -> &mut [u8] {
+        match &mut self.backing {
+            LinearMemoryBacking::Vec(bytes) => &mut bytes[..self.len],
+            LinearMemoryBacking::Guarded(allocation) => &mut allocation.as_mut_slice()[..self.len],
+        }
     }
 
     pub fn reallocate(&mut self, size: usize) -> Option<&mut [u8]> {
         if size > self.max {
             return None;
         }
-        self.bytes.resize(size, 0);
-        Some(&mut self.bytes)
+        match &mut self.backing {
+            LinearMemoryBacking::Vec(bytes) => {
+                bytes.resize(size, 0);
+                self.len = size;
+                Some(&mut bytes[..self.len])
+            }
+            LinearMemoryBacking::Guarded(allocation) => {
+                if size > allocation.len() {
+                    return None;
+                }
+                let previous = self.len;
+                if size < allocation.len() {
+                    allocation.as_mut_slice()[size..previous].fill(0);
+                }
+                self.len = size;
+                Some(&mut allocation.as_mut_slice()[..self.len])
+            }
+        }
     }
 
     pub fn free(&mut self) {
-        self.bytes.clear();
+        match &mut self.backing {
+            LinearMemoryBacking::Vec(bytes) => bytes.clear(),
+            LinearMemoryBacking::Guarded(allocation) => allocation.as_mut_slice().fill(0),
+        }
+        self.len = 0;
     }
 }
 
@@ -54,10 +118,7 @@ impl MemoryAllocator for DefaultMemoryAllocator {
     }
 }
 
-pub fn with_memory_allocator(
-    ctx: &Context,
-    allocator: impl MemoryAllocator + 'static,
-) -> Context {
+pub fn with_memory_allocator(ctx: &Context, allocator: impl MemoryAllocator + 'static) -> Context {
     let mut cloned = ctx.clone();
     cloned.memory_allocator = Some(Arc::new(allocator));
     cloned

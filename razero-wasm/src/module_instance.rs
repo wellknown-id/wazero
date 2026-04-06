@@ -12,8 +12,8 @@ use crate::instruction::{
 use crate::leb128;
 use crate::memory::MemoryInstance;
 use crate::module::{
-    DataSegment, ElementMode, ElementSegment, Export, GlobalType, Memory, Module, RefType,
-    SectionId, Table, ValueType,
+    DataSegment, ElementMode, ElementSegment, Export, GlobalType, Memory, Module, SectionId, Table,
+    ValueType,
 };
 use crate::store_module_list::{ModuleInstanceId, ModuleLinks};
 use crate::table::TableInstance;
@@ -175,7 +175,7 @@ impl ModuleInstance {
     ) -> Result<(), ModuleInstantiationError> {
         self.element_instances = vec![Vec::new(); elements.len()];
         for (index, element) in elements.iter().enumerate() {
-            if element.ty == RefType::FUNCREF && element.mode == ElementMode::Passive {
+            if element.mode == ElementMode::Passive {
                 let mut instance = Vec::with_capacity(element.init.len());
                 for init in &element.init {
                     instance.push(self.evaluate_reference(init)?);
@@ -241,19 +241,10 @@ impl ModuleInstance {
 
             let offset = self.evaluate_offset(&element.offset_expr)?;
             let table_index = element.table_index as usize;
-            let is_externref = self
-                .table_types
-                .get(table_index)
-                .is_some_and(|table_type| table_type.ty == RefType::EXTERNREF);
-            let values = if is_externref {
-                vec![None; element.init.len()]
-            } else {
-                let mut refs = Vec::with_capacity(element.init.len());
-                for init in &element.init {
-                    refs.push(self.evaluate_reference(init)?);
-                }
-                refs
-            };
+            let mut values = Vec::with_capacity(element.init.len());
+            for init in &element.init {
+                values.push(self.evaluate_reference(init)?);
+            }
 
             let table = self
                 .tables
@@ -267,7 +258,11 @@ impl ModuleInstance {
                 },
             )?;
             if end > table.elements.len() {
-                return Ok(());
+                return Err(ModuleInstantiationError::TableOutOfBounds {
+                    table_index: element.table_index,
+                    offset,
+                    len: table.elements.len(),
+                });
             }
             table.elements[offset..end].clone_from_slice(&values);
         }
@@ -569,6 +564,52 @@ mod tests {
                 offset_expression: ConstExpr::from_i32(5),
                 init: vec![0],
                 passive: false,
+            }])
+        );
+    }
+
+    #[test]
+    fn build_element_instances_tracks_passive_externref_segments() {
+        let mut module = ModuleInstance::new(1, "elem", Module::default(), Vec::new());
+        module
+            .build_element_instances(&[ElementSegment {
+                mode: ElementMode::Passive,
+                ty: RefType::EXTERNREF,
+                init: vec![ConstExpr::from_opcode(
+                    OPCODE_REF_NULL,
+                    &[RefType::EXTERNREF.0],
+                )],
+                ..ElementSegment::default()
+            }])
+            .unwrap();
+
+        assert_eq!(vec![vec![None]], module.element_instances);
+    }
+
+    #[test]
+    fn apply_elements_reports_out_of_bounds_error() {
+        let mut module = ModuleInstance::new(1, "elem", Module::default(), Vec::new());
+        module.add_defined_table(&Table {
+            min: 1,
+            max: Some(1),
+            ty: RefType::FUNCREF,
+        });
+
+        assert_eq!(
+            Err(ModuleInstantiationError::TableOutOfBounds {
+                table_index: 0,
+                offset: 1,
+                len: 1,
+            }),
+            module.apply_elements(&[ElementSegment {
+                mode: ElementMode::Active,
+                table_index: 0,
+                offset_expr: ConstExpr::from_i32(1),
+                ty: RefType::FUNCREF,
+                init: vec![ConstExpr::from_opcode(
+                    OPCODE_REF_NULL,
+                    &[RefType::FUNCREF.0]
+                )],
             }])
         );
     }

@@ -20,5 +20,9 @@ razero_arm64_after_go_function_call_entrypoint:
     mov x25, x1
     mov x19, x2
     mov x29, x3
+    str x29, [x0, #16]
+    mov x27, sp
+    str x27, [x0, #24]
+    str x30, [x0, #32]
     mov sp, x19
     br x20

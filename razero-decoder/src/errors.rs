@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use razero::CoreFeatures;
+use razero_features::CoreFeatures;
 
 pub const ERR_INVALID_BYTE: &str = "invalid byte";
 pub const ERR_INVALID_MAGIC_NUMBER: &str = "invalid magic number";

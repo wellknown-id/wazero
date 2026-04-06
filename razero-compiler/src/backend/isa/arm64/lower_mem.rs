@@ -61,7 +61,11 @@ impl AddressMode {
     }
 
     pub fn format(self, dst_size_bits: u8) -> String {
-        assert_eq!(self.rn.reg_type(), RegType::Int, "arm64 base registers must be integer");
+        assert_eq!(
+            self.rn.reg_type(),
+            RegType::Int,
+            "arm64 base registers must be integer"
+        );
         let base = format_vreg_sized(self.rn, 64);
         match self.kind {
             AddressModeKind::RegScaledExtended => format!(
@@ -81,7 +85,10 @@ impl AddressMode {
                 self.ext_op
             ),
             AddressModeKind::RegReg => {
-                format!("[{base}, {}]", format_vreg_sized(self.rm, self.index_reg_bits()))
+                format!(
+                    "[{base}, {}]",
+                    format_vreg_sized(self.rm, self.index_reg_bits())
+                )
             }
             AddressModeKind::RegSignedImm9 | AddressModeKind::RegUnsignedImm12 => {
                 if self.imm == 0 {
@@ -92,8 +99,12 @@ impl AddressMode {
             }
             AddressModeKind::PostIndex => format!("[{base}], {}", format_signed_hex_imm(self.imm)),
             AddressModeKind::PreIndex => format!("[{base}, {}]!", format_signed_hex_imm(self.imm)),
-            AddressModeKind::ArgStackSpace => format!("[#arg_space, {}]", format_signed_hex_imm(self.imm)),
-            AddressModeKind::ResultStackSpace => format!("[#ret_space, {}]", format_signed_hex_imm(self.imm)),
+            AddressModeKind::ArgStackSpace => {
+                format!("[#arg_space, {}]", format_signed_hex_imm(self.imm))
+            }
+            AddressModeKind::ResultStackSpace => {
+                format!("[#ret_space, {}]", format_signed_hex_imm(self.imm))
+            }
         }
     }
 
@@ -155,8 +166,8 @@ impl fmt::Display for AddressMode {
 #[cfg(test)]
 mod tests {
     use super::{
-        offset_fits_reg_signed_imm9, offset_fits_reg_unsigned_imm12, resolve_address_mode_for_offset,
-        AddressMode, AddressModeKind,
+        offset_fits_reg_signed_imm9, offset_fits_reg_unsigned_imm12,
+        resolve_address_mode_for_offset, AddressMode, AddressModeKind,
     };
     use crate::backend::isa::arm64::lower_instr_operands::ExtendOp;
     use crate::backend::isa::arm64::reg::{SP, X1, X2};
@@ -168,7 +179,10 @@ mod tests {
         let x1 = VReg::from_real_reg(X1, RegType::Int);
         let x2 = VReg::from_real_reg(X2, RegType::Int);
         assert_eq!(AddressMode::reg_unsigned_imm12(sp, 0).format(64), "[sp]");
-        assert_eq!(AddressMode::reg_signed_imm9(sp, -16).format(64), "[sp, #0x-10]");
+        assert_eq!(
+            AddressMode::reg_signed_imm9(sp, -16).format(64),
+            "[sp, #0x-10]"
+        );
         assert_eq!(AddressMode::reg_reg(x1, x2).format(64), "[x1, x2]");
         let scaled = AddressMode {
             kind: AddressModeKind::RegScaledExtended,

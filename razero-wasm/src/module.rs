@@ -4,9 +4,14 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 
+use razero_features::CoreFeatures;
+
+use crate::const_expr::{evaluate_const_expr, ConstExprError};
+use crate::func_validation::validate_wasm_function;
 use crate::function_definition::FunctionDefinition;
 use crate::host_func::HostFuncRef;
 use crate::memory_definition::MemoryDefinition;
+use crate::table::check_segment_bounds;
 use crate::wasmdebug::DWARFLines;
 
 pub use crate::const_expr::ConstExpr;
@@ -473,6 +478,42 @@ pub struct Module {
 }
 
 impl Module {
+    pub fn validate(
+        &self,
+        enabled_features: CoreFeatures,
+        memory_limit_pages: u32,
+    ) -> Result<(), ModuleError> {
+        self.validate_start_section()?;
+        let declarations = self.all_declarations()?;
+
+        self.validate_imports(enabled_features)?;
+        self.validate_globals(
+            enabled_features,
+            &declarations.globals,
+            declarations.functions.len() as u32,
+            MAXIMUM_GLOBALS,
+        )?;
+        if let Some(memory) = declarations.memory.as_ref() {
+            memory.validate(memory_limit_pages)?;
+        }
+        self.validate_memory(
+            enabled_features,
+            declarations.memory.as_ref(),
+            &declarations.globals,
+        )?;
+        self.validate_exports(
+            enabled_features,
+            &declarations.functions,
+            &declarations.globals,
+            declarations.memory.as_ref(),
+            &declarations.tables,
+        )?;
+        self.validate_functions(MAXIMUM_FUNCTION_INDEX)?;
+        self.validate_tables(enabled_features, &declarations.tables, MAXIMUM_TABLE_INDEX)?;
+        self.validate_data_count_section()?;
+        Ok(())
+    }
+
     pub fn assign_module_id(
         &mut self,
         wasm: &[u8],
@@ -594,6 +635,413 @@ impl Module {
             _ => panic!("BUG: unknown section: {}", section_id.0),
         }
     }
+
+    fn validate_start_section(&self) -> Result<(), ModuleError> {
+        let Some(start_index) = self.start_section else {
+            return Ok(());
+        };
+
+        let Some(function_type) = self.type_of_function(start_index) else {
+            return Err(validation_error(format!(
+                "invalid start function: func[{start_index}] has an invalid type"
+            )));
+        };
+        if !function_type.params.is_empty() || !function_type.results.is_empty() {
+            return Err(validation_error(format!(
+                "invalid start function: func[{start_index}] must have an empty (nullary) signature: {function_type}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_imports(&self, enabled_features: CoreFeatures) -> Result<(), ModuleError> {
+        for (index, import) in self.import_section.iter().enumerate() {
+            if import.module.is_empty() {
+                return Err(validation_error(format!(
+                    "import[{index}] has an empty module name"
+                )));
+            }
+            match &import.desc {
+                ImportDesc::Func(type_index) => {
+                    if *type_index as usize >= self.type_section.len() {
+                        return Err(validation_error(format!(
+                            "invalid import[\"{}\".\"{}\"] function: type index out of range",
+                            import.module, import.name
+                        )));
+                    }
+                }
+                ImportDesc::Global(global) if global.mutable => {
+                    if !enabled_features.contains(CoreFeatures::MUTABLE_GLOBAL) {
+                        return Err(validation_error(format!(
+                            "invalid import[\"{}\".\"{}\"] global: feature \"mutable-global\" is disabled",
+                            import.module, import.name
+                        )));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_globals(
+        &self,
+        enabled_features: CoreFeatures,
+        globals: &[GlobalType],
+        num_functions: u32,
+        max_globals: u32,
+    ) -> Result<(), ModuleError> {
+        if globals.len() as u32 > max_globals {
+            return Err(validation_error("too many globals in a module"));
+        }
+
+        for (index, global) in self.global_section.iter().enumerate() {
+            validate_const_expression(
+                &global.init,
+                global.ty.val_type,
+                num_functions,
+                |global_index| {
+                    self.resolve_const_expr_global_type(
+                        enabled_features,
+                        SectionId::GLOBAL,
+                        index as u32,
+                        global_index,
+                    )
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    fn validate_memory(
+        &self,
+        enabled_features: CoreFeatures,
+        memory: Option<&Memory>,
+        _globals: &[GlobalType],
+    ) -> Result<(), ModuleError> {
+        let has_active_data = self
+            .data_section
+            .iter()
+            .any(|segment| !segment.is_passive());
+        if has_active_data && memory.is_none() {
+            return Err(validation_error("unknown memory"));
+        }
+
+        for segment in self
+            .data_section
+            .iter()
+            .filter(|segment| !segment.is_passive())
+        {
+            validate_const_expression(
+                &segment.offset_expression,
+                ValueType::I32,
+                0,
+                |global_index| {
+                    self.resolve_const_expr_global_type(
+                        enabled_features,
+                        SectionId::DATA,
+                        0,
+                        global_index,
+                    )
+                },
+            )
+            .map_err(|err| validation_error(format!("calculate offset: {err}")))?;
+        }
+        Ok(())
+    }
+
+    fn validate_exports(
+        &self,
+        enabled_features: CoreFeatures,
+        functions: &[Index],
+        globals: &[GlobalType],
+        memory: Option<&Memory>,
+        tables: &[Table],
+    ) -> Result<(), ModuleError> {
+        for export in &self.export_section {
+            match export.ty {
+                ExternType::FUNC => {
+                    if export.index as usize >= functions.len() {
+                        return Err(validation_error(format!(
+                            "unknown function for export[\"{}\"]",
+                            export.name
+                        )));
+                    }
+                }
+                ExternType::GLOBAL => {
+                    let Some(global) = globals.get(export.index as usize) else {
+                        return Err(validation_error(format!(
+                            "unknown global for export[\"{}\"]",
+                            export.name
+                        )));
+                    };
+                    if global.mutable && !enabled_features.contains(CoreFeatures::MUTABLE_GLOBAL) {
+                        return Err(validation_error(format!(
+                            "invalid export[\"{}\"] global[{}]: feature \"mutable-global\" is disabled",
+                            export.name, export.index
+                        )));
+                    }
+                }
+                ExternType::MEMORY => {
+                    if export.index != 0 || memory.is_none() {
+                        return Err(validation_error(format!(
+                            "memory for export[\"{}\"] out of range",
+                            export.name
+                        )));
+                    }
+                }
+                ExternType::TABLE => {
+                    if export.index as usize >= tables.len() {
+                        return Err(validation_error(format!(
+                            "table for export[\"{}\"] out of range",
+                            export.name
+                        )));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_functions(&self, maximum_function_index: u32) -> Result<(), ModuleError> {
+        let function_count = self.section_element_count(SectionId::FUNCTION);
+        let code_count = self.section_element_count(SectionId::CODE);
+        let total_functions = self.import_function_count + function_count;
+        if total_functions > maximum_function_index {
+            return Err(validation_error(format!(
+                "too many functions ({total_functions}) in a module"
+            )));
+        }
+        if function_count == 0 && code_count == 0 {
+            return Ok(());
+        }
+        if code_count != function_count {
+            return Err(validation_error(format!(
+                "code count ({code_count}) != function count ({function_count})"
+            )));
+        }
+
+        let type_count = self.type_section.len() as u32;
+        for (index, type_index) in self.function_section.iter().copied().enumerate() {
+            let desc = self.func_desc(SectionId::FUNCTION, index as u32);
+            if type_index >= type_count {
+                return Err(validation_error(format!(
+                    "invalid {desc}: type section index {type_index} out of range"
+                )));
+            }
+            let Some(code) = self.code_section.get(index) else {
+                return Err(validation_error(format!(
+                    "code count ({code_count}) != function count ({function_count})"
+                )));
+            };
+            validate_wasm_function(code)
+                .map_err(|err| validation_error(format!("invalid {desc}: {err}")))?;
+        }
+        Ok(())
+    }
+
+    fn validate_tables(
+        &self,
+        enabled_features: CoreFeatures,
+        tables: &[Table],
+        maximum_table_index: u32,
+    ) -> Result<(), ModuleError> {
+        if tables.len() as u32 > maximum_table_index {
+            return Err(validation_error(format!(
+                "too many tables in a module: {} given with limit {maximum_table_index}",
+                tables.len()
+            )));
+        }
+
+        let function_count =
+            self.import_function_count + self.section_element_count(SectionId::FUNCTION);
+        let imported_table_count = self.import_table_count;
+        for (index, element) in self.element_section.iter().enumerate() {
+            for (init_index, init) in element.init.iter().enumerate() {
+                let (_, init_type) = evaluate_const_expr(
+                    init,
+                    |global_index| {
+                        let value_type = self
+                            .resolve_const_expr_global_type(
+                                enabled_features,
+                                SectionId::ELEMENT,
+                                index as u32,
+                                global_index,
+                            )
+                            .map_err(ConstExprError::new)?;
+                        Ok((value_type, 0, 0))
+                    },
+                    |function_index| {
+                        if function_index >= function_count {
+                            return Err(ConstExprError::new(format!(
+                                "element[{index}].init[{init_index}] func index {function_index} out of range"
+                            )));
+                        }
+                        Ok(None)
+                    },
+                )
+                .map_err(|err| validation_error(err.to_string()))?;
+
+                match element.ty {
+                    RefType::FUNCREF if init_type != ValueType::FUNCREF => {
+                        return Err(validation_error(format!(
+                            "element[{index}].init[{init_index}] must be funcref but was {}",
+                            init_type.name()
+                        )));
+                    }
+                    RefType::EXTERNREF if init_type != ValueType::EXTERNREF => {
+                        return Err(validation_error(format!(
+                            "element[{index}].init[{init_index}] must be externref but was {}",
+                            init_type.name()
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+
+            if !element.is_active() {
+                continue;
+            }
+            let Some(table) = tables.get(element.table_index as usize) else {
+                return Err(validation_error(format!(
+                    "unknown table {} as active element target",
+                    element.table_index
+                )));
+            };
+            if table.ty != element.ty {
+                return Err(validation_error(format!(
+                    "element type mismatch: table has {} but element has {}",
+                    table.ty.name(),
+                    element.ty.name()
+                )));
+            }
+
+            let mut has_global_ref = false;
+            let (offsets, offset_type) = evaluate_const_expr(
+                &element.offset_expr,
+                |global_index| {
+                    has_global_ref = true;
+                    let value_type = self
+                        .resolve_const_expr_global_type(
+                            enabled_features,
+                            SectionId::ELEMENT,
+                            index as u32,
+                            global_index,
+                        )
+                        .map_err(ConstExprError::new)?;
+                    if value_type != ValueType::I32 {
+                        return Err(ConstExprError::new(format!(
+                            "element[{index}] (global.get {global_index}): import[{index}].global.ValType != i32"
+                        )));
+                    }
+                    Ok((ValueType::I32, 0, 0))
+                },
+                |_| Ok(None),
+            )
+            .map_err(|err| {
+                validation_error(format!(
+                    "element[{index}] couldn't evaluate offset expression: {err}"
+                ))
+            })?;
+            if offset_type != ValueType::I32 {
+                return Err(validation_error(format!(
+                    "element[{index}] offset expression must return i32 but was {}",
+                    offset_type.name()
+                )));
+            }
+
+            if !enabled_features.contains(CoreFeatures::REFERENCE_TYPES)
+                && !has_global_ref
+                && element.table_index >= imported_table_count
+                && !check_segment_bounds(
+                    table.min,
+                    u64::from(offsets[0] as u32) + element.init.len() as u64,
+                )
+            {
+                return Err(validation_error(format!(
+                    "element[{index}].init exceeds min table size"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_data_count_section(&self) -> Result<(), ModuleError> {
+        if let Some(data_count) = self.data_count_section {
+            if data_count as usize != self.data_section.len() {
+                return Err(validation_error(format!(
+                    "data count section ({data_count}) doesn't match the length of data section ({})",
+                    self.data_section.len()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_const_expr_global_type(
+        &self,
+        enabled_features: CoreFeatures,
+        section_id: SectionId,
+        section_index: Index,
+        global_index: Index,
+    ) -> Result<ValueType, String> {
+        if global_index < self.import_global_count {
+            let mut current = 0;
+            for import in &self.import_section {
+                if let ImportDesc::Global(global) = &import.desc {
+                    if global_index == current {
+                        return Ok(global.val_type);
+                    }
+                    current += 1;
+                }
+            }
+            return Err(format!(
+                "index {global_index} not found in imported globals"
+            ));
+        }
+
+        if !enabled_features.contains(CoreFeatures::EXTENDED_CONST) {
+            return Err(format!(
+                "{}[{section_index}] (global.get {global_index}): out of range of imported globals",
+                section_id.name()
+            ));
+        }
+
+        let local_index = global_index - self.import_global_count;
+        if section_id == SectionId::GLOBAL && local_index >= section_index {
+            return Err(format!(
+                "{}[{section_index}] global {local_index} out of range of initialized globals",
+                section_id.name()
+            ));
+        }
+        let Some(global) = self.global_section.get(local_index as usize) else {
+            return Err(format!(
+                "{}[{section_index}] (global.get {global_index}): out of range of initialized globals",
+                section_id.name()
+            ));
+        };
+        Ok(global.ty.val_type)
+    }
+
+    fn func_desc(&self, section_id: SectionId, section_index: Index) -> String {
+        let function_index = section_index + self.import_function_count;
+        let mut export_names: Vec<_> = self
+            .export_section
+            .iter()
+            .filter(|export| export.ty == ExternType::FUNC && export.index == function_index)
+            .map(|export| format!("\"{}\"", export.name))
+            .collect();
+        if export_names.is_empty() {
+            return format!("{}[{section_index}]", section_id.name());
+        }
+        export_names.sort();
+        format!(
+            "{}[{section_index}] export[{}]",
+            section_id.name(),
+            export_names.join(",")
+        )
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -606,6 +1054,7 @@ pub struct AllDeclarations {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModuleError {
+    Validation(String),
     Memory(String),
     MultipleMemories(String),
 }
@@ -613,12 +1062,55 @@ pub enum ModuleError {
 impl fmt::Display for ModuleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Memory(message) | Self::MultipleMemories(message) => f.write_str(message),
+            Self::Validation(message) | Self::Memory(message) | Self::MultipleMemories(message) => {
+                f.write_str(message)
+            }
         }
     }
 }
 
 impl std::error::Error for ModuleError {}
+
+fn validate_const_expression<GR>(
+    expr: &ConstExpr,
+    expected_type: ValueType,
+    num_functions: u32,
+    mut global_resolver: GR,
+) -> Result<(), ModuleError>
+where
+    GR: FnMut(Index) -> Result<ValueType, String>,
+{
+    let (_, actual_type) = evaluate_const_expr(
+        expr,
+        |global_index| {
+            let value_type = global_resolver(global_index).map_err(ConstExprError::new)?;
+            Ok((value_type, 0, 0))
+        },
+        |function_index| {
+            if function_index >= num_functions {
+                return Err(ConstExprError::new(format!(
+                    "ref.func index out of range [{function_index}] with length {}",
+                    num_functions.saturating_sub(1)
+                )));
+            }
+            Ok(None)
+        },
+    )
+    .map_err(|err| validation_error(err.to_string()))?;
+
+    if actual_type != expected_type {
+        return Err(validation_error(format!(
+            "const expression type mismatch expected {} but got {}",
+            expected_type.name(),
+            actual_type.name()
+        )));
+    }
+    Ok(())
+}
+
+fn validation_error(message: impl Into<String>) -> ModuleError {
+    ModuleError::Validation(message.into())
+}
 
 fn value_type_slots(types: &[ValueType]) -> usize {
     types
@@ -750,6 +1242,7 @@ fn sha256(input: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use razero_features::CoreFeatures;
 
     #[test]
     fn function_type_key_and_cache() {
@@ -1020,5 +1513,84 @@ mod tests {
         assert_eq!(Some(&vec![1]), module.import_per_module.get("wasi"));
         assert_eq!(Some(&0), module.exports.get("run"));
         assert_eq!(Some(&1), module.exports.get("memory"));
+    }
+
+    #[test]
+    fn module_validate_rejects_active_data_without_memory() {
+        let module = Module {
+            data_section: vec![DataSegment {
+                offset_expression: ConstExpr::from_i32(0),
+                init: vec![1],
+                passive: false,
+            }],
+            ..Module::default()
+        };
+
+        assert_eq!(
+            Err(ModuleError::Validation("unknown memory".to_string())),
+            module.validate(CoreFeatures::empty(), MEMORY_LIMIT_PAGES)
+        );
+    }
+
+    #[test]
+    fn module_validate_rejects_mutable_global_export_without_feature() {
+        let module = Module {
+            export_section: vec![Export {
+                ty: ExternType::GLOBAL,
+                name: "g".to_string(),
+                index: 0,
+            }],
+            global_section: vec![Global {
+                ty: GlobalType {
+                    val_type: ValueType::I32,
+                    mutable: true,
+                },
+                init: ConstExpr::from_i32(0),
+            }],
+            ..Module::default()
+        };
+
+        assert_eq!(
+            Err(ModuleError::Validation(
+                "invalid export[\"g\"] global[0]: feature \"mutable-global\" is disabled"
+                    .to_string()
+            )),
+            module.validate(CoreFeatures::empty(), MEMORY_LIMIT_PAGES)
+        );
+    }
+
+    #[test]
+    fn module_validate_checks_table_segment_bounds() {
+        let module = Module {
+            table_section: vec![Table {
+                min: 1,
+                max: Some(1),
+                ty: RefType::FUNCREF,
+            }],
+            type_section: vec![FunctionType::default()],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![0x00, crate::instruction::OPCODE_END],
+                ..Code::default()
+            }],
+            element_section: vec![ElementSegment {
+                mode: ElementMode::Active,
+                table_index: 0,
+                offset_expr: ConstExpr::from_i32(1),
+                ty: RefType::FUNCREF,
+                init: vec![ConstExpr::from_opcode(
+                    crate::instruction::OPCODE_REF_FUNC,
+                    &[0],
+                )],
+            }],
+            ..Module::default()
+        };
+
+        assert_eq!(
+            Err(ModuleError::Validation(
+                "element[0].init exceeds min table size".to_string()
+            )),
+            module.validate(CoreFeatures::empty(), MEMORY_LIMIT_PAGES)
+        );
     }
 }

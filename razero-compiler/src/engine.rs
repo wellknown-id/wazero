@@ -12,7 +12,9 @@ use crate::engine_cache::{
     deserialize_compiled_module, file_cache_key, serialize_compiled_module, CachedCompiledModule,
     CompiledModuleCache,
 };
-use crate::frontend::{signature_for_wasm_function_type, wasm_type_to_ssa_type, Compiler as FrontendCompiler};
+use crate::frontend::{
+    signature_for_wasm_function_type, wasm_type_to_ssa_type, Compiler as FrontendCompiler,
+};
 use crate::module_engine::CompilerModuleEngine;
 use crate::ssa::{Builder, Signature, SignatureId, Type};
 use crate::wazevoapi::{ExitCode, ModuleContextOffsetData, ModuleContextOffsetSource};
@@ -156,7 +158,8 @@ pub struct SharedFunctions {
 
 impl SharedFunctions {
     pub fn memory_grow_ptr(&self) -> Option<usize> {
-        self.memory_grow_offset.and_then(|offset| self.executable.ptr_at(offset))
+        self.memory_grow_offset
+            .and_then(|offset| self.executable.ptr_at(offset))
     }
 
     pub fn check_module_exit_code_ptr(&self) -> Option<usize> {
@@ -165,15 +168,18 @@ impl SharedFunctions {
     }
 
     pub fn stack_grow_ptr(&self) -> Option<usize> {
-        self.stack_grow_offset.and_then(|offset| self.executable.ptr_at(offset))
+        self.stack_grow_offset
+            .and_then(|offset| self.executable.ptr_at(offset))
     }
 
     pub fn table_grow_ptr(&self) -> Option<usize> {
-        self.table_grow_offset.and_then(|offset| self.executable.ptr_at(offset))
+        self.table_grow_offset
+            .and_then(|offset| self.executable.ptr_at(offset))
     }
 
     pub fn ref_func_ptr(&self) -> Option<usize> {
-        self.ref_func_offset.and_then(|offset| self.executable.ptr_at(offset))
+        self.ref_func_offset
+            .and_then(|offset| self.executable.ptr_at(offset))
     }
 
     pub fn memory_wait32_ptr(&self) -> Option<usize> {
@@ -229,7 +235,9 @@ impl CompiledModule {
             return None;
         }
         let rel = addr - base;
-        let index = self.function_offsets.partition_point(|offset| *offset <= rel);
+        let index = self
+            .function_offsets
+            .partition_point(|offset| *offset <= rel);
         (index > 0).then_some((index - 1) as Index)
     }
 
@@ -299,7 +307,11 @@ impl CompilerEngine {
         (base <= addr && addr < end).then_some(candidate.clone())
     }
 
-    fn add_compiled_module(&mut self, module: &Module, compiled: Arc<CompiledModule>) -> Arc<CompiledModule> {
+    fn add_compiled_module(
+        &mut self,
+        module: &Module,
+        compiled: Arc<CompiledModule>,
+    ) -> Arc<CompiledModule> {
         if let Some(existing) = self.compiled_modules.get_mut(&module.id) {
             existing.ref_count += 1;
             return existing.compiled_module.clone();
@@ -349,10 +361,16 @@ impl CompilerEngine {
             cache.delete(&file_cache_key(module));
             return Ok(None);
         };
-        Ok(Some(Arc::new(self.cached_module_into_compiled(module, cached))))
+        Ok(Some(Arc::new(
+            self.cached_module_into_compiled(module, cached),
+        )))
     }
 
-    fn cached_module_into_compiled(&self, module: &Module, cached: CachedCompiledModule) -> CompiledModule {
+    fn cached_module_into_compiled(
+        &self,
+        module: &Module,
+        cached: CachedCompiledModule,
+    ) -> CompiledModule {
         CompiledModule {
             executables: cached.executables,
             function_offsets: cached.function_offsets,
@@ -395,11 +413,14 @@ impl CompilerEngine {
         let mut executable = Vec::new();
 
         for (index, code) in module.code_section.iter().enumerate() {
-            let host_func = code
-                .host_func
-                .as_ref()
-                .ok_or_else(|| EngineError::new("host module function missing host implementation"))?;
-            let mut signature = Signature::new(SignatureId(module.function_section[index]), vec![Type::I64, Type::I64], vec![]);
+            let host_func = code.host_func.as_ref().ok_or_else(|| {
+                EngineError::new("host module function missing host implementation")
+            })?;
+            let mut signature = Signature::new(
+                SignatureId(module.function_section[index]),
+                vec![Type::I64, Type::I64],
+                vec![],
+            );
             let mut typ = module.type_section[module.function_section[index] as usize].clone();
             typ.cache_num_in_u64();
             signature
@@ -453,17 +474,22 @@ impl CompilerEngine {
                     .iter()
                     .map(|info| function_offset + info.executable_offset as usize),
             );
-            source_map
-                .wasm_binary_offsets
-                .extend(compiled.source_offsets.iter().map(|info| info.source_offset.0 as u64));
+            source_map.wasm_binary_offsets.extend(
+                compiled
+                    .source_offsets
+                    .iter()
+                    .map(|info| info.source_offset.0 as u64),
+            );
             executable.extend(compiled.code);
             relocations.push((function_offset, compiled.relocations));
         }
 
         let mut executable = AlignedBytes::from_bytes(executable);
-        let mut ref_to_binary_offset = vec![0i32; module.import_function_count as usize + function_offsets.len()];
+        let mut ref_to_binary_offset =
+            vec![0i32; module.import_function_count as usize + function_offsets.len()];
         for (local_index, offset) in function_offsets.iter().copied().enumerate() {
-            ref_to_binary_offset[module.import_function_count as usize + local_index] = offset as i32;
+            ref_to_binary_offset[module.import_function_count as usize + local_index] =
+                offset as i32;
         }
         for (function_offset, relocs) in relocations {
             native_resolve_relocations(
@@ -548,9 +574,9 @@ impl WasmEngine for CompilerEngine {
         module: &Module,
         instance: &ModuleInstance,
     ) -> Result<Box<dyn WasmModuleEngine>, EngineError> {
-        let compiled = self
-            .compiled_module(module)
-            .ok_or_else(|| EngineError::new("source module must be compiled before instantiation"))?;
+        let compiled = self.compiled_module(module).ok_or_else(|| {
+            EngineError::new("source module must be compiled before instantiation")
+        })?;
         let mut module_engine = Box::new(CompilerModuleEngine::new(compiled, instance.clone()));
         module_engine.done_instantiation();
         Ok(module_engine)
@@ -607,7 +633,8 @@ fn compile_function(module: &Module, local_index: usize) -> Result<CompiledFunct
             false,
             false,
         );
-        frontend.init_with_module_function(module.import_function_count + local_index as u32, false);
+        frontend
+            .init_with_module_function(module.import_function_count + local_index as u32, false);
         frontend.lower_to_ssa();
         let builder = std::mem::take(frontend.builder_mut());
         let mut backend = BackendCompiler::new(NativeMachine::new(), builder);
@@ -716,7 +743,11 @@ fn compile_shared_functions() -> SharedFunctions {
     record(
         native_compile_host_trampoline(
             ExitCode::MEMORY_NOTIFY,
-            &Signature::new(SignatureId(6), vec![Type::I64, Type::I32, Type::I64], vec![Type::I32]),
+            &Signature::new(
+                SignatureId(6),
+                vec![Type::I64, Type::I32, Type::I64],
+                vec![Type::I32],
+            ),
         )
         .unwrap_or_default(),
         &mut shared.memory_notify_offset,
@@ -733,13 +764,19 @@ fn align16_vec(bytes: &mut Vec<u8>) {
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-fn native_compile_host_trampoline(exit_code: ExitCode, signature: &Signature) -> Result<Vec<u8>, EngineError> {
+fn native_compile_host_trampoline(
+    exit_code: ExitCode,
+    signature: &Signature,
+) -> Result<Vec<u8>, EngineError> {
     let mut machine = NativeMachine::new();
     Ok(machine.compile_host_function_trampoline(exit_code, signature, true))
 }
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-fn native_compile_host_trampoline(_exit_code: ExitCode, _signature: &Signature) -> Result<Vec<u8>, EngineError> {
+fn native_compile_host_trampoline(
+    _exit_code: ExitCode,
+    _signature: &Signature,
+) -> Result<Vec<u8>, EngineError> {
     Err(EngineError::new("unsupported architecture"))
 }
 
@@ -806,13 +843,15 @@ fn native_resolve_relocations(
 mod tests {
     use std::sync::Arc;
 
+    use crate::engine_cache::InMemoryCompiledModuleCache;
     use razero_wasm::engine::Engine as _;
     use razero_wasm::host_func::stack_host_func;
     use razero_wasm::module::{Code, CodeBody, FunctionType, Module, ValueType};
 
-    use crate::engine_cache::InMemoryCompiledModuleCache;
-
-    use super::{compile_shared_functions, AlignedBytes, CompiledModule, CompilerEngine, Executables, SharedFunctions, SourceMap};
+    use super::{
+        compile_shared_functions, AlignedBytes, CompiledModule, CompilerEngine, Executables,
+        SharedFunctions, SourceMap,
+    };
 
     fn function_type(params: &[ValueType], results: &[ValueType]) -> FunctionType {
         let mut ty = FunctionType::default();
@@ -892,13 +931,18 @@ mod tests {
 
         use crate::wazevoapi::ModuleContextOffsetData;
 
-        let target = if (first.executables.executable.as_ptr() as usize) < second.executables.executable.as_ptr() as usize {
+        let target = if (first.executables.executable.as_ptr() as usize)
+            < second.executables.executable.as_ptr() as usize
+        {
             first.clone()
         } else {
             second.clone()
         };
         let addr = target.executables.executable.as_ptr() as usize + 8;
-        assert!(Arc::ptr_eq(&engine.compiled_module_of_addr(addr).unwrap(), &target));
+        assert!(Arc::ptr_eq(
+            &engine.compiled_module_of_addr(addr).unwrap(),
+            &target
+        ));
     }
 
     #[test]

@@ -402,7 +402,11 @@ impl<I: Instr, B: Block<I>, F: Function<I, B>> Allocator<I, B, F> {
                 .ss
                 .iter()
                 .copied()
-                .filter(|&vreg| self.state.get_vreg_state(vreg).is_some_and(|state| state.spilled))
+                .filter(|&vreg| {
+                    self.state
+                        .get_vreg_state(vreg)
+                        .is_some_and(|state| state.spilled)
+                })
                 .collect();
             for &vreg in &live_ins {
                 self.state.get_vreg_state_mut(vreg).spilled = false;
@@ -447,7 +451,11 @@ impl<I: Instr, B: Block<I>, F: Function<I, B>> Allocator<I, B, F> {
                         .ss
                         .iter()
                         .copied()
-                        .filter(|&vreg| self.state.get_vreg_state(vreg).is_some_and(|state| state.spilled))
+                        .filter(|&vreg| {
+                            self.state
+                                .get_vreg_state(vreg)
+                                .is_some_and(|state| state.spilled)
+                        })
                         .collect();
                     for &vreg in &additions {
                         self.state.get_vreg_state_mut(vreg).spilled = false;
@@ -699,8 +707,7 @@ impl<I: Instr, B: Block<I>, F: Function<I, B>> Allocator<I, B, F> {
                         .unwrap_or(REAL_REG_INVALID);
                     let allocatable =
                         self.reg_info.allocatable_registers[use_.reg_type().index()].clone();
-                    reg =
-                        self.find_or_spill_allocatable(&allocatable, current_used, preferred);
+                    reg = self.find_or_spill_allocatable(&allocatable, current_used, preferred);
                     self.record_reload(f, use_.id(), blk.clone());
                     f.reload_register_before(use_.set_real_reg(reg), Some(instr.clone()));
                     self.state.use_real_reg(reg, use_.id());
@@ -781,9 +788,9 @@ impl<I: Instr, B: Block<I>, F: Function<I, B>> Allocator<I, B, F> {
                                 }
                             }
                             if reg == REAL_REG_INVALID {
-                                let allocatable =
-                                    self.reg_info.allocatable_registers[def.reg_type().index()]
-                                        .clone();
+                                let allocatable = self.reg_info.allocatable_registers
+                                    [def.reg_type().index()]
+                                .clone();
                                 reg = self.find_or_spill_allocatable(
                                     &allocatable,
                                     RegSet::default(),

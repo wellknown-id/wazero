@@ -22,7 +22,10 @@ pub(crate) fn build_host_module_opaque(module: &Module) -> AlignedBytes {
             .host_func
             .as_ref()
             .unwrap_or_else(|| panic!("host module function missing host implementation"));
-        write_host_func_ref(host_func, &mut opaque.as_mut_slice()[offset..offset + HOST_FUNCTION_SLOT_SIZE]);
+        write_host_func_ref(
+            host_func,
+            &mut opaque.as_mut_slice()[offset..offset + HOST_FUNCTION_SLOT_SIZE],
+        );
         offset += HOST_FUNCTION_SLOT_SIZE;
     }
     opaque
@@ -76,7 +79,9 @@ mod tests {
     use razero_wasm::host_func::{stack_host_func, Caller};
     use razero_wasm::module::{Code, CodeBody, FunctionType, Module, ValueType};
 
-    use super::{build_host_module_opaque, host_module_from_opaque, host_module_host_func_from_opaque};
+    use super::{
+        build_host_module_opaque, host_module_from_opaque, host_module_host_func_from_opaque,
+    };
 
     #[test]
     fn host_module_opaque_round_trips_module_and_host_funcs() {

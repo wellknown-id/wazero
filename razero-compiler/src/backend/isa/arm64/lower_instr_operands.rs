@@ -37,16 +37,8 @@ pub enum Operand {
     None,
     Reg(VReg),
     Imm12(Imm12),
-    ShiftedReg {
-        reg: VReg,
-        op: ShiftOp,
-        amount: u8,
-    },
-    ExtendedReg {
-        reg: VReg,
-        op: ExtendOp,
-        amount: u8,
-    },
+    ShiftedReg { reg: VReg, op: ShiftOp, amount: u8 },
+    ExtendedReg { reg: VReg, op: ExtendOp, amount: u8 },
 }
 
 impl Imm12 {

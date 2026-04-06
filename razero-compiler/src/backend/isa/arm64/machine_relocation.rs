@@ -2,8 +2,8 @@ use crate::backend::compiler::RelocationInfo;
 
 use super::instr::{AluOp, Arm64Instr, LoadKind};
 use super::instr_encoding::{
-    encode_adr, encode_instruction, encode_unconditional_branch, encode_unconditional_branch_reg,
-    encode_alu_rrr, MAX_SIGNED_INT26, MIN_SIGNED_INT26,
+    encode_adr, encode_alu_rrr, encode_instruction, encode_unconditional_branch,
+    encode_unconditional_branch_reg, MAX_SIGNED_INT26, MIN_SIGNED_INT26,
 };
 use super::lower_mem::AddressMode;
 use super::reg::{vreg_for_real_reg, TMP, X11};
@@ -11,8 +11,7 @@ use super::reg::{vreg_for_real_reg, TMP, X11};
 pub const TRAMPOLINE_CALL_SIZE: usize = 20;
 pub const MAX_UNCONDITIONAL_BRANCH_OFFSET: i64 = MAX_SIGNED_INT26 * 4;
 pub const MIN_UNCONDITIONAL_BRANCH_OFFSET: i64 = MIN_SIGNED_INT26 * 4;
-pub const TRAMPOLINE_ISLAND_INTERVAL: usize =
-    ((MAX_UNCONDITIONAL_BRANCH_OFFSET - 1) as usize) / 2;
+pub const TRAMPOLINE_ISLAND_INTERVAL: usize = ((MAX_UNCONDITIONAL_BRANCH_OFFSET - 1) as usize) / 2;
 pub const MAX_NUM_FUNCTIONS: usize = TRAMPOLINE_ISLAND_INTERVAL >> 6;
 pub const MAX_FUNCTION_EXECUTABLE_SIZE: usize = TRAMPOLINE_ISLAND_INTERVAL >> 2;
 
@@ -22,7 +21,10 @@ pub fn call_trampoline_island_info(num_functions: usize) -> Result<(usize, usize
             "too many functions: {num_functions} > {MAX_NUM_FUNCTIONS}"
         ))
     } else {
-        Ok((TRAMPOLINE_ISLAND_INTERVAL, TRAMPOLINE_CALL_SIZE * num_functions))
+        Ok((
+            TRAMPOLINE_ISLAND_INTERVAL,
+            TRAMPOLINE_CALL_SIZE * num_functions,
+        ))
     }
 }
 
@@ -34,7 +36,12 @@ pub fn encode_call_trampoline_island(
 ) {
     let tmp = vreg_for_real_reg(TMP);
     let tmp2 = vreg_for_real_reg(X11);
-    for (index, fn_offset) in ref_to_binary_offset.iter().copied().skip(imported_fns).enumerate() {
+    for (index, fn_offset) in ref_to_binary_offset
+        .iter()
+        .copied()
+        .skip(imported_fns)
+        .enumerate()
+    {
         let trampoline_offset = island_offset + TRAMPOLINE_CALL_SIZE * index;
         let diff = fn_offset - (trampoline_offset as i32 + 16);
         let words = [

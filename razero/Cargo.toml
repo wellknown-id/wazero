@@ -7,3 +7,10 @@ version.workspace = true
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+razero-features = { workspace = true }
+razero-wasm = { workspace = true }
+razero-decoder = { workspace = true }
+razero-interp = { workspace = true }
+razero-secmem = { workspace = true }

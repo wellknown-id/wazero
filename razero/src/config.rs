@@ -1,6 +1,9 @@
 use std::{
     collections::BTreeMap,
-    sync::{atomic::{AtomicBool, Ordering}, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 use crate::{
@@ -10,6 +13,7 @@ use crate::{
     },
     cache::CompilationCache,
 };
+use razero_wasm::module::Module as WasmModule;
 
 pub const MEMORY_LIMIT_PAGES: u32 = 65_536;
 
@@ -163,6 +167,7 @@ pub(crate) struct CompiledModuleInner {
     pub(crate) exported_globals: BTreeMap<String, Global>,
     pub(crate) custom_sections: Vec<CustomSection>,
     pub(crate) host_callbacks: BTreeMap<String, HostCallback>,
+    pub(crate) lower_module: Option<WasmModule>,
     pub(crate) closed: AtomicBool,
 }
 

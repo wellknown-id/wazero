@@ -3,14 +3,20 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use razero_wasm::{
+    host::{new_host_module, HostFunc as WasmHostFunc},
+    module::ValueType as WasmValueType,
+};
+
 use crate::{
     api::{
         error::Result,
+        features::CoreFeatures,
         wasm::{FunctionDefinition, HostCallback, Module, ValueType},
     },
     config::{CompiledModule, CompiledModuleInner, ModuleConfig},
     ctx_keys::Context,
-    runtime::Runtime,
+    runtime::{lower_host_function_callback, Runtime},
 };
 
 #[derive(Clone)]
@@ -76,6 +82,7 @@ impl HostModuleBuilder {
         let inner = self.inner.lock().expect("host module builder poisoned");
         let mut exported_functions = BTreeMap::new();
         let mut callbacks = BTreeMap::new();
+        let mut lower_functions = BTreeMap::new();
         for export_name in &inner.export_order {
             let host_function = inner
                 .functions
@@ -83,7 +90,50 @@ impl HostModuleBuilder {
                 .expect("host function missing from builder");
             exported_functions.insert(export_name.clone(), host_function.definition.clone());
             callbacks.insert(export_name.clone(), host_function.callback.clone());
+            lower_functions.insert(
+                export_name.clone(),
+                WasmHostFunc {
+                    export_name: export_name.clone(),
+                    name: host_function.definition.name().to_string(),
+                    param_types: host_function
+                        .definition
+                        .param_types()
+                        .iter()
+                        .copied()
+                        .map(to_wasm_value_type)
+                        .collect(),
+                    param_names: host_function.definition.param_names().to_vec(),
+                    result_types: host_function
+                        .definition
+                        .result_types()
+                        .iter()
+                        .copied()
+                        .map(to_wasm_value_type)
+                        .collect(),
+                    result_names: host_function.definition.result_names().to_vec(),
+                    code: razero_wasm::module::Code {
+                        body_kind: razero_wasm::module::CodeBody::Host,
+                        host_func: Some(lower_host_function_callback(
+                            host_function.callback.clone(),
+                            host_function.definition.param_types().len(),
+                            host_function.definition.result_types().len(),
+                        )),
+                        ..razero_wasm::module::Code::default()
+                    },
+                },
+            );
         }
+        let lower_module = new_host_module(
+            inner.module_name.clone(),
+            &inner.export_order,
+            &lower_functions,
+            inner
+                .runtime
+                .config()
+                .core_features()
+                .contains(CoreFeatures::MULTI_VALUE),
+        )
+        .map_err(|err| crate::RuntimeError::new(err.to_string()))?;
         Ok(CompiledModule::new(CompiledModuleInner {
             name: Some(inner.module_name.clone()),
             bytes: Vec::new(),
@@ -94,6 +144,7 @@ impl HostModuleBuilder {
             exported_globals: BTreeMap::new(),
             custom_sections: Vec::new(),
             host_callbacks: callbacks,
+            lower_module: Some(lower_module),
             closed: std::sync::atomic::AtomicBool::new(false),
         }))
     }
@@ -115,6 +166,18 @@ impl HostModuleBuilder {
             inner.export_order.push(export_name.clone());
         }
         inner.functions.insert(export_name, function);
+    }
+}
+
+fn to_wasm_value_type(value_type: ValueType) -> WasmValueType {
+    match value_type {
+        ValueType::I32 => WasmValueType::I32,
+        ValueType::I64 => WasmValueType::I64,
+        ValueType::F32 => WasmValueType::F32,
+        ValueType::F64 => WasmValueType::F64,
+        ValueType::V128 => WasmValueType::V128,
+        ValueType::ExternRef => WasmValueType::EXTERNREF,
+        ValueType::FuncRef => WasmValueType::FUNCREF,
     }
 }
 
@@ -141,7 +204,12 @@ impl HostFunctionBuilder {
         }
     }
 
-    pub fn with_callback<F>(mut self, callback: F, params: &[ValueType], results: &[ValueType]) -> Self
+    pub fn with_callback<F>(
+        mut self,
+        callback: F,
+        params: &[ValueType],
+        results: &[ValueType],
+    ) -> Self
     where
         F: Fn(Context, Module, &[u64]) -> Result<Vec<u64>> + Send + Sync + 'static,
     {
@@ -209,7 +277,8 @@ impl HostFunctionBuilder {
             self.callback
                 .expect("host function builder requires a callback before export"),
         );
-        self.builder.export_host_function(export_name, host_function);
+        self.builder
+            .export_host_function(export_name, host_function);
         self.builder
     }
 }

@@ -1,5 +1,6 @@
 #![doc = "Runtime engine traits."]
 
+use std::any::Any;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
@@ -52,6 +53,10 @@ impl FunctionHandle for NullFunctionHandle {
 }
 
 pub trait ModuleEngine: Send + Sync {
+    fn as_any(&self) -> &dyn Any;
+
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+
     fn done_instantiation(&mut self) {}
 
     fn new_function(&self, index: Index) -> Box<dyn FunctionHandle>;
@@ -119,6 +124,14 @@ pub trait Engine: Send + Sync {
 pub struct NullEngine;
 
 impl ModuleEngine for NullEngine {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
     fn new_function(&self, index: Index) -> Box<dyn FunctionHandle> {
         Box::new(NullFunctionHandle::new(index))
     }

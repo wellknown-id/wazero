@@ -3,7 +3,7 @@
 use crate::const_expr::{decode_const_expr_with_extended_const, read_var_u32_raw};
 use crate::decoder::Decoder;
 use crate::errors::{require_feature, DecodeError, DecodeResult};
-use razero::CoreFeatures;
+use razero_features::CoreFeatures;
 use razero_wasm::const_expr::ConstExpr;
 use razero_wasm::module::{ElementMode, ElementSegment, RefType, MAXIMUM_FUNCTION_INDEX};
 
@@ -238,7 +238,7 @@ mod tests {
         decode_element_const_expr_vector, decode_element_init_value_vector, decode_element_segment,
     };
     use crate::decoder::Decoder;
-    use razero::CoreFeatures;
+    use razero_features::CoreFeatures;
     use razero_wasm::const_expr::ConstExpr;
     use razero_wasm::instruction::{
         OPCODE_END, OPCODE_I32_CONST, OPCODE_REF_FUNC, OPCODE_REF_NULL,

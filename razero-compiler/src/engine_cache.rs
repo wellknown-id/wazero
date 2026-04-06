@@ -23,7 +23,10 @@ impl Display for EngineCacheError {
         match self {
             Self::InvalidHeader(message) | Self::Io(message) => f.write_str(message),
             Self::ChecksumMismatch { expected, actual } => {
-                write!(f, "compilationcache: checksum mismatch (expected {expected}, got {actual})")
+                write!(
+                    f,
+                    "compilationcache: checksum mismatch (expected {expected}, got {actual})"
+                )
             }
         }
     }
@@ -113,7 +116,11 @@ pub fn deserialize_compiled_module(
 ) -> Result<Option<CachedCompiledModule>, EngineCacheError> {
     let mut cursor = Cursor::new(bytes);
     let mut magic = [0u8; 6];
-    read_exact(&mut cursor, &mut magic, "compilationcache: invalid header length")?;
+    read_exact(
+        &mut cursor,
+        &mut magic,
+        "compilationcache: invalid header length",
+    )?;
     if &magic != MAGIC {
         return Err(EngineCacheError::InvalidHeader(format!(
             "compilationcache: invalid magic number: got {} but want {}",
@@ -142,7 +149,10 @@ pub fn deserialize_compiled_module(
         )? as usize);
     }
 
-    let executable_len = read_u64_named(&mut cursor, "compilationcache: error reading executable size")? as usize;
+    let executable_len = read_u64_named(
+        &mut cursor,
+        "compilationcache: error reading executable size",
+    )? as usize;
     let mut executable = vec![0; executable_len];
     read_exact(
         &mut cursor,
@@ -159,7 +169,10 @@ pub fn deserialize_compiled_module(
     let source_map = match read_u8(&mut cursor)? {
         0 => SourceMap::default(),
         1 => {
-            let len = read_u64_named(&mut cursor, "compilationcache: could not read source map length")? as usize;
+            let len = read_u64_named(
+                &mut cursor,
+                "compilationcache: could not read source map length",
+            )? as usize;
             let mut executable_offsets = Vec::with_capacity(len);
             let mut wasm_binary_offsets = Vec::with_capacity(len);
             for _ in 0..len {
@@ -281,7 +294,9 @@ mod tests {
     #[test]
     fn version_mismatch_returns_stale_cache() {
         let bytes = serialize_compiled_module("0.0.0", &[1, 2, 3], &[0], &SourceMap::default());
-        assert!(deserialize_compiled_module("1.0.0", &bytes).unwrap().is_none());
+        assert!(deserialize_compiled_module("1.0.0", &bytes)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

@@ -49,7 +49,7 @@ impl ControlFrame {
 pub struct Compiler<'a> {
     module: &'a Module,
     ssa_builder: Builder,
-    _offset: Option<ModuleContextOffsetData>,
+    offset: Option<ModuleContextOffsetData>,
     signatures: Vec<Signature>,
     listener_signatures: Vec<(Signature, Signature)>,
     _ensure_termination: bool,
@@ -83,7 +83,7 @@ impl<'a> Compiler<'a> {
         let mut compiler = Self {
             module,
             ssa_builder,
-            _offset: offset,
+            offset,
             signatures: Vec::new(),
             listener_signatures: Vec::new(),
             _ensure_termination: ensure_termination,

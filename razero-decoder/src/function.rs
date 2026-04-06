@@ -2,7 +2,7 @@
 
 use crate::decoder::Decoder;
 use crate::errors::{DecodeError, DecodeResult};
-use razero::CoreFeatures;
+use razero_features::CoreFeatures;
 use razero_wasm::module::{FunctionType, ValueType};
 
 pub(crate) fn decode_value_type(byte: u8) -> DecodeResult<ValueType> {
@@ -100,7 +100,7 @@ pub fn decode_function_section(decoder: &mut Decoder<'_>) -> DecodeResult<Vec<u3
 mod tests {
     use super::{decode_function_section, decode_function_type};
     use crate::decoder::Decoder;
-    use razero::CoreFeatures;
+    use razero_features::CoreFeatures;
     use razero_wasm::leb128;
     use razero_wasm::module::{FunctionType, ValueType};
 

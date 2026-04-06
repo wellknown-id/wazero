@@ -3,7 +3,7 @@
 use crate::decoder::Decoder;
 use crate::errors::{DecodeError, DecodeResult};
 use crate::memory::decode_limits_type;
-use razero::CoreFeatures;
+use razero_features::CoreFeatures;
 use razero_wasm::module::{RefType, Table, MAXIMUM_FUNCTION_INDEX};
 
 pub fn decode_table(
@@ -68,7 +68,7 @@ pub fn decode_table_section(
 mod tests {
     use super::{decode_table, decode_table_section};
     use crate::decoder::Decoder;
-    use razero::CoreFeatures;
+    use razero_features::CoreFeatures;
     use razero_wasm::module::{RefType, Table};
 
     #[test]

@@ -7,7 +7,7 @@ use crate::errors::{DecodeError, DecodeResult};
 use crate::function::decode_value_type;
 use crate::memory::{decode_memory, MemorySizer};
 use crate::table::decode_table;
-use razero::CoreFeatures;
+use razero_features::CoreFeatures;
 use razero_wasm::module::{ExternType, GlobalType, Import, ImportDesc, Table};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -167,7 +167,7 @@ mod tests {
     use super::decode_import_section;
     use crate::decoder::Decoder;
     use crate::memory::MemorySizer;
-    use razero::CoreFeatures;
+    use razero_features::CoreFeatures;
     use razero_wasm::module::{
         ExternType, GlobalType, Import, ImportDesc, Memory, RefType, Table, ValueType,
     };

@@ -11,11 +11,27 @@ use crate::call_engine::CallEngine;
 use crate::engine::{AlignedBytes, CompiledModule};
 use crate::hostmodule::build_host_module_opaque;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 struct ImportedFunction {
     executable_ptr: usize,
+    preamble_executable_ptr: usize,
     module_context_ptr: usize,
     type_id: FunctionTypeId,
+    host_func: Option<razero_wasm::host_func::HostFuncRef>,
+    compiled_module: Option<Arc<CompiledModule>>,
+}
+
+impl std::fmt::Debug for ImportedFunction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImportedFunction")
+            .field("executable_ptr", &self.executable_ptr)
+            .field("preamble_executable_ptr", &self.preamble_executable_ptr)
+            .field("module_context_ptr", &self.module_context_ptr)
+            .field("type_id", &self.type_id)
+            .field("has_host_func", &self.host_func.is_some())
+            .field("has_compiled_module", &self.compiled_module.is_some())
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -29,7 +45,8 @@ pub struct CompilerModuleEngine {
 
 impl CompilerModuleEngine {
     pub fn new(parent: Arc<CompiledModule>, module: ModuleInstance) -> Self {
-        let imported_functions = vec![ImportedFunction::default(); module.source.import_function_count as usize];
+        let imported_functions =
+            vec![ImportedFunction::default(); module.source.import_function_count as usize];
         Self {
             opaque: AlignedBytes::zeroed(0),
             opaque_ptr: 0,
@@ -101,7 +118,11 @@ impl CompilerModuleEngine {
         if offsets.tables_begin.raw() >= 0 {
             let mut cursor = offsets.tables_begin.raw() as usize;
             for table in &self.module.tables {
-                write_u64(opaque, cursor, table as *const TableInstance as usize as u64);
+                write_u64(
+                    opaque,
+                    cursor,
+                    table as *const TableInstance as usize as u64,
+                );
                 cursor += 8;
             }
         }
@@ -129,7 +150,10 @@ impl CompilerModuleEngine {
         write_u64(
             bytes,
             offset,
-            memory.bytes.first().map_or(0, |byte| byte as *const u8 as usize) as u64,
+            memory
+                .bytes
+                .first()
+                .map_or(0, |byte| byte as *const u8 as usize) as u64,
         );
         write_u64(bytes, offset + 8, memory.bytes.len() as u64);
     }
@@ -148,13 +172,16 @@ impl CompilerModuleEngine {
             return CallEngine::new(
                 index,
                 imported.executable_ptr,
-                0,
+                imported.preamble_executable_ptr,
                 imported.module_context_ptr,
                 slots,
                 typ.param_num_in_u64,
                 typ.result_num_in_u64,
-                None,
-                Some(self.parent.clone()),
+                imported.host_func.clone(),
+                imported
+                    .compiled_module
+                    .clone()
+                    .or_else(|| Some(self.parent.clone())),
             );
         }
 
@@ -193,7 +220,9 @@ impl CompilerModuleEngine {
             self.parent.shared_functions.memory_grow_ptr().unwrap_or(0);
         call_engine.exec_ctx.stack_grow_call_trampoline_address =
             self.parent.shared_functions.stack_grow_ptr().unwrap_or(0);
-        call_engine.exec_ctx.check_module_exit_code_trampoline_address = self
+        call_engine
+            .exec_ctx
+            .check_module_exit_code_trampoline_address = self
             .parent
             .shared_functions
             .check_module_exit_code_ptr()
@@ -202,23 +231,42 @@ impl CompilerModuleEngine {
             self.parent.shared_functions.table_grow_ptr().unwrap_or(0);
         call_engine.exec_ctx.ref_func_trampoline_address =
             self.parent.shared_functions.ref_func_ptr().unwrap_or(0);
-        call_engine.exec_ctx.memory_wait32_trampoline_address =
-            self.parent.shared_functions.memory_wait32_ptr().unwrap_or(0);
-        call_engine.exec_ctx.memory_wait64_trampoline_address =
-            self.parent.shared_functions.memory_wait64_ptr().unwrap_or(0);
-        call_engine.exec_ctx.memory_notify_trampoline_address =
-            self.parent.shared_functions.memory_notify_ptr().unwrap_or(0);
+        call_engine.exec_ctx.memory_wait32_trampoline_address = self
+            .parent
+            .shared_functions
+            .memory_wait32_ptr()
+            .unwrap_or(0);
+        call_engine.exec_ctx.memory_wait64_trampoline_address = self
+            .parent
+            .shared_functions
+            .memory_wait64_ptr()
+            .unwrap_or(0);
+        call_engine.exec_ctx.memory_notify_trampoline_address = self
+            .parent
+            .shared_functions
+            .memory_notify_ptr()
+            .unwrap_or(0);
         call_engine
     }
 
     fn resolve_imported_module_engine<'a>(
         imported_module_engine: &'a dyn WasmModuleEngine,
     ) -> &'a CompilerModuleEngine {
-        unsafe { &*(imported_module_engine as *const dyn WasmModuleEngine as *const CompilerModuleEngine) }
+        unsafe {
+            &*(imported_module_engine as *const dyn WasmModuleEngine as *const CompilerModuleEngine)
+        }
     }
 }
 
 impl WasmModuleEngine for CompilerModuleEngine {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
     fn done_instantiation(&mut self) {
         self.init_opaque();
     }
@@ -238,18 +286,44 @@ impl WasmModuleEngine for CompilerModuleEngine {
         let target = if index_in_imported_module < imported.imported_functions.len() as u32 {
             imported.imported_functions[index_in_imported_module as usize].clone()
         } else {
-            let local = (index_in_imported_module - imported.module.source.import_function_count) as usize;
+            let local =
+                (index_in_imported_module - imported.module.source.import_function_count) as usize;
             ImportedFunction {
                 executable_ptr: imported.parent.function_ptr(local).unwrap_or(0),
+                preamble_executable_ptr: imported
+                    .parent
+                    .entry_preamble_ptr(imported.module.source.function_section[local] as usize)
+                    .unwrap_or(0),
                 module_context_ptr: imported.opaque_ptr,
-                type_id: self.module.type_ids.get(desc_func as usize).copied().unwrap_or_default(),
+                type_id: self
+                    .module
+                    .type_ids
+                    .get(desc_func as usize)
+                    .copied()
+                    .unwrap_or_default(),
+                host_func: imported
+                    .module
+                    .source
+                    .code_section
+                    .get(local)
+                    .and_then(|code| code.host_func.clone()),
+                compiled_module: Some(imported.parent.clone()),
             }
         };
 
-        let (exec_off, module_ctx_off, type_id_off) = self.parent.offsets.imported_function_offset(index);
+        let (exec_off, module_ctx_off, type_id_off) =
+            self.parent.offsets.imported_function_offset(index);
         let opaque = self.opaque.as_mut_slice();
-        write_u64(opaque, exec_off.raw() as usize, target.executable_ptr as u64);
-        write_u64(opaque, module_ctx_off.raw() as usize, target.module_context_ptr as u64);
+        write_u64(
+            opaque,
+            exec_off.raw() as usize,
+            target.executable_ptr as u64,
+        );
+        write_u64(
+            opaque,
+            module_ctx_off.raw() as usize,
+            target.module_context_ptr as u64,
+        );
         write_u64(opaque, type_id_off.raw() as usize, target.type_id as u64);
         self.imported_functions[index as usize] = ImportedFunction { ..target };
     }
@@ -264,11 +338,7 @@ impl WasmModuleEngine for CompilerModuleEngine {
             return;
         };
         let bytes = self.opaque.as_mut_slice();
-        write_u64(
-            bytes,
-            offset as usize,
-            memory as *const _ as usize as u64,
-        );
+        write_u64(bytes, offset as usize, memory as *const _ as usize as u64);
         write_u64(bytes, offset as usize + 8, imported.opaque_ptr as u64);
     }
 
@@ -278,7 +348,11 @@ impl WasmModuleEngine for CompilerModuleEngine {
         type_id: FunctionTypeId,
         table_offset: Index,
     ) -> Option<(&ModuleInstance, Index)> {
-        let function_index = table.elements.get(table_offset as usize).copied().flatten()?;
+        let function_index = table
+            .elements
+            .get(table_offset as usize)
+            .copied()
+            .flatten()?;
         let function = self.module.functions.get(function_index as usize)?;
         (function.type_id == type_id).then_some((&self.module, function_index))
     }
@@ -295,7 +369,11 @@ impl WasmModuleEngine for CompilerModuleEngine {
         if let Some(global) = self.module.globals.get_mut(index as usize) {
             global.set_value(lo, hi);
             if self.parent.offsets.globals_begin.raw() >= 0 {
-                let offset = self.parent.offsets.global_instance_offset(index as usize).raw() as usize;
+                let offset = self
+                    .parent
+                    .offsets
+                    .global_instance_offset(index as usize)
+                    .raw() as usize;
                 let opaque = self.opaque.as_mut_slice();
                 write_u64(opaque, offset, lo);
                 write_u64(opaque, offset + 8, hi);
@@ -332,8 +410,11 @@ mod tests {
 
     use razero_wasm::engine::ModuleEngine;
     use razero_wasm::global::GlobalInstance;
+    use razero_wasm::host_func::stack_host_func;
     use razero_wasm::memory::MemoryInstance;
-    use razero_wasm::module::{FunctionType, GlobalType, Memory, Module, Table, ValueType};
+    use razero_wasm::module::{
+        Code, CodeBody, FunctionType, GlobalType, Memory, Module, Table, ValueType,
+    };
     use razero_wasm::module_instance::ModuleInstance;
     use razero_wasm::table::TableInstance;
 
@@ -400,14 +481,26 @@ mod tests {
 
         let bytes = engine.opaque();
         let local_mem = parent.offsets.local_memory_begin.raw() as usize;
-        assert_ne!(u64::from_le_bytes(bytes[local_mem..local_mem + 8].try_into().unwrap()), 0);
-        assert_eq!(u64::from_le_bytes(bytes[local_mem + 8..local_mem + 16].try_into().unwrap()), 32);
+        assert_ne!(
+            u64::from_le_bytes(bytes[local_mem..local_mem + 8].try_into().unwrap()),
+            0
+        );
+        assert_eq!(
+            u64::from_le_bytes(bytes[local_mem + 8..local_mem + 16].try_into().unwrap()),
+            32
+        );
 
         let global_offset = parent.offsets.globals_begin.raw() as usize;
-        assert_eq!(u64::from_le_bytes(bytes[global_offset..global_offset + 8].try_into().unwrap()), 7);
+        assert_eq!(
+            u64::from_le_bytes(bytes[global_offset..global_offset + 8].try_into().unwrap()),
+            7
+        );
 
         let table_offset = parent.offsets.tables_begin.raw() as usize;
-        assert_ne!(u64::from_le_bytes(bytes[table_offset..table_offset + 8].try_into().unwrap()), 0);
+        assert_ne!(
+            u64::from_le_bytes(bytes[table_offset..table_offset + 8].try_into().unwrap()),
+            0
+        );
     }
 
     #[test]
@@ -436,7 +529,8 @@ mod tests {
         });
         let mut imported_instance = ModuleInstance::default();
         imported_instance.source = imported_parent.module.clone();
-        let mut imported_engine = CompilerModuleEngine::new(imported_parent.clone(), imported_instance);
+        let mut imported_engine =
+            CompilerModuleEngine::new(imported_parent.clone(), imported_instance);
         imported_engine.init_opaque();
 
         let parent = compiled_module_for(&module);
@@ -450,16 +544,87 @@ mod tests {
         let (exec_off, ctx_off, ty_off) = parent.offsets.imported_function_offset(0);
         let opaque = engine.opaque();
         assert_eq!(
-            u64::from_le_bytes(opaque[exec_off.raw() as usize..exec_off.raw() as usize + 8].try_into().unwrap()),
+            u64::from_le_bytes(
+                opaque[exec_off.raw() as usize..exec_off.raw() as usize + 8]
+                    .try_into()
+                    .unwrap()
+            ),
             imported_parent.function_ptr(0).unwrap() as u64
         );
         assert_eq!(
-            u64::from_le_bytes(opaque[ctx_off.raw() as usize..ctx_off.raw() as usize + 8].try_into().unwrap()),
+            u64::from_le_bytes(
+                opaque[ctx_off.raw() as usize..ctx_off.raw() as usize + 8]
+                    .try_into()
+                    .unwrap()
+            ),
             imported_engine.opaque_ptr() as u64
         );
         assert_eq!(
-            u64::from_le_bytes(opaque[ty_off.raw() as usize..ty_off.raw() as usize + 8].try_into().unwrap()),
+            u64::from_le_bytes(
+                opaque[ty_off.raw() as usize..ty_off.raw() as usize + 8]
+                    .try_into()
+                    .unwrap()
+            ),
             9
         );
+    }
+
+    #[test]
+    fn imported_host_function_creates_callable_call_engine() {
+        let host = stack_host_func(|stack| {
+            stack[0] = stack[0].wrapping_add(1);
+            Ok(())
+        });
+        let mut ty = FunctionType::default();
+        ty.params = vec![ValueType::I64];
+        ty.results = vec![ValueType::I64];
+        ty.cache_num_in_u64();
+
+        let imported_module = Module {
+            is_host_module: true,
+            type_section: vec![ty.clone()],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body_kind: CodeBody::Host,
+                host_func: Some(host),
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+        let imported_parent = Arc::new(CompiledModule {
+            executables: Executables::from_executable_bytes(vec![0; 64]),
+            function_offsets: vec![16],
+            module: imported_module.clone(),
+            offsets: ModuleContextOffsetData::new(&imported_module, false),
+            shared_functions: Arc::new(SharedFunctions::default()),
+            ensure_termination: false,
+            fuel_enabled: false,
+            fuel: 0,
+            memory_isolation_enabled: false,
+            source_map: SourceMap::default(),
+        });
+        let mut imported_instance = ModuleInstance::default();
+        imported_instance.source = imported_module;
+        let mut imported_engine =
+            CompilerModuleEngine::new(imported_parent.clone(), imported_instance);
+        imported_engine.init_opaque();
+
+        let module = Module {
+            import_function_count: 1,
+            import_section: vec![razero_wasm::module::Import::function("env", "host", 0)],
+            type_section: vec![ty],
+            ..Module::default()
+        };
+        let parent = compiled_module_for(&module);
+        let mut instance = ModuleInstance::default();
+        instance.source = module;
+        let mut engine = CompilerModuleEngine::new(parent, instance);
+        engine.init_opaque();
+        engine.resolve_imported_function(0, 0, 0, &imported_engine);
+
+        let mut handle = engine.new_compiler_function(0);
+        let mut stack = [41u64];
+        let results = handle.call(&mut stack).unwrap();
+        assert_eq!(results, &[42]);
     }
 }

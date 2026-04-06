@@ -1,18 +1,11 @@
 use std::{
     collections::BTreeMap,
-    sync::{
-        atomic::AtomicI64,
-        Arc,
-    },
+    sync::{atomic::AtomicI64, Arc},
 };
 
 use crate::experimental::{
-    close_notifier::CloseNotifier,
-    fuel::FuelController,
-    listener::FunctionListenerFactory,
-    memory::MemoryAllocator,
-    snapshotter::Snapshotter,
-    r#yield::Yielder,
+    close_notifier::CloseNotifier, fuel::FuelController, listener::FunctionListenerFactory,
+    memory::MemoryAllocator, r#yield::Yielder, snapshotter::Snapshotter,
 };
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

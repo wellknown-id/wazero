@@ -2,7 +2,7 @@
 
 use crate::decoder::Decoder;
 use crate::errors::{require_feature, DecodeError, DecodeResult, ERR_INVALID_BYTE};
-use razero::CoreFeatures;
+use razero_features::CoreFeatures;
 use razero_wasm::const_expr::ConstExpr;
 use razero_wasm::instruction::{
     instruction_name, OPCODE_END, OPCODE_F32_CONST, OPCODE_F64_CONST, OPCODE_GLOBAL_GET,
@@ -181,7 +181,7 @@ where
 mod tests {
     use super::{decode_const_expr, decode_const_expr_with_extended_const};
     use crate::decoder::Decoder;
-    use razero::CoreFeatures;
+    use razero_features::CoreFeatures;
     use razero_wasm::const_expr::ConstExpr;
     use razero_wasm::instruction::{
         OPCODE_END, OPCODE_I32_ADD, OPCODE_I32_CONST, OPCODE_REF_FUNC, OPCODE_REF_NULL,

@@ -2,7 +2,7 @@
 
 use crate::decoder::Decoder;
 use crate::errors::{DecodeError, DecodeResult};
-use razero::CoreFeatures;
+use razero_features::CoreFeatures;
 use razero_wasm::module::{Memory, MEMORY_LIMIT_PAGES};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,7 +141,7 @@ pub fn decode_memory_section(
 mod tests {
     use super::{decode_limits_type, decode_memory, decode_memory_section, MemorySizer};
     use crate::decoder::Decoder;
-    use razero::CoreFeatures;
+    use razero_features::CoreFeatures;
     use razero_wasm::module::{Memory, MEMORY_LIMIT_PAGES};
 
     #[test]

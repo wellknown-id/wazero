@@ -3,7 +3,9 @@ use std::ptr::NonNull;
 use crate::backend::compiler::{CompilerContext, RelocationInfo};
 use crate::backend::machine::{BackendError, Machine};
 use crate::backend::FunctionAbi;
-use crate::ssa::{BasicBlock, BasicBlockId, Instruction, Opcode, Signature, SourceOffset, Type, Value};
+use crate::ssa::{
+    BasicBlock, BasicBlockId, Instruction, Opcode, Signature, SourceOffset, Type, Value,
+};
 use crate::wazevoapi::ExitCode;
 
 use super::cond::{Cond, CondFlag};
@@ -18,13 +20,14 @@ use super::reg::{vreg_for_real_reg, ARG_RESULT_FLOAT_REGS, ARG_RESULT_INT_REGS, 
 pub struct Arm64Machine {
     compiler: Option<NonNull<dyn CompilerContext>>,
     pub(crate) current_abi: FunctionAbi,
-    instructions: Vec<Arm64Instr>,
+    pub(crate) instructions: Vec<Arm64Instr>,
     pub(crate) pending_instructions: Vec<Arm64Instr>,
     pub spill_slot_size: i64,
     pub spill_slots: std::collections::BTreeMap<u32, i64>,
     pub clobbered_regs: Vec<crate::backend::VReg>,
     pub max_required_stack_size_for_calls: i64,
     pub stack_bounds_check_disabled: bool,
+    current_block_insert_index: usize,
     max_block_id: BasicBlockId,
 }
 
@@ -69,12 +72,16 @@ impl Machine for Arm64Machine {
 
     fn start_block(&mut self, block: BasicBlock) {
         self.instructions.push(Arm64Instr::Label(block.0));
+        self.current_block_insert_index = self.instructions.len();
     }
 
     fn end_block(&mut self) {}
 
     fn flush_pending_instructions(&mut self) {
-        self.instructions.append(&mut self.pending_instructions);
+        self.instructions.splice(
+            self.current_block_insert_index..self.current_block_insert_index,
+            self.pending_instructions.drain(..),
+        );
     }
 
     fn disable_stack_check(&mut self) {
@@ -91,7 +98,10 @@ impl Machine for Arm64Machine {
 
     fn lower_single_branch(&mut self, branch: &Instruction) {
         match branch.opcode {
-            Opcode::Jump => self.push(Arm64Instr::Br { offset: 0, link: false }),
+            Opcode::Jump => self.push(Arm64Instr::Br {
+                offset: 0,
+                link: false,
+            }),
             Opcode::Return => self.insert_return(),
             _ => self.push(Arm64Instr::Udf { imm: 0xdead }),
         }
@@ -186,6 +196,7 @@ impl Machine for Arm64Machine {
         self.spill_slot_size = 0;
         self.max_required_stack_size_for_calls = 0;
         self.stack_bounds_check_disabled = false;
+        self.current_block_insert_index = 0;
     }
 
     fn insert_move(&mut self, dst: crate::backend::VReg, src: crate::backend::VReg, ty: Type) {
@@ -223,9 +234,13 @@ impl Machine for Arm64Machine {
             .join("\n")
     }
 
-    fn reg_alloc(&mut self) {}
+    fn reg_alloc(&mut self) {
+        self.perform_reg_alloc();
+    }
 
-    fn post_reg_alloc(&mut self) {}
+    fn post_reg_alloc(&mut self) {
+        self.finalize_post_reg_alloc();
+    }
 
     fn resolve_relocations(
         &mut self,
@@ -255,7 +270,11 @@ impl Machine for Arm64Machine {
         sig: &Signature,
         need_module_context_ptr: bool,
     ) -> Vec<u8> {
-        super::abi_host_call::compile_host_function_trampoline(exit_code, sig, need_module_context_ptr)
+        super::abi_host_call::compile_host_function_trampoline(
+            exit_code,
+            sig,
+            need_module_context_ptr,
+        )
     }
 
     fn compile_stack_grow_call_sequence(&mut self) -> Vec<u8> {
@@ -284,7 +303,11 @@ impl Machine for Arm64Machine {
                     imm: arg.offset,
                 };
                 self.push(Arm64Instr::Load {
-                    kind: if arg.ty.is_int() { LoadKind::ULoad } else { LoadKind::FpuLoad },
+                    kind: if arg.ty.is_int() {
+                        LoadKind::ULoad
+                    } else {
+                        LoadKind::FpuLoad
+                    },
                     rd: reg,
                     mem: addr,
                     bits: arg.ty.bits(),
@@ -308,7 +331,11 @@ impl Machine for Arm64Machine {
                     imm: ret.offset,
                 };
                 self.push(Arm64Instr::Store {
-                    kind: if ret.ty.is_int() { StoreKind::Store } else { StoreKind::FpuStore },
+                    kind: if ret.ty.is_int() {
+                        StoreKind::Store
+                    } else {
+                        StoreKind::FpuStore
+                    },
                     src: reg,
                     mem: addr,
                     bits: ret.ty.bits(),
@@ -325,8 +352,7 @@ impl Machine for Arm64Machine {
         &self,
         num_functions: usize,
     ) -> Result<(usize, usize), BackendError> {
-        machine_relocation::call_trampoline_island_info(num_functions)
-            .map_err(BackendError::new)
+        machine_relocation::call_trampoline_island_info(num_functions).map_err(BackendError::new)
     }
 
     fn add_source_offset_info(&mut self, executable_offset: i64, source_offset: SourceOffset) {
@@ -338,7 +364,9 @@ impl Machine for Arm64Machine {
 #[cfg(test)]
 mod tests {
     use super::Arm64Machine;
+    use crate::backend::compiler::Compiler;
     use crate::backend::Machine;
+    use crate::ssa::{Builder, Signature, SignatureId, Type, Values};
 
     #[test]
     fn machine_flush_and_format_keep_instruction_order() {
@@ -347,5 +375,42 @@ mod tests {
         machine.push(super::Arm64Instr::Ret);
         machine.flush_pending_instructions();
         assert_eq!(machine.format(), "nop\nret");
+    }
+
+    #[test]
+    fn compiler_finalize_allocates_real_registers_for_basic_add() {
+        let mut builder = Builder::new();
+        builder.init(Signature::new(
+            SignatureId(0),
+            vec![Type::I64, Type::I64],
+            vec![Type::I64],
+        ));
+        let entry = builder.allocate_basic_block();
+        builder.set_current_block(entry);
+        builder.reverse_post_ordered_blocks.push(entry);
+
+        let lhs = builder.allocate_value(Type::I64);
+        let rhs = builder.allocate_value(Type::I64);
+        builder.block_mut(entry).add_param(lhs);
+        builder.block_mut(entry).add_param(rhs);
+        builder
+            .values_info
+            .resize(rhs.id().0 as usize + 1, Default::default());
+        builder.values_info[lhs.id().0 as usize].ref_count = 1;
+        builder.values_info[rhs.id().0 as usize].ref_count = 1;
+
+        let add = builder.insert_instruction(builder.allocate_instruction().as_iadd(lhs, rhs));
+        builder.insert_instruction(
+            builder
+                .allocate_instruction()
+                .as_return(Values::from_vec(vec![builder.instruction(add).return_()])),
+        );
+
+        let mut compiler = Compiler::new(Arm64Machine::new(), builder);
+        compiler.lower();
+        compiler.reg_alloc();
+        let text = compiler.machine().format();
+        assert!(!text.contains('?'), "{text}");
+        assert!(text.contains("add"));
     }
 }

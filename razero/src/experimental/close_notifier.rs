@@ -23,10 +23,7 @@ where
     }
 }
 
-pub fn with_close_notifier(
-    ctx: &Context,
-    notifier: impl CloseNotifier + 'static,
-) -> Context {
+pub fn with_close_notifier(ctx: &Context, notifier: impl CloseNotifier + 'static) -> Context {
     let mut cloned = ctx.clone();
     cloned.close_notifier = Some(Arc::new(notifier));
     cloned

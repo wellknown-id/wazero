@@ -11,6 +11,13 @@ checksum = "48f5d2a454e16a5ea0f4ced81bd44e4cfc7bd3a507b61887c99fd3538b28e4af"
 [[package]]
 name = "razero"
 version = "0.0.0"
+dependencies = [
+ "razero-decoder",
+ "razero-features",
+ "razero-interp",
+ "razero-secmem",
+ "razero-wasm",
+]
 
 [[package]]
 name = "razero-compiler"
@@ -23,9 +30,13 @@ dependencies = [
 name = "razero-decoder"
 version = "0.0.0"
 dependencies = [
- "razero",
+ "razero-features",
  "razero-wasm",
 ]
+
+[[package]]
+name = "razero-features"
+version = "0.0.0"
 
 [[package]]
 name = "razero-ffi"
@@ -37,6 +48,9 @@ dependencies = [
 [[package]]
 name = "razero-interp"
 version = "0.0.0"
+dependencies = [
+ "razero-wasm",
+]
 
 [[package]]
 name = "razero-platform"
@@ -52,3 +66,6 @@ version = "0.0.0"
 [[package]]
 name = "razero-wasm"
 version = "0.0.0"
+dependencies = [
+ "razero-features",
+]

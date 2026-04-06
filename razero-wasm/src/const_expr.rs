@@ -49,7 +49,7 @@ pub struct ConstExprError {
 }
 
 impl ConstExprError {
-    fn new(message: impl Into<String>) -> Self {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
         }

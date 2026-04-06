@@ -52,7 +52,14 @@ mod tests {
     fn arm64_abi_assigns_registers_like_go() {
         let sig = Signature::new(
             SignatureId(0),
-            vec![Type::I32, Type::F32, Type::I64, Type::F64, Type::I32, Type::V128],
+            vec![
+                Type::I32,
+                Type::F32,
+                Type::I64,
+                Type::F64,
+                Type::I32,
+                Type::V128,
+            ],
             vec![Type::I64, Type::F64, Type::I32],
         );
         let abi = Arm64Abi::from_signature(&sig);

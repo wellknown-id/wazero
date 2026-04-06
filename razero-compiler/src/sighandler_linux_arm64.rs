@@ -1,6 +1,8 @@
 #![doc = "Linux arm64 signal-handler glue."]
 
-pub use crate::sighandler_linux_amd64::{registered_jit_code_ranges, JitCodeRange, MAX_JIT_CODE_RANGES};
+pub use crate::sighandler_linux_amd64::{
+    registered_jit_code_ranges, JitCodeRange, MAX_JIT_CODE_RANGES,
+};
 
 pub const ASM_SOURCE: &str = include_str!("sighandler_linux_arm64.S");
 

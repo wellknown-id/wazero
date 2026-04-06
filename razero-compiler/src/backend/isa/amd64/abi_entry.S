@@ -1,17 +1,34 @@
-/* amd64 entry scaffold mirrored from Go's abi_entry_amd64.s.
- *
- * entrypoint(preamble_executable, function_executable, execution_context_ptr,
- *            module_context_ptr, param_result_slice_ptr, go_allocated_stack_ptr)
- *   R11 <- preamble executable
- *   R14 <- function executable
- *   RAX <- execution context
- *   RBX <- module context
- *   R12 <- param/result slice
- *   R13 <- go-allocated stack
- *   R15 <- saved execution context for signal/exit paths
- *   JMP  *R11
- *
- * after_go_function_call_entrypoint(executable, execution_context_ptr,
- *                                   stack_pointer, frame_pointer)
- *   restores BP/SP from Go and jumps back into JIT code.
- */
+.text
+
+.global razero_amd64_entrypoint
+.type razero_amd64_entrypoint, @function
+razero_amd64_entrypoint:
+    pushq %rbx
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    movq %rdi, %r11
+    movq %rsi, %r14
+    movq %rdx, %rax
+    movq %rcx, %rbx
+    movq %r8, %r12
+    movq %r9, %r13
+    movq %rdx, %r15
+    call *%r11
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %rbx
+    ret
+
+.global razero_amd64_after_go_function_call_entrypoint
+.type razero_amd64_after_go_function_call_entrypoint, @function
+razero_amd64_after_go_function_call_entrypoint:
+    movq %rdi, %r14
+    movq %rsi, %rax
+    movq %rsi, %r15
+    movq %rdx, %rsp
+    movq %rcx, %rbp
+    jmp *%r14
