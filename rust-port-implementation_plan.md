@@ -1,12 +1,14 @@
 # Port se-wazero to Rust — Direct, Faithful, Complete
 
-No Cranelift. No wasmparser. No LEB128 crate. Port every file.
+No Cranelift. No wasmparser. No LEB128 crate. Port every runtime file, and explicitly carry across every test, example, helper, and harness file so nothing gets lost in translation.
 
 ---
 
 ## Complete Source Inventory
 
-Every non-test Go source file, measured to the line.
+Every non-test Go source file in the runtime/compiler stack, measured to the line.
+
+Test-only and test-support code is inventoried separately below so verification scope is explicit instead of hand-waved behind a single "~tests" number.
 
 ### Public Surface
 
@@ -17,7 +19,7 @@ Every non-test Go source file, measured to the line.
 | `builder.go` | 380 | `razero/src/builder.rs` |
 | `cache.go` | 108 | `razero/src/cache.rs` |
 | **api/wasm.go** | 767 | `razero/src/api/wasm.rs` |
-| **api/features.go** | 137 | `razero/src/api/features.rs` |
+| **api/features.go** | 137 | `razero-features/src/lib.rs` + thin re-export in `razero/src/api/features.rs` |
 | **api/error.go** | 152 | `razero/src/api/error.rs` |
 | **Subtotal** | **1,400 + 1,056 = 2,456** | |
 
@@ -25,8 +27,8 @@ Every non-test Go source file, measured to the line.
 
 | Go Source | Prod LoC | Port To |
 |---|---|---|
-| `experimental/*.go` (non-test, non-testdata) | 965 | `razero/src/experimental/*.rs` |
-| Includes: snapshotter, yielder/resumer, function listener, fuel controller, memory allocator, table, close notifier | | |
+| `experimental/*.go` + `experimental/table/lookup.go` (non-test, non-testdata) | 965 | `razero/src/experimental/*.rs` |
+| Includes: checkpoint/snapshotter, close notifier, compilation workers, experimental feature toggles, fuel controller, import resolver, function listener, memory allocator, table lookup, yield/resume | | |
 
 ### Internal: Wasm Data Model (`internal/wasm/`)
 
@@ -272,7 +274,25 @@ Every non-test Go source file, measured to the line.
 | C FFI | 41 |
 | **TOTAL** | **48,896** |
 
-Plus **~52K LoC of tests** to port (or rewrite in `#[test]` style).
+Plus **51,922 LoC of `*_test.go`** to port (or rewrite in `#[test]` style), and **5,768 LoC of non-test verification support code** that those tests depend on.
+
+---
+
+## Test, Example, and Harness Inventory (Must Also Port/Retain)
+
+The plan above is the runtime/compiler implementation inventory. A faithful port also has to preserve the verification surface that proves behavior parity.
+
+| Verification Surface | Go LoC | Notes |
+|---|---|---|
+| `*_test.go` across the repository | 51,922 | Root tests, API tests, experimental tests, engine tests, platform tests, spec tests, example tests |
+| `internal/testing/` helpers | 1,252 | `require`, binary encoding builders, DWARF fixtures, fs helpers, hammer/maintester support |
+| `internal/integration_test/` non-test helpers | 929 | Spec test harness (`spectest.go`), fuzz harness glue, shared validation plumbing |
+| `internal/fstest/` | 167 | Filesystem timestamp and fixture helpers used by tests |
+| `internal/engine/wazevo/testcases/testcases.go` | 2,812 | Compiler/backend golden testcase corpus loader |
+| `examples/**/*.go` non-test files | 608 | Example programs exercised by example tests and used as public-behavior fixtures |
+| **Subtotal (non-`*_test.go` verification support)** | **5,768** | These are not optional: tests will not survive without them |
+
+**Porting rule**: do not treat helper packages, examples, or harness code as "nice to have." If a Go test depends on it today, it stays in scope for the Rust port.
 
 ---
 
@@ -282,6 +302,10 @@ Plus **~52K LoC of tests** to port (or rewrite in `#[test]` style).
 se-razero/
 ├── Cargo.toml                 # workspace root
 ├── go.mod                     # co-exists until Go is deleted
+│
+├── razero-features/           # CoreFeatures bitflags crate, re-exported by razero::api::features
+│   └── src/
+│       └── lib.rs
 │
 ├── razero/                    # public API crate (the "wazero" package equivalent)
 │   └── src/
@@ -298,13 +322,16 @@ se-razero/
 │       ├── api/
 │       │   ├── mod.rs
 │       │   ├── wasm.rs        # Module, Function, Memory, Global, ValueType
-│       │   ├── features.rs    # CoreFeatures
+│       │   ├── features.rs    # thin re-export of razero-features::CoreFeatures
 │       │   └── error.rs       # sys.ExitError etc.
 │       └── experimental/
 │           ├── mod.rs
-│           ├── snapshotter.rs
+│           ├── checkpoint.rs    # or snapshotter.rs, but preserve checkpoint API semantics
 │           ├── yield.rs       # Yielder, Resumer, YieldError
 │           ├── fuel.rs        # FuelController
+│           ├── features.rs    # experimental feature toggles
+│           ├── compilation_workers.rs
+│           ├── import_resolver.rs
 │           ├── listener.rs    # FunctionListener
 │           ├── memory.rs      # MemoryAllocator, LinearMemory
 │           ├── table.rs
@@ -714,9 +741,11 @@ Wire everything together into the user-facing crate.
 **What this covers**:
 - `Runtime::new()`, `Runtime::compile()`, `Runtime::instantiate()` 
 - `RuntimeConfig` builder (features, memory limits, secure mode, fuel, close-on-context-done)
+- `CoreFeatures` in `razero-features`, re-exported by `razero::api::features`
 - `ModuleConfig` (name)
 - `HostModuleBuilder` 
 - `CompiledModule` / `Instance` / `Func` / `Memory` / `Global`
+- Experimental surface parity: checkpoint/snapshotter, compilation workers, feature toggles, import resolver, close notifier, listeners, yield/resume, fuel, memory allocator, table helpers
 - Secure mode: `GuardPageAllocator` injection
 - Fuel metering: wired through `RuntimeConfig` → `Engine::CompileModule`
 - Yield/Resume: `Yielder` + `Resumer` traits, wired into both engines
@@ -814,13 +843,16 @@ These are the only external crates used. Everything else is ported from Go.
 ### Automated Tests
 1. **Spec test suite** (per-phase): `cargo test --test spec_v1`, `cargo test --test spec_v2`, `--test extended_const`, `--test tail_call`, `--test threads`
 2. **Unit tests**: port every `*_test.go` file alongside its source, phase by phase
-3. **Interpreter conformance**: all spec tests pass via `razero-interp`
-4. **Compiler conformance**: all spec tests pass via `razero-compiler` on both amd64 and arm64
-5. **C FFI smoke test**: compile + link a C program against `razero.h` + `librazero.a`
-6. **Fuel exhaustion**: infinite loop terminates deterministically
-7. **Guard page**: OOB access traps without host crash
-8. **Yield/resume**: cooperative suspension round-trips correctly
-9. **Secure mode benchmark**: compare vs Go implementation on representative workload
+3. **Harness parity**: port/retain `internal/testing`, `internal/fstest`, `internal/integration_test`, `internal/engine/wazevo/testcases`, and example programs before claiming a test area is complete
+4. **Example parity**: every `examples/**/_test.go` continues to execute against the Rust implementation with equivalent observable behavior
+5. **Interpreter conformance**: all spec tests pass via `razero-interp`
+6. **Compiler conformance**: all spec tests pass via `razero-compiler` on both amd64 and arm64
+7. **Public API parity**: root-package tests (`runtime_test.go`, `builder_test.go`, `cache_test.go`, `secure_test.go`, API tests, experimental tests) pass through `razero`
+8. **C FFI smoke test**: compile + link a C program against `razero.h` + `librazero.a`
+9. **Fuel exhaustion**: infinite loop terminates deterministically
+10. **Guard page**: OOB access traps without host crash
+11. **Yield/resume**: cooperative suspension round-trips correctly
+12. **Secure mode benchmark**: compare vs Go implementation on representative workload
 
 ### Manual Verification
 - Cross-compile C FFI for linux-amd64 and linux-arm64
