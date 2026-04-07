@@ -1,6 +1,8 @@
-# Port se-wazero to Rust — Direct, Faithful, Complete
+# Port se-razero to Rust — Direct, Faithful, Complete
 
 No Cranelift. No wasmparser. No LEB128 crate. Port every runtime file, and explicitly carry across every test, example, helper, and harness file so nothing gets lost in translation.
+
+This is a **faithful port-in-place** plan: the Go tree remains the behavioral ground truth until an equivalent Rust implementation **and** Rust verification surface exist for the same area. Do not delete Go code, Go tests, spec harnesses, example fixtures, or benchmark coverage first and promise to recreate them later.
 
 ---
 
@@ -241,7 +243,7 @@ Test-only and test-support code is inventoried separately below so verification 
 | `internal/expctxkeys/` | 68 | `razero/src/ctx_keys.rs` |
 | `internal/logging/` | 300 | `razero/src/logging.rs` |
 | `internal/internalapi/` | 9 | (inlined into trait bounds) |
-| `internal/assemblyscript/` | 39 | `razero/src/assemblyscript.rs` |
+| `internal/assemblyscript/` (including `logging/`) | 39 | `razero/src/assemblyscript.rs` + `razero/src/logging.rs` |
 | `internal/secmem/` | 95 | `razero-secmem/src/lib.rs` |
 | **Subtotal** | **2,516** | |
 
@@ -294,6 +296,17 @@ The plan above is the runtime/compiler implementation inventory. A faithful port
 
 **Porting rule**: do not treat helper packages, examples, or harness code as "nice to have." If a Go test depends on it today, it stays in scope for the Rust port.
 
+**Benchmark rule**: `internal/secbench/bench_test.go` is also in scope. Treat it as required secure-mode/guard-page performance coverage, not as optional "nice to have" benchmarking.
+
+**Port-in-place rule**: every Go test area gets an explicit Rust destination before the Go source is removed. Maintain a 1:1 checklist at file-granularity for:
+- root package tests (`runtime_test.go`, `builder_test.go`, `cache_test.go`, `secure_test.go`)
+- API tests under `api/`
+- experimental tests under `experimental/` and `experimental/table/`
+- example tests under `examples/**`
+- spec suites under `internal/integration_test/spectest/{v1,v2,extended-const,tail-call,threads}`
+- compiler/backend golden coverage under `internal/engine/wazevo/testcases`
+- benchmark/perf coverage under `internal/secbench`
+
 ---
 
 ## Workspace Layout
@@ -326,7 +339,9 @@ se-razero/
 │       │   └── error.rs       # sys.ExitError etc.
 │       └── experimental/
 │           ├── mod.rs
-│           ├── checkpoint.rs    # or snapshotter.rs, but preserve checkpoint API semantics
+│           ├── checkpoint.rs     # checkpoint-facing API surface
+│           ├── snapshotter.rs    # shared snapshot interfaces/helpers used by checkpoint APIs
+│           ├── experimental.rs   # internal module/program counter surface parity
 │           ├── yield.rs       # Yielder, Resumer, YieldError
 │           ├── fuel.rs        # FuelController
 │           ├── features.rs    # experimental feature toggles
@@ -336,6 +351,7 @@ se-razero/
 │           ├── memory.rs      # MemoryAllocator, LinearMemory
 │           ├── table.rs
 │           └── close_notifier.rs
+│   └── tests/                 # Rust integration tests that replace Go root/spec coverage incrementally
 │
 ├── razero-wasm/               # internal wasm data model
 │   └── src/
@@ -508,7 +524,7 @@ se-razero/
 │           ├── resetmap.rs
 │           └── perfmap.rs
 │
-├── razero-platform/           # OS abstractions (mmap, cpu features, guard pages)
+├── razero-platform/           # OS abstractions (mmap, cpu features, guard pages, path/time/crypto helpers as needed)
 │   └── src/
 │       ├── lib.rs
 │       ├── mmap.rs
@@ -551,7 +567,7 @@ Port the small, dependency-free modules first. These are leaves in the dependenc
 | `moremath.rs` | 271 | Math helpers (trunc, nearest, floor, ceil, copysign, min, max with NaN semantics) |
 | `u32.rs` + `u64.rs` | 104 | Bit tricks |
 | `wasmruntime.rs` | 66 | Error sentinel strings |
-| `razero-platform/` | 680 | mmap, mprotect, munmap, CPU feature detection, guard page support queries |
+| `razero-platform/` | 680 | mmap, mprotect, munmap, CPU feature detection, guard page support queries, plus platform/path/time/crypto helpers |
 
 **Exit criterion**: All utility crates compile and pass unit tests ported from Go.
 
@@ -586,6 +602,7 @@ Port the spine of the runtime: the in-memory representation of a decoded, valida
 - `unsafe.Pointer` casts for funcref tables → raw pointers with `Send + Sync` bounds.
 - `sync.Mutex` → `parking_lot::Mutex` (or `std::sync::Mutex`).
 - `context.Context` → a `Context` struct carrying typed fields (no `interface{}` value bag). Or a `TypeMap`.
+- Keep `internal/platform/{path,time,crypto}` semantics even if they start life in an existing crate file instead of a 1:1 Rust module split.
 
 **Exit criterion**: `razero-wasm` compiles. Can construct a `Module` programmatically and instantiate it into a `Store`.
 
@@ -745,7 +762,7 @@ Wire everything together into the user-facing crate.
 - `ModuleConfig` (name)
 - `HostModuleBuilder` 
 - `CompiledModule` / `Instance` / `Func` / `Memory` / `Global`
-- Experimental surface parity: checkpoint/snapshotter, compilation workers, feature toggles, import resolver, close notifier, listeners, yield/resume, fuel, memory allocator, table helpers
+- Experimental surface parity: checkpoint and snapshotter APIs, compilation workers, feature toggles, import resolver, close notifier, listeners, yield/resume, fuel, memory allocator, table helpers, and the internal `experimental.rs` program-counter/module metadata surface
 - Secure mode: `GuardPageAllocator` injection
 - Fuel metering: wired through `RuntimeConfig` → `Engine::CompileModule`
 - Yield/Resume: `Yielder` + `Resumer` traits, wired into both engines
@@ -841,7 +858,7 @@ These are the only external crates used. Everything else is ported from Go.
 ## Verification Plan
 
 ### Automated Tests
-1. **Spec test suite** (per-phase): `cargo test --test spec_v1`, `cargo test --test spec_v2`, `--test extended_const`, `--test tail_call`, `--test threads`
+1. **Spec test suite** (per-phase): `cargo test --test spec_v1`, `cargo test --test spec_v2`, `--test extended_const`, `--test tail_call`, `--test threads`, mirroring `internal/integration_test/spectest/{v1,v2,extended-const,tail-call,threads}`
 2. **Unit tests**: port every `*_test.go` file alongside its source, phase by phase
 3. **Harness parity**: port/retain `internal/testing`, `internal/fstest`, `internal/integration_test`, `internal/engine/wazevo/testcases`, and example programs before claiming a test area is complete
 4. **Example parity**: every `examples/**/_test.go` continues to execute against the Rust implementation with equivalent observable behavior
@@ -852,7 +869,8 @@ These are the only external crates used. Everything else is ported from Go.
 9. **Fuel exhaustion**: infinite loop terminates deterministically
 10. **Guard page**: OOB access traps without host crash
 11. **Yield/resume**: cooperative suspension round-trips correctly
-12. **Secure mode benchmark**: compare vs Go implementation on representative workload
+12. **Secure mode benchmark**: port/retain `internal/secbench/bench_test.go` as a Rust benchmark or equivalent perf regression gate, and compare against the Go implementation on a representative workload
+13. **Deletion gate**: no Go test, helper, spec corpus, or example fixture is removed until the corresponding Rust test/harness passes in CI
 
 ### Manual Verification
 - Cross-compile C FFI for linux-amd64 and linux-arm64
