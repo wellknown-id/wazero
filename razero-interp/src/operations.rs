@@ -795,8 +795,36 @@ impl Instruction {
             .with_u2(arg.offset as u64)
     }
 
+    pub fn atomic_load8(ty: UnsignedType, arg: MemoryArg) -> Self {
+        Self::new(OperationKind::AtomicLoad8)
+            .with_b1(ty as u8)
+            .with_u1(arg.alignment as u64)
+            .with_u2(arg.offset as u64)
+    }
+
+    pub fn atomic_load16(ty: UnsignedType, arg: MemoryArg) -> Self {
+        Self::new(OperationKind::AtomicLoad16)
+            .with_b1(ty as u8)
+            .with_u1(arg.alignment as u64)
+            .with_u2(arg.offset as u64)
+    }
+
     pub fn atomic_store(ty: UnsignedType, arg: MemoryArg) -> Self {
         Self::new(OperationKind::AtomicStore)
+            .with_b1(ty as u8)
+            .with_u1(arg.alignment as u64)
+            .with_u2(arg.offset as u64)
+    }
+
+    pub fn atomic_store8(ty: UnsignedType, arg: MemoryArg) -> Self {
+        Self::new(OperationKind::AtomicStore8)
+            .with_b1(ty as u8)
+            .with_u1(arg.alignment as u64)
+            .with_u2(arg.offset as u64)
+    }
+
+    pub fn atomic_store16(ty: UnsignedType, arg: MemoryArg) -> Self {
+        Self::new(OperationKind::AtomicStore16)
             .with_b1(ty as u8)
             .with_u1(arg.alignment as u64)
             .with_u2(arg.offset as u64)
@@ -806,6 +834,43 @@ impl Instruction {
         Self::new(OperationKind::AtomicRMW)
             .with_b1(ty as u8)
             .with_b2(op as u8)
+            .with_u1(arg.alignment as u64)
+            .with_u2(arg.offset as u64)
+    }
+
+    pub fn atomic_rmw8(ty: UnsignedType, arg: MemoryArg, op: AtomicArithmeticOp) -> Self {
+        Self::new(OperationKind::AtomicRMW8)
+            .with_b1(ty as u8)
+            .with_b2(op as u8)
+            .with_u1(arg.alignment as u64)
+            .with_u2(arg.offset as u64)
+    }
+
+    pub fn atomic_rmw16(ty: UnsignedType, arg: MemoryArg, op: AtomicArithmeticOp) -> Self {
+        Self::new(OperationKind::AtomicRMW16)
+            .with_b1(ty as u8)
+            .with_b2(op as u8)
+            .with_u1(arg.alignment as u64)
+            .with_u2(arg.offset as u64)
+    }
+
+    pub fn atomic_rmw_cmpxchg(ty: UnsignedType, arg: MemoryArg) -> Self {
+        Self::new(OperationKind::AtomicRMWCmpxchg)
+            .with_b1(ty as u8)
+            .with_u1(arg.alignment as u64)
+            .with_u2(arg.offset as u64)
+    }
+
+    pub fn atomic_rmw8_cmpxchg(ty: UnsignedType, arg: MemoryArg) -> Self {
+        Self::new(OperationKind::AtomicRMW8Cmpxchg)
+            .with_b1(ty as u8)
+            .with_u1(arg.alignment as u64)
+            .with_u2(arg.offset as u64)
+    }
+
+    pub fn atomic_rmw16_cmpxchg(ty: UnsignedType, arg: MemoryArg) -> Self {
+        Self::new(OperationKind::AtomicRMW16Cmpxchg)
+            .with_b1(ty as u8)
             .with_u1(arg.alignment as u64)
             .with_u2(arg.offset as u64)
     }

@@ -1,4 +1,4 @@
-Fuzzing infrastructure for wazero engines via [wasm-tools](https://github.com/bytecodealliance/wasm-tools).
+Fuzzing infrastructure for native Rust `razero` verification via [wasm-tools](https://github.com/bytecodealliance/wasm-tools).
 
 ### Dependency
 
@@ -11,12 +11,12 @@ Fuzzing infrastructure for wazero engines via [wasm-tools](https://github.com/by
 
 Currently, we have the following fuzzing targets:
 
-- `no_diff`: compares the results from the compiler and interpreter engines, and see if there's a diff in them.
-- `memory_no_diff`: same as `no_diff` except that in addition to the results, it also compares the entire memory buffer between engines to ensure the consistency around memory access.
-  Therefore, this takes much longer than `no_diff`.
-- `logging_no_diff`: same as `no_diff` except that in addition to the results, it also compares the entire logging filter result between engines to ensure the consistency around function calls.
-  Therefore, this takes much longer than `no_diff`.
-- `validation`: try compiling maybe-invalid Wasm module binaries. This is to ensure that our validation phase works correctly as well as the engines do not panic during compilation.
+- `no_diff`: generates terminating Wasm modules and compares native Rust execution outcomes between standard and secure mode.
+- `memory_no_diff`: same as `no_diff`, and also compares the final guest memory snapshot between modes.
+- `logging_no_diff`: same as `no_diff`, and also compares listener/log formatting output between modes.
+- `validation`: compiles maybe-invalid Wasm module binaries with the native Rust runtime to ensure validation and compilation do not panic.
+
+`cargo test` in this workspace also runs deterministic replay coverage for `fac.wasm`, `mem_grow.wasm`, `wazerolib/testdata/test.wasm`, and fixed seed inputs shared across all native targets.
 
 
 To run the fuzzer on a target, execute the following command:
@@ -54,39 +54,15 @@ Note that `--sanitizer=none` and `--no-trace-compares` are always recommended to
 
 ### Reproduce errors
 
-If the fuzzer encounters error, you would get the output like the following:
+If the fuzzer encounters an error, libFuzzer writes the crashing input to `fuzz/artifacts/<target>/...`.
+You can replay that input against the native Rust helpers with:
 
 ```
-Failed Wasm binary has been written to /Users/mathetake/wazero/internal/integration_test/fuzz/wazerolib/testdata/73c61e218b8547ef35271a22ca95f932dcc102bda9b3a9bdf1976e6ed36da31d.wasm
-Failed Wasm Text has been written to /Users/mathetake/wazero/internal/integration_test/fuzz/wazerolib/testdata/73c61e218b8547ef35271a22ca95f932dcc102bda9b3a9bdf1976e6ed36da31d.wat
-To reproduce the failure, execute: WASM_BINARY_PATH=/Users/mathetake/wazero/internal/integration_test/fuzz/wazerolib/testdata/73c61e218b8547ef35271a22ca95f932dcc102bda9b3a9bdf1976e6ed36da31d.wasm go test ./wazerolib/...
+WASM_BINARY_PATH=fuzz/artifacts/no_diff/crash-... \
+  cargo test -p wazero-fuzz-fuzz --test native_replay rerun_failed_native_parity_case -- --exact --nocapture
+
+WASM_BINARY_PATH=fuzz/artifacts/validation/crash-... \
+  cargo test -p wazero-fuzz-fuzz --test native_replay rerun_failed_native_validation_case -- --exact --nocapture
 ```
 
-then you can check the wasm and wat as well as reproduce the error by running
-```
-WASM_BINARY_PATH=/Users/mathetake/wazero/internal/integration_test/fuzz/wazerolib/testdata/73c61e218b8547ef35271a22ca95f932dcc102bda9b3a9bdf1976e6ed36da31d.wasm go test ./wazerolib/...
-```
-
-
-Also, in the bottom of the output, you can find the message as
-
-```
-
-Minimize test case with:
-
-        cargo fuzz tmin no_diff fuzz/artifacts/no_diff/crash-d2c1f5307fde6f057454606bcc21d5653be9be8d
-
-────────────────────────────────────────────────────────────────────────────────
-```
-
-and you can use that command to "minimize" the input binary while keeping the same error.
-
-
-Alternatively, you can use the following command to minimize the arbitrary input binary:
-
-```
-go test -c ./wazerolib -o nodiff.test && wasm-tools shrink ./predicate.sh original.{wasm,wat} -o shrinken.wasm --attempts 4294967295
-```
-
-which uses `wasm-tools shrinken` command to minimize the input binary. Internally, the `predicate.sh` is invoked for each input binary
-where it executes the `nodiff.test` binary which runs `TestReRunFailedRequireNoDiffCase`.
+`cargo fuzz tmin` still works to minimize the crashing input while preserving the native Rust failure.

@@ -14,3 +14,12 @@ razero-wasm = { workspace = true }
 razero-decoder = { workspace = true }
 razero-interp = { workspace = true }
 razero-secmem = { workspace = true }
+
+[dev-dependencies]
+criterion = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[bench]]
+name = "secbench"
+harness = false

@@ -5,11 +5,14 @@ use std::error::Error;
 use std::fmt;
 
 use crate::operations::{
-    FloatKind, InclusiveRange, Instruction, Label, LabelKind, MemoryArg, OperationKind, SignedInt,
-    SignedType, UnsignedInt, UnsignedType,
+    AtomicArithmeticOp, FloatKind, InclusiveRange, Instruction, Label, LabelKind, MemoryArg,
+    OperationKind, SignedInt, SignedType, UnsignedInt, UnsignedType,
 };
 
 const OPCODE_MISC_PREFIX: u8 = 0xfc;
+const OPCODE_TAIL_CALL_RETURN_CALL: u8 = 0x12;
+const OPCODE_TAIL_CALL_RETURN_CALL_INDIRECT: u8 = 0x13;
+const OPCODE_ATOMIC_PREFIX: u8 = 0xfe;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ValueType {
@@ -201,6 +204,13 @@ struct Signature {
     output: Vec<SigType>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reachability {
+    Reachable,
+    Unreachable,
+    TailCallTerminated,
+}
+
 struct Lowerer<'a> {
     config: CompileConfig<'a>,
     result: CompilationResult,
@@ -208,7 +218,7 @@ struct Lowerer<'a> {
     stack_len_in_u64: usize,
     current_frame_id: u32,
     control_frames: Vec<ControlFrame>,
-    unreachable_on: bool,
+    reachability: Reachability,
     unreachable_depth: usize,
     pc: usize,
     local_index_to_stack_height_in_u64: Vec<usize>,
@@ -223,7 +233,7 @@ impl<'a> Lowerer<'a> {
             stack_len_in_u64: 0,
             current_frame_id: 0,
             control_frames: Vec::new(),
-            unreachable_on: false,
+            reachability: Reachability::Reachable,
             unreachable_depth: 0,
             pc: 0,
             local_index_to_stack_height_in_u64: Vec::new(),
@@ -247,7 +257,10 @@ impl<'a> Lowerer<'a> {
         });
 
         while !self.control_frames.is_empty() && self.pc < self.config.body.len() {
-            self.handle_instruction()?;
+            let pc = self.pc;
+            let opcode = self.config.body[pc];
+            self.handle_instruction()
+                .map_err(|err| CompileError::new(format!("pc {pc}, opcode 0x{opcode:x}: {err}")))?;
         }
         Ok(self.result)
     }
@@ -307,7 +320,7 @@ impl<'a> Lowerer<'a> {
             0x01 => {}
             0x02 => {
                 let block_type = self.decode_block_type()?;
-                if self.unreachable_on {
+                if self.is_unreachable() {
                     self.unreachable_depth += 1;
                 } else {
                     let frame_id = self.next_frame_id();
@@ -324,7 +337,7 @@ impl<'a> Lowerer<'a> {
             }
             0x03 => {
                 let block_type = self.decode_block_type()?;
-                if self.unreachable_on {
+                if self.is_unreachable() {
                     self.unreachable_depth += 1;
                 } else {
                     let frame_id = self.next_frame_id();
@@ -350,7 +363,7 @@ impl<'a> Lowerer<'a> {
             }
             0x04 => {
                 let block_type = self.decode_block_type()?;
-                if self.unreachable_on {
+                if self.is_unreachable() {
                     self.unreachable_depth += 1;
                 } else {
                     let frame_id = self.next_frame_id();
@@ -376,8 +389,8 @@ impl<'a> Lowerer<'a> {
                 }
             }
             0x05 => {
-                if self.unreachable_on && self.unreachable_depth > 0 {
-                } else if self.unreachable_on {
+                if self.is_unreachable() && self.unreachable_depth > 0 {
+                } else if self.is_unreachable() {
                     let frame = self.top_frame_mut()?;
                     let frame_id = frame.frame_id;
                     let block_type = frame.block_type.clone();
@@ -407,9 +420,9 @@ impl<'a> Lowerer<'a> {
                 }
             }
             0x0b => {
-                if self.unreachable_on && self.unreachable_depth > 0 {
+                if self.is_unreachable() && self.unreachable_depth > 0 {
                     self.unreachable_depth -= 1;
-                } else if self.unreachable_on {
+                } else if self.is_unreachable() {
                     self.reset_unreachable();
                     let frame = self
                         .control_frames
@@ -475,8 +488,10 @@ impl<'a> Lowerer<'a> {
                 }
             }
             0x0c => {
-                let target_index = decode_u32(&self.config.body[self.pc + 1..])?.0 as usize;
-                if !self.unreachable_on {
+                let (target_index, consumed) = decode_u32(&self.config.body[self.pc + 1..])?;
+                self.pc += consumed;
+                let target_index = target_index as usize;
+                if self.is_reachable() {
                     let target_frame = self.frame_at_depth_mut(target_index)?;
                     target_frame.ensure_continuation();
                     let frame = target_frame.clone();
@@ -489,8 +504,10 @@ impl<'a> Lowerer<'a> {
                 }
             }
             0x0d => {
-                let target_index = decode_u32(&self.config.body[self.pc + 1..])?.0 as usize;
-                if !self.unreachable_on {
+                let (target_index, consumed) = decode_u32(&self.config.body[self.pc + 1..])?;
+                self.pc += consumed;
+                let target_index = target_index as usize;
+                if self.is_reachable() {
                     let target_frame = self.frame_at_depth_mut(target_index)?;
                     target_frame.ensure_continuation();
                     let frame = target_frame.clone();
@@ -509,7 +526,7 @@ impl<'a> Lowerer<'a> {
             0x0e => {
                 let (num_targets, bytes_read) = decode_u32(&self.config.body[self.pc + 1..])?;
                 self.pc += bytes_read;
-                if self.unreachable_on {
+                if self.is_unreachable() {
                     for _ in 0..=num_targets {
                         let (_, consumed) = decode_u32(&self.config.body[self.pc + 1..])?;
                         self.pc += consumed;
@@ -567,7 +584,7 @@ impl<'a> Lowerer<'a> {
                 self.emit(Instruction::drop(range));
             }
             0x1b => {
-                if !self.unreachable_on {
+                if self.is_reachable() {
                     self.emit(Instruction::select(
                         self.stack_peek()? == UnsignedType::V128,
                     ));
@@ -575,34 +592,40 @@ impl<'a> Lowerer<'a> {
             }
             0x1c => {
                 self.pc += 2;
-                if !self.unreachable_on {
+                if self.is_reachable() {
                     self.emit(Instruction::select(
                         self.stack_peek()? == UnsignedType::V128,
                     ));
                 }
             }
             0x20 => {
-                let depth = self.local_depth(index as usize)?;
-                let vector = self.local_type(index as usize)? == ValueType::V128;
-                self.emit(Instruction::pick(
-                    depth - if vector { 2 } else { 1 },
-                    vector,
-                ));
+                if self.is_reachable() {
+                    let depth = self.local_depth(index as usize)?;
+                    let vector = self.local_type(index as usize)? == ValueType::V128;
+                    self.emit(Instruction::pick(
+                        depth - if vector { 2 } else { 1 },
+                        vector,
+                    ));
+                }
             }
             0x21 => {
-                let depth = self.local_depth(index as usize)?;
-                let vector = self.local_type(index as usize)? == ValueType::V128;
-                self.emit(Instruction::set(depth + if vector { 2 } else { 1 }, vector));
+                if self.is_reachable() {
+                    let depth = self.local_depth(index as usize)?;
+                    let vector = self.local_type(index as usize)? == ValueType::V128;
+                    self.emit(Instruction::set(depth + if vector { 2 } else { 1 }, vector));
+                }
             }
             0x22 => {
-                let depth = self.local_depth(index as usize)?;
-                let vector = self.local_type(index as usize)? == ValueType::V128;
-                if vector {
-                    self.emit(Instruction::pick(1, true));
-                    self.emit(Instruction::set(depth + 2, true));
-                } else {
-                    self.emit(Instruction::pick(0, false));
-                    self.emit(Instruction::set(depth + 1, false));
+                if self.is_reachable() {
+                    let depth = self.local_depth(index as usize)?;
+                    let vector = self.local_type(index as usize)? == ValueType::V128;
+                    if vector {
+                        self.emit(Instruction::pick(1, true));
+                        self.emit(Instruction::set(depth + 2, true));
+                    } else {
+                        self.emit(Instruction::pick(0, false));
+                        self.emit(Instruction::set(depth + 1, false));
+                    }
                 }
             }
             0x23 => self.emit(Instruction::global_get(index)),
@@ -926,7 +949,25 @@ impl<'a> Lowerer<'a> {
                 self.emit(Instruction::new(OperationKind::RefFunc).with_u1(fn_index as u64));
             }
             OPCODE_MISC_PREFIX => self.handle_misc()?,
-            0xfd | 0xfe | 0x12 | 0x13 => {
+            OPCODE_ATOMIC_PREFIX => self.handle_atomic()?,
+            OPCODE_TAIL_CALL_RETURN_CALL => {
+                self.emit(Instruction::tail_call_return_call(index));
+                self.mark_tail_call_terminated()?;
+            }
+            OPCODE_TAIL_CALL_RETURN_CALL_INDIRECT => {
+                let (table_index, consumed) = decode_u32(&self.config.body[self.pc + 1..])?;
+                self.pc += consumed;
+                let function_frame = self.function_frame()?.clone();
+                let drop_range = self.get_frame_drop_range(&function_frame, false);
+                self.emit(Instruction::tail_call_return_call_indirect(
+                    index,
+                    table_index,
+                    drop_range,
+                    function_frame.as_label(),
+                ));
+                self.mark_tail_call_terminated()?;
+            }
+            0xfd => {
                 return Err(CompileError::new(format!(
                     "unsupported instruction in interpreter compiler: 0x{opcode:x}"
                 )));
@@ -1059,6 +1100,162 @@ impl<'a> Lowerer<'a> {
         Ok(())
     }
 
+    fn handle_atomic(&mut self) -> Result<(), CompileError> {
+        self.pc += 1;
+        let atomic_op = self.byte_at(self.pc)?;
+        match atomic_op {
+            0x00 => {
+                let inst = self.read_memory_and(Instruction::atomic_memory_notify)?;
+                self.emit(inst);
+            }
+            0x01 => {
+                let inst = self.read_memory_and(|arg| {
+                    Instruction::atomic_memory_wait(UnsignedType::I32, arg)
+                })?;
+                self.emit(inst);
+            }
+            0x02 => {
+                let inst = self.read_memory_and(|arg| {
+                    Instruction::atomic_memory_wait(UnsignedType::I64, arg)
+                })?;
+                self.emit(inst);
+            }
+            0x03 => {
+                self.pc += 1;
+                let _ = self.byte_at(self.pc)?;
+                self.emit(Instruction::atomic_fence());
+            }
+            0x10 => {
+                let inst =
+                    self.read_memory_and(|arg| Instruction::atomic_load(UnsignedType::I32, arg))?;
+                self.emit(inst);
+            }
+            0x11 => {
+                let inst =
+                    self.read_memory_and(|arg| Instruction::atomic_load(UnsignedType::I64, arg))?;
+                self.emit(inst);
+            }
+            0x12 => {
+                let inst =
+                    self.read_memory_and(|arg| Instruction::atomic_load8(UnsignedType::I32, arg))?;
+                self.emit(inst);
+            }
+            0x13 => {
+                let inst =
+                    self.read_memory_and(|arg| Instruction::atomic_load16(UnsignedType::I32, arg))?;
+                self.emit(inst);
+            }
+            0x14 => {
+                let inst =
+                    self.read_memory_and(|arg| Instruction::atomic_load8(UnsignedType::I64, arg))?;
+                self.emit(inst);
+            }
+            0x15 => {
+                let inst =
+                    self.read_memory_and(|arg| Instruction::atomic_load16(UnsignedType::I64, arg))?;
+                self.emit(inst);
+            }
+            0x16 => {
+                let inst =
+                    self.read_memory_and(|arg| Instruction::atomic_load(UnsignedType::I32, arg))?;
+                self.emit(inst);
+            }
+            0x17 => {
+                let inst =
+                    self.read_memory_and(|arg| Instruction::atomic_store(UnsignedType::I32, arg))?;
+                self.emit(inst);
+            }
+            0x18 => {
+                let inst =
+                    self.read_memory_and(|arg| Instruction::atomic_store(UnsignedType::I64, arg))?;
+                self.emit(inst);
+            }
+            0x19 => {
+                let inst =
+                    self.read_memory_and(|arg| Instruction::atomic_store8(UnsignedType::I32, arg))?;
+                self.emit(inst);
+            }
+            0x1a => {
+                let inst = self
+                    .read_memory_and(|arg| Instruction::atomic_store16(UnsignedType::I32, arg))?;
+                self.emit(inst);
+            }
+            0x1b => {
+                let inst =
+                    self.read_memory_and(|arg| Instruction::atomic_store8(UnsignedType::I64, arg))?;
+                self.emit(inst);
+            }
+            0x1c => {
+                let inst = self
+                    .read_memory_and(|arg| Instruction::atomic_store16(UnsignedType::I64, arg))?;
+                self.emit(inst);
+            }
+            0x1d => {
+                let inst =
+                    self.read_memory_and(|arg| Instruction::atomic_store(UnsignedType::I32, arg))?;
+                self.emit(inst);
+            }
+            0x1e..=0x47 => {
+                let (kind, ty, op) = atomic_rmw_from_opcode(atomic_op)?;
+                let inst = self.read_memory_and(|arg| match kind {
+                    OperationKind::AtomicRMW => Instruction::atomic_rmw(ty, arg, op),
+                    OperationKind::AtomicRMW8 => Instruction::atomic_rmw8(ty, arg, op),
+                    OperationKind::AtomicRMW16 => Instruction::atomic_rmw16(ty, arg, op),
+                    _ => unreachable!("invalid atomic rmw kind"),
+                })?;
+                self.emit(inst);
+            }
+            0x48 => {
+                let inst = self.read_memory_and(|arg| {
+                    Instruction::atomic_rmw_cmpxchg(UnsignedType::I32, arg)
+                })?;
+                self.emit(inst);
+            }
+            0x49 => {
+                let inst = self.read_memory_and(|arg| {
+                    Instruction::atomic_rmw_cmpxchg(UnsignedType::I64, arg)
+                })?;
+                self.emit(inst);
+            }
+            0x4a => {
+                let inst = self.read_memory_and(|arg| {
+                    Instruction::atomic_rmw8_cmpxchg(UnsignedType::I32, arg)
+                })?;
+                self.emit(inst);
+            }
+            0x4b => {
+                let inst = self.read_memory_and(|arg| {
+                    Instruction::atomic_rmw16_cmpxchg(UnsignedType::I32, arg)
+                })?;
+                self.emit(inst);
+            }
+            0x4c => {
+                let inst = self.read_memory_and(|arg| {
+                    Instruction::atomic_rmw8_cmpxchg(UnsignedType::I64, arg)
+                })?;
+                self.emit(inst);
+            }
+            0x4d => {
+                let inst = self.read_memory_and(|arg| {
+                    Instruction::atomic_rmw16_cmpxchg(UnsignedType::I64, arg)
+                })?;
+                self.emit(inst);
+            }
+            0x4e => {
+                let inst = self.read_memory_and(|arg| {
+                    Instruction::atomic_rmw_cmpxchg(UnsignedType::I32, arg)
+                })?;
+                self.emit(inst);
+            }
+            _ => {
+                return Err(CompileError::new(format!(
+                    "unsupported atomic instruction in interpreter compiler: 0x{atomic_op:x}"
+                )))
+            }
+        }
+        Ok(())
+    }
+
     fn apply_to_stack(&mut self, opcode: u8) -> Result<u32, CompileError> {
         let mut index = 0;
         match opcode {
@@ -1070,7 +1267,7 @@ impl<'a> Lowerer<'a> {
             _ => {}
         }
 
-        if self.unreachable_on {
+        if self.reachability == Reachability::Unreachable {
             return Ok(index);
         }
 
@@ -1106,7 +1303,9 @@ impl<'a> Lowerer<'a> {
             0x00 | 0x01 | 0x02 | 0x03 | 0x05 | 0x0b | 0x0c | 0x0f => Ok(sig([], [])),
             0x04 | 0x0d | 0x0e => Ok(sig([k(UnsignedType::I32)], [])),
             0x10 => self.direct_call_signature(index),
+            OPCODE_TAIL_CALL_RETURN_CALL => self.tail_call_direct_signature(index),
             0x11 => self.indirect_call_signature(index),
+            OPCODE_TAIL_CALL_RETURN_CALL_INDIRECT => self.tail_call_indirect_signature(index),
             0x1a => Ok(sig([u()], [])),
             0x1b | 0x1c => Ok(sig([u(), u(), k(UnsignedType::I32)], [u()])),
             0x20 => Ok(sig(
@@ -1134,9 +1333,10 @@ impl<'a> Lowerer<'a> {
             0x28 | 0x2c | 0x2d | 0x2e | 0x2f | 0x45 => {
                 Ok(sig([k(UnsignedType::I32)], [k(UnsignedType::I32)]))
             }
-            0x29 | 0x30 | 0x31 | 0x32 | 0x33 | 0x34 | 0x35 | 0x50 => {
+            0x29 | 0x30 | 0x31 | 0x32 | 0x33 | 0x34 | 0x35 => {
                 Ok(sig([k(UnsignedType::I32)], [k(UnsignedType::I64)]))
             }
+            0x50 => Ok(sig([k(UnsignedType::I64)], [k(UnsignedType::I32)])),
             0x2a => Ok(sig([k(UnsignedType::I32)], [k(UnsignedType::F32)])),
             0x2b => Ok(sig([k(UnsignedType::I32)], [k(UnsignedType::F64)])),
             0x36 | 0x3a | 0x3b => Ok(sig([k(UnsignedType::I32), k(UnsignedType::I32)], [])),
@@ -1204,7 +1404,8 @@ impl<'a> Lowerer<'a> {
             0xbf => Ok(sig([k(UnsignedType::I64)], [k(UnsignedType::F64)])),
             0xd0 | 0xd2 => Ok(sig([], [k(UnsignedType::I64)])),
             OPCODE_MISC_PREFIX => self.misc_signature(),
-            0xfd | 0xfe | 0x12 | 0x13 => Err(CompileError::new(format!(
+            OPCODE_ATOMIC_PREFIX => self.atomic_signature(),
+            0xfd => Err(CompileError::new(format!(
                 "unsupported instruction in interpreter compiler: 0x{opcode:x}"
             ))),
             _ => Err(CompileError::new(format!(
@@ -1252,6 +1453,73 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    fn atomic_signature(&self) -> Result<Signature, CompileError> {
+        let atomic = self
+            .config
+            .body
+            .get(self.pc + 1)
+            .copied()
+            .ok_or_else(|| CompileError::new("unexpected eof reading atomic opcode"))?;
+        match atomic {
+            0x00 => Ok(sig(
+                [k(UnsignedType::I32), k(UnsignedType::I32)],
+                [k(UnsignedType::I32)],
+            )),
+            0x01 => Ok(sig(
+                [
+                    k(UnsignedType::I32),
+                    k(UnsignedType::I32),
+                    k(UnsignedType::I64),
+                ],
+                [k(UnsignedType::I32)],
+            )),
+            0x02 => Ok(sig(
+                [
+                    k(UnsignedType::I32),
+                    k(UnsignedType::I64),
+                    k(UnsignedType::I64),
+                ],
+                [k(UnsignedType::I32)],
+            )),
+            0x03 => Ok(sig([], [])),
+            0x10..=0x13 => Ok(sig([k(UnsignedType::I32)], [k(UnsignedType::I32)])),
+            0x14..=0x16 => Ok(sig([k(UnsignedType::I32)], [k(UnsignedType::I64)])),
+            0x17 | 0x19..=0x1a => Ok(sig([k(UnsignedType::I32), k(UnsignedType::I32)], [])),
+            0x18 | 0x1b..=0x1d => Ok(sig([k(UnsignedType::I32), k(UnsignedType::I64)], [])),
+            0x1e | 0x20 | 0x21 | 0x25 | 0x27 | 0x28 | 0x2c | 0x2e | 0x2f | 0x33 | 0x35 | 0x36
+            | 0x3a | 0x3c | 0x3d | 0x41 | 0x43 | 0x44 => Ok(sig(
+                [k(UnsignedType::I32), k(UnsignedType::I32)],
+                [k(UnsignedType::I32)],
+            )),
+            0x1f | 0x22 | 0x23 | 0x24 | 0x26 | 0x29 | 0x2a | 0x2b | 0x2d | 0x30 | 0x31 | 0x32
+            | 0x34 | 0x37 | 0x38 | 0x39 | 0x3b | 0x3e | 0x3f | 0x40 | 0x42 | 0x45 | 0x46 | 0x47 => {
+                Ok(sig(
+                    [k(UnsignedType::I32), k(UnsignedType::I64)],
+                    [k(UnsignedType::I64)],
+                ))
+            }
+            0x48 | 0x4a..=0x4b => Ok(sig(
+                [
+                    k(UnsignedType::I32),
+                    k(UnsignedType::I32),
+                    k(UnsignedType::I32),
+                ],
+                [k(UnsignedType::I32)],
+            )),
+            0x49 | 0x4c..=0x4e => Ok(sig(
+                [
+                    k(UnsignedType::I32),
+                    k(UnsignedType::I64),
+                    k(UnsignedType::I64),
+                ],
+                [k(UnsignedType::I64)],
+            )),
+            _ => Err(CompileError::new(format!(
+                "unsupported atomic instruction in interpreter compiler: 0x{atomic:x}"
+            ))),
+        }
+    }
+
     fn direct_call_signature(&self, function_index: u32) -> Result<Signature, CompileError> {
         let type_index = *self
             .config
@@ -1261,8 +1529,23 @@ impl<'a> Lowerer<'a> {
         self.function_type_signature(type_index, false)
     }
 
+    fn tail_call_direct_signature(&self, function_index: u32) -> Result<Signature, CompileError> {
+        let type_index = *self
+            .config
+            .functions
+            .get(function_index as usize)
+            .ok_or_else(|| CompileError::new(format!("invalid function index {function_index}")))?;
+        self.function_type_signature(type_index, false)
+            .and_then(|signature| self.ensure_tail_call_results_match(signature))
+    }
+
     fn indirect_call_signature(&self, type_index: u32) -> Result<Signature, CompileError> {
         self.function_type_signature(type_index, true)
+    }
+
+    fn tail_call_indirect_signature(&self, type_index: u32) -> Result<Signature, CompileError> {
+        self.function_type_signature(type_index, true)
+            .and_then(|signature| self.ensure_tail_call_results_match(signature))
     }
 
     fn function_type_signature(
@@ -1291,6 +1574,26 @@ impl<'a> Lowerer<'a> {
         Ok(Signature { input, output })
     }
 
+    fn ensure_tail_call_results_match(
+        &self,
+        signature: Signature,
+    ) -> Result<Signature, CompileError> {
+        let current = self
+            .config
+            .signature
+            .results
+            .iter()
+            .map(|ty| SigType::Known(ty.as_stack_type()))
+            .collect::<Vec<_>>();
+        if signature.output != current {
+            return Err(CompileError::new("type mismatch"));
+        }
+        Ok(Signature {
+            input: signature.input,
+            output: Vec::new(),
+        })
+    }
+
     fn decode_block_type(&mut self) -> Result<FunctionType, CompileError> {
         let next = self.pc + 1;
         let byte = self.byte_at(next)?;
@@ -1303,7 +1606,9 @@ impl<'a> Lowerer<'a> {
             return Ok(FunctionType::new(Vec::new(), vec![value_type]));
         }
         let (type_index, consumed) = decode_i33_as_i64(&self.config.body[next..])?;
-        self.pc += consumed;
+        // handle_instruction advances past the opcode after this returns, so leave
+        // self.pc on the final block type byte.
+        self.pc = next + consumed - 1;
         let ty =
             self.config.types.get(type_index as usize).ok_or_else(|| {
                 CompileError::new(format!("invalid block type index {type_index}"))
@@ -1404,7 +1709,7 @@ impl<'a> Lowerer<'a> {
     }
 
     fn emit(&mut self, op: Instruction) {
-        if self.unreachable_on {
+        if self.is_unreachable() {
             return;
         }
         if op.kind == OperationKind::Drop && InclusiveRange::from_u64(op.u1) == InclusiveRange::NOP
@@ -1446,11 +1751,36 @@ impl<'a> Lowerer<'a> {
     }
 
     fn mark_unreachable(&mut self) {
-        self.unreachable_on = true;
+        self.reachability = Reachability::Unreachable;
+    }
+
+    fn mark_tail_call_terminated(&mut self) -> Result<(), CompileError> {
+        let function_frame = self.function_frame()?.clone();
+        let result_types = self
+            .config
+            .signature
+            .results
+            .iter()
+            .map(|ty| ty.as_stack_type())
+            .collect::<Vec<_>>();
+        self.stack_switch_at(&function_frame);
+        for ty in result_types {
+            self.stack_push(ty);
+        }
+        self.reachability = Reachability::TailCallTerminated;
+        Ok(())
     }
 
     fn reset_unreachable(&mut self) {
-        self.unreachable_on = false;
+        self.reachability = Reachability::Reachable;
+    }
+
+    fn is_reachable(&self) -> bool {
+        self.reachability == Reachability::Reachable
+    }
+
+    fn is_unreachable(&self) -> bool {
+        self.reachability != Reachability::Reachable
     }
 
     fn bump_label(&mut self, label: Label) {
@@ -1507,6 +1837,39 @@ fn sig<const I: usize, const O: usize>(input: [SigType; I], output: [SigType; O]
         input: input.to_vec(),
         output: output.to_vec(),
     }
+}
+
+fn atomic_rmw_from_opcode(
+    opcode: u8,
+) -> Result<(OperationKind, UnsignedType, AtomicArithmeticOp), CompileError> {
+    let (kind, ty) = match opcode {
+        0x1e | 0x25 | 0x2c | 0x33 | 0x3a | 0x41 => (OperationKind::AtomicRMW, UnsignedType::I32),
+        0x1f | 0x26 | 0x2d | 0x34 | 0x3b | 0x42 => (OperationKind::AtomicRMW, UnsignedType::I64),
+        0x20 | 0x27 | 0x2e | 0x35 | 0x3c | 0x43 => (OperationKind::AtomicRMW8, UnsignedType::I32),
+        0x21 | 0x28 | 0x2f | 0x36 | 0x3d | 0x44 => (OperationKind::AtomicRMW16, UnsignedType::I32),
+        0x22 | 0x29 | 0x30 | 0x37 | 0x3e | 0x45 => (OperationKind::AtomicRMW8, UnsignedType::I64),
+        0x23 | 0x2a | 0x31 | 0x38 | 0x3f | 0x46 => (OperationKind::AtomicRMW16, UnsignedType::I64),
+        0x24 | 0x2b | 0x32 | 0x39 | 0x40 | 0x47 => (OperationKind::AtomicRMW, UnsignedType::I32),
+        _ => {
+            return Err(CompileError::new(format!(
+                "unsupported atomic instruction in interpreter compiler: 0x{opcode:x}"
+            )))
+        }
+    };
+    let op = match opcode {
+        0x1e..=0x24 => AtomicArithmeticOp::Add,
+        0x25..=0x2b => AtomicArithmeticOp::Sub,
+        0x2c..=0x32 => AtomicArithmeticOp::And,
+        0x33..=0x39 => AtomicArithmeticOp::Or,
+        0x3a..=0x40 => AtomicArithmeticOp::Xor,
+        0x41..=0x47 => AtomicArithmeticOp::Nop,
+        _ => {
+            return Err(CompileError::new(format!(
+                "unsupported atomic instruction in interpreter compiler: 0x{opcode:x}"
+            )))
+        }
+    };
+    Ok((kind, ty, op))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1635,6 +1998,9 @@ fn read_le_u64(bytes: &[u8], start: usize) -> Result<u64, CompileError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use razero_decoder::decoder::decode_module;
+    use razero_features::CoreFeatures;
+    use razero_wasm::module::ExternType;
 
     fn label(kind: LabelKind, frame_id: u32) -> Label {
         Label::new(kind, frame_id)
@@ -1642,6 +2008,10 @@ mod tests {
 
     fn i32_i32() -> FunctionType {
         FunctionType::new(vec![ValueType::I32], vec![ValueType::I32])
+    }
+
+    fn interp_value_type(value_type: razero_wasm::module::ValueType) -> ValueType {
+        ValueType::from_block_byte(value_type.0).expect("supported value type")
     }
 
     #[test]
@@ -1805,5 +2175,209 @@ mod tests {
             result.operations
         );
         assert_eq!(Some(&1), result.label_callers.get(&cont));
+    }
+
+    #[test]
+    fn lowers_tail_call_return_call() {
+        let ty = i32_i32();
+        let result = Compiler
+            .lower_with_config(CompileConfig {
+                body: &[OPCODE_TAIL_CALL_RETURN_CALL, 0x01, 0x0b],
+                signature: ty.clone(),
+                functions: &[0, 0],
+                types: &[ty],
+                ..CompileConfig::new(&[])
+            })
+            .unwrap();
+
+        assert_eq!(
+            vec![Instruction::tail_call_return_call(1)],
+            result.operations
+        );
+    }
+
+    #[test]
+    fn rejects_tail_call_result_mismatch() {
+        let err = Compiler
+            .lower_with_config(CompileConfig {
+                body: &[OPCODE_TAIL_CALL_RETURN_CALL, 0x01, 0x0b],
+                signature: FunctionType::new(vec![], vec![ValueType::I32]),
+                functions: &[0, 1],
+                types: &[
+                    FunctionType::new(vec![], vec![ValueType::I32]),
+                    FunctionType::new(vec![], vec![ValueType::I64]),
+                ],
+                ..CompileConfig::new(&[])
+            })
+            .unwrap_err();
+
+        assert!(err.to_string().contains("type mismatch"));
+    }
+
+    #[test]
+    fn rejects_tail_call_indirect_result_used_as_i32_when_void() {
+        let err = Compiler
+            .lower_with_config(CompileConfig {
+                body: &[
+                    0x41,
+                    0x00,
+                    OPCODE_TAIL_CALL_RETURN_CALL_INDIRECT,
+                    0x00,
+                    0x00,
+                    0x45,
+                    0x0b,
+                ],
+                types: &[FunctionType::default()],
+                ..CompileConfig::new(&[])
+            })
+            .unwrap_err();
+
+        assert!(err.to_string().contains("stack underflow"));
+    }
+
+    #[test]
+    fn rejects_tail_call_indirect_result_used_as_wrong_type() {
+        let err = Compiler
+            .lower_with_config(CompileConfig {
+                body: &[
+                    0x41,
+                    0x00,
+                    OPCODE_TAIL_CALL_RETURN_CALL_INDIRECT,
+                    0x00,
+                    0x00,
+                    0x45,
+                    0x0b,
+                ],
+                signature: FunctionType::new(vec![], vec![ValueType::I64]),
+                types: &[FunctionType::new(vec![], vec![ValueType::I64])],
+                ..CompileConfig::new(&[])
+            })
+            .unwrap_err();
+
+        assert!(err.to_string().contains("input signature mismatch"));
+    }
+
+    #[test]
+    fn lowers_atomic_i32_rmw_add() {
+        let result = Compiler
+            .lower_with_config(CompileConfig {
+                body: &[
+                    0x41,
+                    0x00,
+                    0x41,
+                    0x01,
+                    OPCODE_ATOMIC_PREFIX,
+                    0x1e,
+                    0x02,
+                    0x04,
+                    0x0b,
+                ],
+                ..CompileConfig::new(&[])
+            })
+            .unwrap();
+
+        assert_eq!(
+            vec![
+                Instruction::const_i32(0),
+                Instruction::const_i32(1),
+                Instruction::atomic_rmw(
+                    UnsignedType::I32,
+                    MemoryArg {
+                        alignment: 2,
+                        offset: 4,
+                    },
+                    AtomicArithmeticOp::Add,
+                ),
+                Instruction::drop(InclusiveRange::new(0, 0)),
+                Instruction::br(label(LabelKind::Return, 0)),
+            ],
+            result.operations
+        );
+        assert!(result.uses_memory);
+    }
+
+    #[test]
+    fn lowers_multivalue_loop_with_inner_return() {
+        let ty = FunctionType::new(vec![ValueType::I64, ValueType::I64], vec![ValueType::I64]);
+        let result = Compiler
+            .lower_with_config(CompileConfig {
+                body: &[0x03, 0x00, 0x1a, 0x0f, 0x0b, 0x0b],
+                signature: ty.clone(),
+                types: &[ty],
+                ..CompileConfig::new(&[])
+            })
+            .expect("loop body should lower");
+        assert!(
+            result
+                .operations
+                .iter()
+                .all(|op| op.kind != OperationKind::Unreachable),
+            "{:?}",
+            result.operations
+        );
+        assert!(result
+            .operations
+            .iter()
+            .any(|op| op.kind == OperationKind::Br
+                && op.u1 == label(LabelKind::Return, 0).into_raw()));
+    }
+
+    #[test]
+    fn lowers_fac_secbench_workload_without_unreachable_ops() {
+        let module = decode_module(include_bytes!("../../testdata/fac.wasm"), CoreFeatures::V2)
+            .expect("fac.wasm should decode");
+        let export = module
+            .export_section
+            .iter()
+            .find(|export| export.ty == ExternType::FUNC && export.name == "fac-ssa")
+            .expect("fac-ssa export");
+        let function_index = export.index as usize - module.import_function_count as usize;
+        let type_index = module.function_section[function_index] as usize;
+        let function_type = &module.type_section[type_index];
+        let code = &module.code_section[function_index];
+        let local_types = code
+            .local_types
+            .iter()
+            .map(|ty| interp_value_type(*ty))
+            .collect::<Vec<_>>();
+        let types = module
+            .type_section
+            .iter()
+            .map(|ty| {
+                FunctionType::new(
+                    ty.params.iter().map(|v| interp_value_type(*v)).collect(),
+                    ty.results.iter().map(|v| interp_value_type(*v)).collect(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let lowered = Compiler
+            .lower_with_config(CompileConfig {
+                body: &code.body,
+                signature: FunctionType::new(
+                    function_type
+                        .params
+                        .iter()
+                        .map(|ty| interp_value_type(*ty))
+                        .collect(),
+                    function_type
+                        .results
+                        .iter()
+                        .map(|ty| interp_value_type(*ty))
+                        .collect(),
+                ),
+                local_types: &local_types,
+                functions: &module.function_section,
+                types: &types,
+                ..CompileConfig::new(&[])
+            })
+            .expect("fac-ssa should lower");
+        assert!(
+            lowered
+                .operations
+                .iter()
+                .all(|op| op.kind != OperationKind::Unreachable),
+            "{:?}",
+            lowered.operations
+        );
     }
 }

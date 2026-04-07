@@ -1,4 +1,5 @@
 use std::{
+    error::Error,
     fmt::{self, Display, Formatter},
     ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign},
 };
@@ -68,7 +69,17 @@ impl CoreFeatures {
     }
 
     pub fn is_enabled(self, feature: Self) -> bool {
-        self.contains(feature)
+        feature.0 != 0 && self.contains(feature)
+    }
+
+    pub fn require_enabled(self, feature: Self) -> Result<(), FeatureError> {
+        if self.contains(feature) {
+            Ok(())
+        } else {
+            Err(FeatureError {
+                feature_name: feature_name(feature).unwrap_or("<unknown>"),
+            })
+        }
     }
 }
 
@@ -124,6 +135,19 @@ impl BitAndAssign for CoreFeatures {
 pub const CORE_FEATURES_V1: CoreFeatures = CoreFeatures::V1;
 pub const CORE_FEATURES_V2: CoreFeatures = CoreFeatures::V2;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FeatureError {
+    feature_name: &'static str,
+}
+
+impl Display for FeatureError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "feature {:?} is disabled", self.feature_name)
+    }
+}
+
+impl Error for FeatureError {}
+
 fn feature_name(feature: CoreFeatures) -> Option<&'static str> {
     match feature {
         CoreFeatures::BULK_MEMORY_OPERATIONS => Some("bulk-memory-operations"),
@@ -147,6 +171,12 @@ mod tests {
     use super::{CoreFeatures, CORE_FEATURES_V2};
 
     #[test]
+    fn zero_is_not_a_valid_feature_flag() {
+        let features = CoreFeatures::empty().set_enabled(CoreFeatures::empty(), true);
+        assert!(!features.is_enabled(CoreFeatures::empty()));
+    }
+
+    #[test]
     fn set_enabled_round_trips() {
         let features = CoreFeatures::empty()
             .set_enabled(CoreFeatures::MUTABLE_GLOBAL, true)
@@ -162,5 +192,17 @@ mod tests {
             "bulk-memory-operations|multi-value|mutable-global|nontrapping-float-to-int-conversion|reference-types|sign-extension-ops|simd",
             CORE_FEATURES_V2.to_string()
         );
+    }
+
+    #[test]
+    fn require_enabled_matches_go_error_text() {
+        let err = CoreFeatures::empty()
+            .require_enabled(CoreFeatures::MUTABLE_GLOBAL)
+            .expect_err("mutable-global should be reported as disabled");
+        assert_eq!("feature \"mutable-global\" is disabled", err.to_string());
+
+        assert!(CoreFeatures::MUTABLE_GLOBAL
+            .require_enabled(CoreFeatures::MUTABLE_GLOBAL)
+            .is_ok());
     }
 }

@@ -3,12 +3,11 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::const_expr::ConstExpr;
-use crate::global::GlobalInstance;
-use crate::instruction::{
-    OPCODE_END, OPCODE_GLOBAL_GET, OPCODE_I32_CONST, OPCODE_I64_CONST, OPCODE_REF_FUNC,
-    OPCODE_REF_NULL,
+use crate::const_expr::{
+    evaluate_const_expr as evaluate_runtime_const_expr, ConstExpr, ConstExprError,
 };
+use crate::global::GlobalInstance;
+use crate::instruction::{OPCODE_REF_FUNC, OPCODE_REF_NULL};
 use crate::leb128;
 use crate::memory::MemoryInstance;
 use crate::module::{
@@ -274,6 +273,12 @@ impl ModuleInstance {
         self.memory_instance = Some(MemoryInstance::new(memory));
     }
 
+    pub fn define_memory_guarded(&mut self, memory: &Memory) -> bool {
+        self.memory_type = Some(memory.clone());
+        self.memory_instance = MemoryInstance::new_guarded(memory);
+        self.memory_instance.is_some()
+    }
+
     pub fn add_defined_table(&mut self, table: &Table) {
         self.table_types.push(table.clone());
         self.tables.push(TableInstance::new(table));
@@ -347,82 +352,27 @@ impl ModuleInstance {
         &self,
         expr: &ConstExpr,
     ) -> Result<(Vec<u64>, ValueType), ModuleInstantiationError> {
-        let data = &expr.data;
-        let Some(&opcode) = data.first() else {
+        if expr.data.is_empty() {
             return Err(ModuleInstantiationError::InvalidConstExpression(
                 "constant expression cannot be empty".to_string(),
             ));
-        };
-
-        match opcode {
-            OPCODE_I32_CONST => {
-                let (value, read) =
-                    leb128::load_i32(data.get(1..).unwrap_or_default()).map_err(|err| {
-                        ModuleInstantiationError::InvalidConstExpression(format!("read i32: {err}"))
-                    })?;
-                self.expect_end(data, 1 + read)?;
-                Ok((vec![u64::from(value as u32)], ValueType::I32))
-            }
-            OPCODE_I64_CONST => {
-                let (value, read) =
-                    leb128::load_i64(data.get(1..).unwrap_or_default()).map_err(|err| {
-                        ModuleInstantiationError::InvalidConstExpression(format!("read i64: {err}"))
-                    })?;
-                self.expect_end(data, 1 + read)?;
-                Ok((vec![value as u64], ValueType::I64))
-            }
-            OPCODE_GLOBAL_GET => {
-                let (index, read) =
-                    leb128::load_u32(data.get(1..).unwrap_or_default()).map_err(|err| {
-                        ModuleInstantiationError::InvalidConstExpression(format!(
-                            "read index of global: {err}"
-                        ))
-                    })?;
-                self.expect_end(data, 1 + read)?;
-                let global = self.globals.get(index as usize).ok_or_else(|| {
-                    ModuleInstantiationError::InvalidConstExpression(
-                        "global index out of range".to_string(),
-                    )
-                })?;
-                let global_type = self.global_types.get(index as usize).ok_or_else(|| {
-                    ModuleInstantiationError::InvalidConstExpression(
-                        "global type index out of range".to_string(),
-                    )
-                })?;
-                Ok((vec![global.value], global_type.val_type))
-            }
-            OPCODE_REF_NULL => {
-                self.expect_end(data, 2)?;
-                Ok((vec![0], ValueType(data[1])))
-            }
-            OPCODE_REF_FUNC => {
-                let (index, read) =
-                    leb128::load_u32(data.get(1..).unwrap_or_default()).map_err(|err| {
-                        ModuleInstantiationError::InvalidConstExpression(format!(
-                            "read ref.func index: {err}"
-                        ))
-                    })?;
-                self.expect_end(data, 1 + read)?;
-                Ok((vec![u64::from(index)], ValueType::FUNCREF))
-            }
-            _ => Err(ModuleInstantiationError::InvalidConstExpression(format!(
-                "unsupported constant expression opcode: 0x{opcode:x}"
-            ))),
         }
-    }
-
-    fn expect_end(
-        &self,
-        data: &[u8],
-        immediate_end: usize,
-    ) -> Result<(), ModuleInstantiationError> {
-        if data.get(immediate_end) == Some(&OPCODE_END) {
-            Ok(())
-        } else {
-            Err(ModuleInstantiationError::InvalidConstExpression(
-                "constant expression missing end opcode".to_string(),
-            ))
-        }
+        evaluate_runtime_const_expr(
+            expr,
+            |index| {
+                let global = self
+                    .globals
+                    .get(index as usize)
+                    .ok_or_else(|| ConstExprError::new("global index out of range"))?;
+                let global_type = self
+                    .global_types
+                    .get(index as usize)
+                    .ok_or_else(|| ConstExprError::new("global type index out of range"))?;
+                Ok((global_type.val_type, global.value, global.value_hi))
+            },
+            |index| Ok(Some(index)),
+        )
+        .map_err(|err| ModuleInstantiationError::InvalidConstExpression(err.to_string()))
     }
 
     fn set_exit_code(&mut self, exit_code: u32, flag: u64) -> bool {
@@ -444,6 +394,11 @@ impl fmt::Display for ModuleInstance {
 mod tests {
     use super::*;
     use crate::const_expr::ConstExpr;
+    use crate::instruction::{
+        OPCODE_END, OPCODE_F32_CONST, OPCODE_F64_CONST, OPCODE_GLOBAL_GET, OPCODE_I32_ADD,
+        OPCODE_I32_CONST,
+    };
+    use crate::leb128;
     use crate::module::{ElementMode, Export, ExternType, FunctionType, RefType};
 
     #[test]
@@ -556,7 +511,7 @@ mod tests {
     fn validate_data_reports_go_style_out_of_bounds_error() {
         let mut module = ModuleInstance::new(1, "data", Module::default(), Vec::new());
         module.memory_instance = Some(MemoryInstance::default());
-        module.memory_instance.as_mut().unwrap().bytes = vec![0; 5];
+        module.memory_instance.as_mut().unwrap().bytes = vec![0; 5].into();
 
         assert_eq!(
             Err(ModuleInstantiationError::DataOutOfBounds { index: 0 }),
@@ -566,6 +521,89 @@ mod tests {
                 passive: false,
             }])
         );
+    }
+
+    #[test]
+    fn evaluate_const_expr_supports_f32_const() {
+        let module = ModuleInstance::new(1, "const", Module::default(), Vec::new());
+        let expr = ConstExpr::from_opcode(OPCODE_F32_CONST, &1.25_f32.to_bits().to_le_bytes());
+
+        let (values, value_type) = module.evaluate_const_expr(&expr).unwrap();
+
+        assert_eq!(ValueType::F32, value_type);
+        assert_eq!(vec![u64::from(1.25_f32.to_bits())], values);
+    }
+
+    #[test]
+    fn evaluate_const_expr_supports_f64_const() {
+        let module = ModuleInstance::new(1, "const", Module::default(), Vec::new());
+        let expr = ConstExpr::from_opcode(OPCODE_F64_CONST, &(-9.5_f64).to_bits().to_le_bytes());
+
+        let (values, value_type) = module.evaluate_const_expr(&expr).unwrap();
+
+        assert_eq!(ValueType::F64, value_type);
+        assert_eq!(vec![(-9.5_f64).to_bits()], values);
+    }
+
+    #[test]
+    fn evaluate_const_expr_supports_extended_const_sequences() {
+        let mut module = ModuleInstance::new(1, "const", Module::default(), Vec::new());
+        module.global_types.push(GlobalType {
+            val_type: ValueType::I32,
+            mutable: false,
+        });
+        module.globals.push(GlobalInstance::new(
+            GlobalType {
+                val_type: ValueType::I32,
+                mutable: false,
+            },
+            4,
+        ));
+
+        let mut data = Vec::new();
+        data.push(OPCODE_GLOBAL_GET);
+        data.extend_from_slice(&leb128::encode_u32(0));
+        data.push(OPCODE_I32_CONST);
+        data.extend_from_slice(&leb128::encode_i32(3));
+        data.push(OPCODE_I32_ADD);
+        data.push(OPCODE_END);
+        let expr = ConstExpr::new(data);
+
+        let (values, value_type) = module.evaluate_const_expr(&expr).unwrap();
+
+        assert_eq!(ValueType::I32, value_type);
+        assert_eq!(vec![7], values);
+    }
+
+    #[test]
+    fn apply_data_supports_extended_const_offsets() {
+        let mut module = ModuleInstance::new(1, "data", Module::default(), Vec::new());
+        module.define_memory(&Memory {
+            min: 1,
+            cap: 1,
+            max: 1,
+            ..Memory::default()
+        });
+
+        let offset_expression = ConstExpr::new(vec![
+            OPCODE_I32_CONST,
+            0x02,
+            OPCODE_I32_CONST,
+            0x03,
+            OPCODE_I32_ADD,
+            OPCODE_END,
+        ]);
+
+        module
+            .apply_data(&[DataSegment {
+                offset_expression,
+                init: vec![0xaa, 0xbb],
+                passive: false,
+            }])
+            .unwrap();
+
+        let memory = module.memory_instance.as_ref().unwrap();
+        assert_eq!(&[0xaa, 0xbb], &memory.bytes[5..7]);
     }
 
     #[test]

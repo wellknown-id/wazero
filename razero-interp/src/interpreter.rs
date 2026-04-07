@@ -1,13 +1,16 @@
 #![doc = "Interpreter runtime, eval loop, and host-call dispatch."]
 
+use std::any::Any;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{self, Debug, Display, Formatter};
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 
 use crate::operations::{
-    FloatKind, InclusiveRange, Instruction, Label, OperationKind, SignedInt, SignedType,
-    UnsignedType,
+    AtomicArithmeticOp, FloatKind, InclusiveRange, Instruction, Label, OperationKind, SignedInt,
+    SignedType, UnsignedInt, UnsignedType,
 };
 use crate::signature::Signature;
 
@@ -16,6 +19,22 @@ pub const WASM_PAGE_SIZE: usize = 65_536;
 
 pub type RuntimeResult<T> = Result<T, Trap>;
 pub type HostFuncRef = Arc<dyn HostFunction>;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct YieldSuspend;
+
+pub fn is_yield_suspend_payload(payload: &(dyn Any + Send)) -> bool {
+    if payload.is::<YieldSuspend>() {
+        return true;
+    }
+    payload
+        .downcast_ref::<Box<dyn Any + Send>>()
+        .is_some_and(|inner| is_yield_suspend_payload(inner.as_ref()))
+}
+
+thread_local! {
+    static ACTIVE_HOST_CALL_STACKS: RefCell<Vec<Vec<ActiveCallFrame>>> = const { RefCell::new(Vec::new()) };
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Trap {
@@ -80,6 +99,7 @@ pub struct Table {
 pub struct Memory {
     bytes: Vec<u8>,
     pub max_pages: Option<u32>,
+    pub shared: bool,
 }
 
 impl Memory {
@@ -87,11 +107,16 @@ impl Memory {
         Self {
             bytes: vec![0; initial_pages as usize * WASM_PAGE_SIZE],
             max_pages,
+            shared: false,
         }
     }
 
-    pub fn from_bytes(bytes: Vec<u8>, max_pages: Option<u32>) -> Self {
-        Self { bytes, max_pages }
+    pub fn from_bytes(bytes: Vec<u8>, max_pages: Option<u32>, shared: bool) -> Self {
+        Self {
+            bytes,
+            max_pages,
+            shared,
+        }
     }
 
     pub fn bytes(&self) -> &[u8] {
@@ -245,10 +270,48 @@ impl Module {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActiveCallFrame {
+    pub function_index: usize,
+    pub program_counter: usize,
+}
+
+pub fn active_host_call_stack() -> Option<Vec<ActiveCallFrame>> {
+    ACTIVE_HOST_CALL_STACKS.with(|active| active.borrow().last().cloned())
+}
+
+fn with_active_host_call_stack<T>(frames: &[CallFrame], f: impl FnOnce() -> T) -> T {
+    let snapshot = frames
+        .iter()
+        .rev()
+        .map(|frame| ActiveCallFrame {
+            function_index: frame.function_index,
+            program_counter: frame.pc,
+        })
+        .collect();
+    ACTIVE_HOST_CALL_STACKS.with(|active| active.borrow_mut().push(snapshot));
+    let result = f();
+    ACTIVE_HOST_CALL_STACKS.with(|active| {
+        active.borrow_mut().pop();
+    });
+    result
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Interpreter {
     pub module: Module,
     pub call_stack_ceiling: usize,
+}
+
+#[derive(Debug)]
+pub struct SuspendedCall {
+    engine: CallEngine,
+    root_function_index: usize,
+}
+
+pub struct InterpreterSuspend {
+    pub payload: Box<dyn Any + Send>,
+    pub suspended_call: SuspendedCall,
 }
 
 impl Interpreter {
@@ -260,12 +323,7 @@ impl Interpreter {
     }
 
     pub fn call(&mut self, function_index: usize, params: &[u64]) -> RuntimeResult<Vec<u64>> {
-        let function = self
-            .module
-            .functions
-            .get(function_index)
-            .ok_or_else(|| Trap::new(format!("function[{function_index}] is undefined")))?
-            .clone();
+        let function = self.function(function_index)?.clone();
         if params.len() != function.signature.param_slots {
             return Err(Trap::new(format!(
                 "expected {} params, but passed {}",
@@ -278,11 +336,55 @@ impl Interpreter {
 
         let mut engine = CallEngine::default();
         engine.push_values(params);
-        engine.call_function(self, function_index)?;
+        self.execute(function_index, engine)
+    }
 
-        let mut results = vec![0; function.signature.result_slots];
-        engine.pop_values(&mut results);
-        Ok(results)
+    pub fn resume(
+        &mut self,
+        suspended_call: SuspendedCall,
+        host_results: &[u64],
+    ) -> RuntimeResult<Vec<u64>> {
+        self.module.fail_if_closed()?;
+        let mut engine = suspended_call.engine;
+        engine.resume_host_function(self, host_results)?;
+        self.execute(suspended_call.root_function_index, engine)
+    }
+
+    fn execute(
+        &mut self,
+        root_function_index: usize,
+        mut engine: CallEngine,
+    ) -> RuntimeResult<Vec<u64>> {
+        let result_slots = self.function(root_function_index)?.signature.result_slots;
+        let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+            if engine.frames.is_empty() {
+                engine.call_function(self, root_function_index)
+            } else {
+                engine.run_frames(self)
+            }
+        }));
+        match outcome {
+            Ok(Ok(())) => {
+                let mut results = vec![0; result_slots];
+                engine.pop_values(&mut results);
+                Ok(results)
+            }
+            Ok(Err(trap)) => Err(trap),
+            Err(payload) => panic::panic_any(InterpreterSuspend {
+                payload,
+                suspended_call: SuspendedCall {
+                    engine,
+                    root_function_index,
+                },
+            }),
+        }
+    }
+
+    fn function(&self, function_index: usize) -> RuntimeResult<&Function> {
+        self.module
+            .functions
+            .get(function_index)
+            .ok_or_else(|| Trap::new(format!("function[{function_index}] is undefined")))
     }
 }
 
@@ -411,7 +513,9 @@ impl CallEngine {
             .host
             .clone()
             .ok_or_else(|| Trap::new("host function missing implementation"))?;
-        let result = host.call(&mut interpreter.module, &mut self.stack[start..]);
+        let result = with_active_host_call_stack(&self.frames, || {
+            host.call(&mut interpreter.module, &mut self.stack[start..])
+        });
 
         self.pop_frame();
 
@@ -423,11 +527,49 @@ impl CallEngine {
         result
     }
 
+    fn resume_host_function(
+        &mut self,
+        interpreter: &mut Interpreter,
+        host_results: &[u64],
+    ) -> RuntimeResult<()> {
+        let frame = self
+            .frames
+            .last()
+            .cloned()
+            .ok_or_else(|| Trap::new("host function resume is missing a suspended frame"))?;
+        let function = interpreter.function(frame.function_index)?.clone();
+        if function.host.is_none() {
+            return Err(Trap::new(
+                "host function resume expected a suspended host frame",
+            ));
+        }
+        let signature = &function.signature;
+        if host_results.len() != signature.result_slots {
+            return Err(Trap::new(format!(
+                "expected {} host results, received {}",
+                signature.result_slots,
+                host_results.len()
+            )));
+        }
+        let stack_window_len = signature.stack_window_len();
+        if self.stack.len() < stack_window_len {
+            return Err(Trap::new("host function resume stack is corrupted"));
+        }
+        let start = self.stack.len() - stack_window_len;
+        self.stack[start..start + signature.result_slots].copy_from_slice(host_results);
+        self.pop_frame();
+        if signature.param_slots > signature.result_slots {
+            self.stack
+                .truncate(self.stack.len() - (signature.param_slots - signature.result_slots));
+        }
+        Ok(())
+    }
+
     fn call_native_function(
         &mut self,
         interpreter: &mut Interpreter,
         function_index: usize,
-        function: &Function,
+        _function: &Function,
     ) -> RuntimeResult<()> {
         self.push_frame(
             CallFrame {
@@ -438,10 +580,54 @@ impl CallEngine {
             interpreter.call_stack_ceiling,
         )?;
 
-        let body = &function.body;
+        self.run_frames(interpreter)
+    }
+
+    fn drop_for_tail_call(
+        &mut self,
+        frame: &CallFrame,
+        current: &Function,
+        target: &Function,
+    ) -> RuntimeResult<()> {
+        let base = frame
+            .base
+            .checked_sub(current.signature.param_slots)
+            .ok_or_else(|| Trap::new("tail call stack is corrupted"))?;
+        let param_count = target.signature.param_slots;
+        if self.stack.len() < param_count {
+            return Err(Trap::new("tail call stack is corrupted"));
+        }
+        let start = self.stack.len() - param_count;
+        if base != start {
+            self.stack.copy_within(start.., base);
+        }
+        self.stack.truncate(base + param_count);
+        Ok(())
+    }
+
+    fn reset_tail_call_frame(&mut self, function_index: usize) -> RuntimeResult<()> {
+        let frame = self
+            .frames
+            .last_mut()
+            .ok_or_else(|| Trap::new("tail call missing active frame"))?;
+        frame.function_index = function_index;
+        frame.base = self.stack.len();
+        frame.pc = 0;
+        Ok(())
+    }
+
+    fn run_frames(&mut self, interpreter: &mut Interpreter) -> RuntimeResult<()> {
         while let Some(frame) = self.frames.last().cloned() {
-            if frame.function_index != function_index || frame.pc >= body.len() {
-                break;
+            let function = interpreter.function(frame.function_index)?.clone();
+            if function.host.is_some() {
+                return Err(Trap::new(
+                    "suspended host frame must be resumed before continuing",
+                ));
+            }
+            let body = &function.body;
+            if frame.pc >= body.len() {
+                self.pop_frame();
+                continue;
             }
 
             let op = body[frame.pc].clone();
@@ -504,6 +690,60 @@ impl CallEngine {
                         return Err(Trap::new("indirect call type mismatch"));
                     }
                     self.call_function(interpreter, function_index)?;
+                }
+                OperationKind::TailCallReturnCall => {
+                    let frame = self.frames.last().cloned().expect("frame");
+                    let current = interpreter.function(frame.function_index)?.clone();
+                    let function_index = op.u1 as usize;
+                    let target = interpreter.function(function_index)?.clone();
+                    self.drop_for_tail_call(&frame, &current, &target)?;
+                    if target.host.is_some() {
+                        self.call_function(interpreter, function_index)?;
+                        self.pop_frame();
+                    } else {
+                        self.reset_tail_call_frame(function_index)?;
+                    }
+                }
+                OperationKind::TailCallReturnCallIndirect => {
+                    let table_offset = self.pop_value() as usize;
+                    let table = interpreter
+                        .module
+                        .tables
+                        .get(op.u2 as usize)
+                        .ok_or_else(|| Trap::new(format!("table[{}] is undefined", op.u2)))?;
+                    let function_index = table
+                        .elements
+                        .get(table_offset)
+                        .and_then(|index| *index)
+                        .ok_or_else(|| Trap::new("invalid table access"))?;
+                    let expected = interpreter
+                        .module
+                        .types
+                        .get(op.u1 as usize)
+                        .ok_or_else(|| Trap::new(format!("type[{}] is undefined", op.u1)))?;
+                    let actual = &interpreter
+                        .module
+                        .functions
+                        .get(function_index)
+                        .ok_or_else(|| Trap::new("invalid table access"))?
+                        .signature;
+                    if expected != actual {
+                        return Err(Trap::new("indirect call type mismatch"));
+                    }
+                    let frame = self.frames.last().cloned().expect("frame");
+                    let current = interpreter.function(frame.function_index)?.clone();
+                    let target = interpreter.function(function_index)?.clone();
+                    if target.host.is_some() {
+                        self.call_function(interpreter, function_index)?;
+                        if let Some(raw) = op.us.first().copied() {
+                            self.drop_range(raw);
+                        }
+                        self.frames.last_mut().expect("frame").pc =
+                            op.us.get(1).copied().unwrap_or(u64::MAX) as usize;
+                    } else {
+                        self.drop_for_tail_call(&frame, &current, &target)?;
+                        self.reset_tail_call_frame(function_index)?;
+                    }
                 }
                 OperationKind::Drop => {
                     self.drop_range(op.u1);
@@ -872,7 +1112,7 @@ impl CallEngine {
                 | OperationKind::Rotr => {
                     let v2 = self.pop_value();
                     let v1 = self.pop_value();
-                    self.push_value(execute_shift(op.kind, decode_signed_type(op.b1), v1, v2));
+                    self.push_value(execute_shift(op.kind, op.b1, v1, v2));
                     self.frames.last_mut().expect("frame").pc += 1;
                 }
                 OperationKind::Abs
@@ -1056,11 +1296,309 @@ impl CallEngine {
                     memory.bytes[dst..end].fill(value);
                     self.frames.last_mut().expect("frame").pc += 1;
                 }
+                OperationKind::AtomicMemoryWait => {
+                    let _timeout = self.pop_value() as i64;
+                    let expected = self.pop_value();
+                    let offset = self.pop_memory_offset(&op)?;
+                    let memory = interpreter
+                        .module
+                        .memory
+                        .as_ref()
+                        .ok_or_else(|| Trap::new("memory is undefined"))?;
+                    if !memory.shared {
+                        return Err(Trap::new("expected shared memory"));
+                    }
+                    let result = match decode_unsigned_type(op.b1) {
+                        UnsignedType::I32 => {
+                            ensure_atomic_alignment(offset, 4)?;
+                            let actual = memory
+                                .read_u32_le(offset)
+                                .ok_or_else(|| Trap::new("out of bounds memory access"))?;
+                            if actual == expected as u32 {
+                                2
+                            } else {
+                                1
+                            }
+                        }
+                        UnsignedType::I64 => {
+                            ensure_atomic_alignment(offset, 8)?;
+                            let actual = memory
+                                .read_u64_le(offset)
+                                .ok_or_else(|| Trap::new("out of bounds memory access"))?;
+                            if actual == expected {
+                                2
+                            } else {
+                                1
+                            }
+                        }
+                        _ => return Err(Trap::new("unsupported atomic wait type")),
+                    };
+                    self.push_value(result);
+                    self.frames.last_mut().expect("frame").pc += 1;
+                }
+                OperationKind::AtomicMemoryNotify => {
+                    let _count = self.pop_value();
+                    let offset = self.pop_memory_offset(&op)?;
+                    ensure_atomic_alignment(offset, 4)?;
+                    let memory = interpreter
+                        .module
+                        .memory
+                        .as_ref()
+                        .ok_or_else(|| Trap::new("memory is undefined"))?;
+                    if offset >= memory.bytes.len() as u32 {
+                        return Err(Trap::new("out of bounds memory access"));
+                    }
+                    self.push_value(0);
+                    self.frames.last_mut().expect("frame").pc += 1;
+                }
+                OperationKind::AtomicFence => {
+                    self.frames.last_mut().expect("frame").pc += 1;
+                }
+                OperationKind::AtomicLoad => {
+                    let offset = self.pop_memory_offset(&op)?;
+                    let memory = interpreter
+                        .module
+                        .memory
+                        .as_ref()
+                        .ok_or_else(|| Trap::new("memory is undefined"))?;
+                    let value = match decode_unsigned_type(op.b1) {
+                        UnsignedType::I32 => {
+                            ensure_atomic_alignment(offset, 4)?;
+                            u64::from(
+                                memory
+                                    .read_u32_le(offset)
+                                    .ok_or_else(|| Trap::new("out of bounds memory access"))?,
+                            )
+                        }
+                        UnsignedType::I64 => {
+                            ensure_atomic_alignment(offset, 8)?;
+                            memory
+                                .read_u64_le(offset)
+                                .ok_or_else(|| Trap::new("out of bounds memory access"))?
+                        }
+                        _ => return Err(Trap::new("unsupported atomic load type")),
+                    };
+                    self.push_value(value);
+                    self.frames.last_mut().expect("frame").pc += 1;
+                }
+                OperationKind::AtomicLoad8 => {
+                    let offset = self.pop_memory_offset(&op)?;
+                    let value = interpreter
+                        .module
+                        .memory
+                        .as_ref()
+                        .ok_or_else(|| Trap::new("memory is undefined"))?
+                        .read_byte(offset)
+                        .ok_or_else(|| Trap::new("out of bounds memory access"))?;
+                    self.push_value(u64::from(value));
+                    self.frames.last_mut().expect("frame").pc += 1;
+                }
+                OperationKind::AtomicLoad16 => {
+                    let offset = self.pop_memory_offset(&op)?;
+                    ensure_atomic_alignment(offset, 2)?;
+                    let value = interpreter
+                        .module
+                        .memory
+                        .as_ref()
+                        .ok_or_else(|| Trap::new("memory is undefined"))?
+                        .read_u16_le(offset)
+                        .ok_or_else(|| Trap::new("out of bounds memory access"))?;
+                    self.push_value(u64::from(value));
+                    self.frames.last_mut().expect("frame").pc += 1;
+                }
+                OperationKind::AtomicStore => {
+                    let value = self.pop_value();
+                    let offset = self.pop_memory_offset(&op)?;
+                    let memory = interpreter
+                        .module
+                        .memory
+                        .as_mut()
+                        .ok_or_else(|| Trap::new("memory is undefined"))?;
+                    let ok = match decode_unsigned_type(op.b1) {
+                        UnsignedType::I32 => {
+                            ensure_atomic_alignment(offset, 4)?;
+                            memory.write_u32_le(offset, value as u32)
+                        }
+                        UnsignedType::I64 => {
+                            ensure_atomic_alignment(offset, 8)?;
+                            memory.write_u64_le(offset, value)
+                        }
+                        _ => return Err(Trap::new("unsupported atomic store type")),
+                    };
+                    if !ok {
+                        return Err(Trap::new("out of bounds memory access"));
+                    }
+                    self.frames.last_mut().expect("frame").pc += 1;
+                }
+                OperationKind::AtomicStore8 => {
+                    let value = self.pop_value() as u8;
+                    let offset = self.pop_memory_offset(&op)?;
+                    if !interpreter
+                        .module
+                        .memory
+                        .as_mut()
+                        .ok_or_else(|| Trap::new("memory is undefined"))?
+                        .write_byte(offset, value)
+                    {
+                        return Err(Trap::new("out of bounds memory access"));
+                    }
+                    self.frames.last_mut().expect("frame").pc += 1;
+                }
+                OperationKind::AtomicStore16 => {
+                    let value = self.pop_value() as u16;
+                    let offset = self.pop_memory_offset(&op)?;
+                    ensure_atomic_alignment(offset, 2)?;
+                    if !interpreter
+                        .module
+                        .memory
+                        .as_mut()
+                        .ok_or_else(|| Trap::new("memory is undefined"))?
+                        .write_u16_le(offset, value)
+                    {
+                        return Err(Trap::new("out of bounds memory access"));
+                    }
+                    self.frames.last_mut().expect("frame").pc += 1;
+                }
+                OperationKind::AtomicRMW => {
+                    let value = self.pop_value();
+                    let offset = self.pop_memory_offset(&op)?;
+                    let memory = interpreter
+                        .module
+                        .memory
+                        .as_mut()
+                        .ok_or_else(|| Trap::new("memory is undefined"))?;
+                    let result = match decode_unsigned_type(op.b1) {
+                        UnsignedType::I32 => {
+                            ensure_atomic_alignment(offset, 4)?;
+                            let old = memory
+                                .read_u32_le(offset)
+                                .ok_or_else(|| Trap::new("out of bounds memory access"))?;
+                            let new = apply_atomic_rmw_u32(old, value as u32, op.b2);
+                            memory.write_u32_le(offset, new);
+                            u64::from(old)
+                        }
+                        UnsignedType::I64 => {
+                            ensure_atomic_alignment(offset, 8)?;
+                            let old = memory
+                                .read_u64_le(offset)
+                                .ok_or_else(|| Trap::new("out of bounds memory access"))?;
+                            let new = apply_atomic_rmw_u64(old, value, op.b2);
+                            memory.write_u64_le(offset, new);
+                            old
+                        }
+                        _ => return Err(Trap::new("unsupported atomic rmw type")),
+                    };
+                    self.push_value(result);
+                    self.frames.last_mut().expect("frame").pc += 1;
+                }
+                OperationKind::AtomicRMW8 => {
+                    let value = self.pop_value() as u8;
+                    let offset = self.pop_memory_offset(&op)?;
+                    let memory = interpreter
+                        .module
+                        .memory
+                        .as_mut()
+                        .ok_or_else(|| Trap::new("memory is undefined"))?;
+                    let old = memory
+                        .read_byte(offset)
+                        .ok_or_else(|| Trap::new("out of bounds memory access"))?;
+                    let new = apply_atomic_rmw_u8(old, value, op.b2);
+                    memory.write_byte(offset, new);
+                    self.push_value(u64::from(old));
+                    self.frames.last_mut().expect("frame").pc += 1;
+                }
+                OperationKind::AtomicRMW16 => {
+                    let value = self.pop_value() as u16;
+                    let offset = self.pop_memory_offset(&op)?;
+                    ensure_atomic_alignment(offset, 2)?;
+                    let memory = interpreter
+                        .module
+                        .memory
+                        .as_mut()
+                        .ok_or_else(|| Trap::new("memory is undefined"))?;
+                    let old = memory
+                        .read_u16_le(offset)
+                        .ok_or_else(|| Trap::new("out of bounds memory access"))?;
+                    let new = apply_atomic_rmw_u16(old, value, op.b2);
+                    memory.write_u16_le(offset, new);
+                    self.push_value(u64::from(old));
+                    self.frames.last_mut().expect("frame").pc += 1;
+                }
+                OperationKind::AtomicRMWCmpxchg => {
+                    let replacement = self.pop_value();
+                    let expected = self.pop_value();
+                    let offset = self.pop_memory_offset(&op)?;
+                    let memory = interpreter
+                        .module
+                        .memory
+                        .as_mut()
+                        .ok_or_else(|| Trap::new("memory is undefined"))?;
+                    let result = match decode_unsigned_type(op.b1) {
+                        UnsignedType::I32 => {
+                            ensure_atomic_alignment(offset, 4)?;
+                            let old = memory
+                                .read_u32_le(offset)
+                                .ok_or_else(|| Trap::new("out of bounds memory access"))?;
+                            if old == expected as u32 {
+                                memory.write_u32_le(offset, replacement as u32);
+                            }
+                            u64::from(old)
+                        }
+                        UnsignedType::I64 => {
+                            ensure_atomic_alignment(offset, 8)?;
+                            let old = memory
+                                .read_u64_le(offset)
+                                .ok_or_else(|| Trap::new("out of bounds memory access"))?;
+                            if old == expected {
+                                memory.write_u64_le(offset, replacement);
+                            }
+                            old
+                        }
+                        _ => return Err(Trap::new("unsupported atomic cmpxchg type")),
+                    };
+                    self.push_value(result);
+                    self.frames.last_mut().expect("frame").pc += 1;
+                }
+                OperationKind::AtomicRMW8Cmpxchg => {
+                    let replacement = self.pop_value() as u8;
+                    let expected = self.pop_value() as u8;
+                    let offset = self.pop_memory_offset(&op)?;
+                    let memory = interpreter
+                        .module
+                        .memory
+                        .as_mut()
+                        .ok_or_else(|| Trap::new("memory is undefined"))?;
+                    let old = memory
+                        .read_byte(offset)
+                        .ok_or_else(|| Trap::new("out of bounds memory access"))?;
+                    if old == expected {
+                        memory.write_byte(offset, replacement);
+                    }
+                    self.push_value(u64::from(old));
+                    self.frames.last_mut().expect("frame").pc += 1;
+                }
+                OperationKind::AtomicRMW16Cmpxchg => {
+                    let replacement = self.pop_value() as u16;
+                    let expected = self.pop_value() as u16;
+                    let offset = self.pop_memory_offset(&op)?;
+                    ensure_atomic_alignment(offset, 2)?;
+                    let memory = interpreter
+                        .module
+                        .memory
+                        .as_mut()
+                        .ok_or_else(|| Trap::new("memory is undefined"))?;
+                    let old = memory
+                        .read_u16_le(offset)
+                        .ok_or_else(|| Trap::new("out of bounds memory access"))?;
+                    if old == expected {
+                        memory.write_u16_le(offset, replacement);
+                    }
+                    self.push_value(u64::from(old));
+                    self.frames.last_mut().expect("frame").pc += 1;
+                }
                 _ => return Err(Trap::new(format!("operation {} not implemented", op.kind))),
             }
         }
-
-        self.pop_frame();
         Ok(())
     }
 
@@ -1142,6 +1680,13 @@ fn decode_signed_int(raw: u8) -> SignedInt {
     }
 }
 
+fn decode_unsigned_int(raw: u8) -> UnsignedInt {
+    match raw {
+        x if x == UnsignedInt::I32 as u8 => UnsignedInt::I32,
+        _ => UnsignedInt::I64,
+    }
+}
+
 fn decode_signed_type(raw: u8) -> SignedType {
     match raw {
         x if x == SignedType::Int32 as u8 => SignedType::Int32,
@@ -1157,6 +1702,58 @@ fn decode_float_kind(raw: u8) -> FloatKind {
     match raw {
         x if x == FloatKind::F32 as u8 => FloatKind::F32,
         _ => FloatKind::F64,
+    }
+}
+
+fn ensure_atomic_alignment(offset: u32, alignment: u32) -> RuntimeResult<()> {
+    if offset % alignment == 0 {
+        Ok(())
+    } else {
+        Err(Trap::new("unaligned atomic"))
+    }
+}
+
+fn apply_atomic_rmw_u8(old: u8, value: u8, raw_op: u8) -> u8 {
+    match raw_op {
+        x if x == AtomicArithmeticOp::Add as u8 => old.wrapping_add(value),
+        x if x == AtomicArithmeticOp::Sub as u8 => old.wrapping_sub(value),
+        x if x == AtomicArithmeticOp::And as u8 => old & value,
+        x if x == AtomicArithmeticOp::Or as u8 => old | value,
+        x if x == AtomicArithmeticOp::Xor as u8 => old ^ value,
+        _ => value,
+    }
+}
+
+fn apply_atomic_rmw_u16(old: u16, value: u16, raw_op: u8) -> u16 {
+    match raw_op {
+        x if x == AtomicArithmeticOp::Add as u8 => old.wrapping_add(value),
+        x if x == AtomicArithmeticOp::Sub as u8 => old.wrapping_sub(value),
+        x if x == AtomicArithmeticOp::And as u8 => old & value,
+        x if x == AtomicArithmeticOp::Or as u8 => old | value,
+        x if x == AtomicArithmeticOp::Xor as u8 => old ^ value,
+        _ => value,
+    }
+}
+
+fn apply_atomic_rmw_u32(old: u32, value: u32, raw_op: u8) -> u32 {
+    match raw_op {
+        x if x == AtomicArithmeticOp::Add as u8 => old.wrapping_add(value),
+        x if x == AtomicArithmeticOp::Sub as u8 => old.wrapping_sub(value),
+        x if x == AtomicArithmeticOp::And as u8 => old & value,
+        x if x == AtomicArithmeticOp::Or as u8 => old | value,
+        x if x == AtomicArithmeticOp::Xor as u8 => old ^ value,
+        _ => value,
+    }
+}
+
+fn apply_atomic_rmw_u64(old: u64, value: u64, raw_op: u8) -> u64 {
+    match raw_op {
+        x if x == AtomicArithmeticOp::Add as u8 => old.wrapping_add(value),
+        x if x == AtomicArithmeticOp::Sub as u8 => old.wrapping_sub(value),
+        x if x == AtomicArithmeticOp::And as u8 => old & value,
+        x if x == AtomicArithmeticOp::Or as u8 => old | value,
+        x if x == AtomicArithmeticOp::Xor as u8 => old ^ value,
+        _ => value,
     }
 }
 
@@ -1341,42 +1938,51 @@ fn execute_rem(ty: SignedType, v1: u64, v2: u64) -> RuntimeResult<u64> {
     }
 }
 
-fn execute_shift(kind: OperationKind, ty: SignedType, v1: u64, v2: u64) -> u64 {
-    match ty {
-        SignedType::Int32 | SignedType::Uint32 => {
-            let rhs = (v2 as u32) & 31;
-            let lhs = v1 as u32;
-            match kind {
-                OperationKind::Shl => u64::from(lhs.wrapping_shl(rhs)),
-                OperationKind::Shr => {
-                    if matches!(ty, SignedType::Int32) {
-                        u64::from(((lhs as i32) >> rhs) as u32)
-                    } else {
-                        u64::from(lhs >> rhs)
+fn execute_shift(kind: OperationKind, raw_ty: u8, v1: u64, v2: u64) -> u64 {
+    match kind {
+        OperationKind::Shr => match decode_signed_int(raw_ty) {
+            SignedInt::Int32 | SignedInt::Uint32 => {
+                let rhs = (v2 as u32) & 31;
+                let lhs = v1 as u32;
+                if matches!(decode_signed_int(raw_ty), SignedInt::Int32) {
+                    u64::from(((lhs as i32) >> rhs) as u32)
+                } else {
+                    u64::from(lhs >> rhs)
+                }
+            }
+            SignedInt::Int64 | SignedInt::Uint64 => {
+                let rhs = (v2 as u32) & 63;
+                if matches!(decode_signed_int(raw_ty), SignedInt::Int64) {
+                    ((v1 as i64) >> rhs) as u64
+                } else {
+                    v1 >> rhs
+                }
+            }
+        },
+        OperationKind::Shl | OperationKind::Rotl | OperationKind::Rotr => {
+            match decode_unsigned_int(raw_ty) {
+                UnsignedInt::I32 => {
+                    let rhs = (v2 as u32) & 31;
+                    let lhs = v1 as u32;
+                    match kind {
+                        OperationKind::Shl => u64::from(lhs.wrapping_shl(rhs)),
+                        OperationKind::Rotl => u64::from(lhs.rotate_left(rhs)),
+                        OperationKind::Rotr => u64::from(lhs.rotate_right(rhs)),
+                        _ => unreachable!(),
                     }
                 }
-                OperationKind::Rotl => u64::from(lhs.rotate_left(rhs)),
-                OperationKind::Rotr => u64::from(lhs.rotate_right(rhs)),
-                _ => unreachable!(),
-            }
-        }
-        SignedType::Int64 | SignedType::Uint64 => {
-            let rhs = (v2 as u32) & 63;
-            match kind {
-                OperationKind::Shl => v1.wrapping_shl(rhs),
-                OperationKind::Shr => {
-                    if matches!(ty, SignedType::Int64) {
-                        ((v1 as i64) >> rhs) as u64
-                    } else {
-                        v1 >> rhs
+                UnsignedInt::I64 => {
+                    let rhs = (v2 as u32) & 63;
+                    match kind {
+                        OperationKind::Shl => v1.wrapping_shl(rhs),
+                        OperationKind::Rotl => v1.rotate_left(rhs),
+                        OperationKind::Rotr => v1.rotate_right(rhs),
+                        _ => unreachable!(),
                     }
                 }
-                OperationKind::Rotl => v1.rotate_left(rhs),
-                OperationKind::Rotr => v1.rotate_right(rhs),
-                _ => unreachable!(),
             }
         }
-        SignedType::Float32 | SignedType::Float64 => 0,
+        _ => 0,
     }
 }
 
@@ -1634,13 +2240,17 @@ fn wasm_max_f64(lhs: f64, rhs: f64) -> f64 {
 mod tests {
     use super::{
         host_function, CallEngine, CallFrame, Function, GlobalValue, Interpreter, Memory, Module,
-        Table, Trap,
+        Table, Trap, WASM_PAGE_SIZE,
     };
     use crate::compiler::{CompileConfig, Compiler, FunctionType, ValueType};
     use crate::operations::{
-        FloatKind, InclusiveRange, Instruction, Label, LabelKind, MemoryArg, UnsignedType,
+        AtomicArithmeticOp, FloatKind, InclusiveRange, Instruction, Label, LabelKind, MemoryArg,
+        OperationKind, UnsignedType,
     };
     use crate::signature::Signature;
+    use razero_decoder::decoder::decode_module;
+    use razero_features::CoreFeatures;
+    use razero_wasm::module::ExternType;
 
     fn label(kind: LabelKind, frame_id: u32) -> Label {
         Label::new(kind, frame_id)
@@ -1648,6 +2258,85 @@ mod tests {
 
     fn i32_i32() -> FunctionType {
         FunctionType::new(vec![ValueType::I32], vec![ValueType::I32])
+    }
+
+    fn interp_value_type(value_type: razero_wasm::module::ValueType) -> ValueType {
+        match value_type.0 {
+            0x7f => ValueType::I32,
+            0x7e => ValueType::I64,
+            0x7d => ValueType::F32,
+            0x7c => ValueType::F64,
+            0x7b => ValueType::V128,
+            0x70 => ValueType::FuncRef,
+            0x6f => ValueType::ExternRef,
+            other => panic!("unsupported value type 0x{other:x}"),
+        }
+    }
+
+    fn fac_interpreter() -> (Interpreter, usize, usize, usize) {
+        let module = decode_module(include_bytes!("../../testdata/fac.wasm"), CoreFeatures::V2)
+            .expect("fac.wasm should decode");
+        let types = module
+            .type_section
+            .iter()
+            .map(|ty| {
+                FunctionType::new(
+                    ty.params.iter().map(|v| interp_value_type(*v)).collect(),
+                    ty.results.iter().map(|v| interp_value_type(*v)).collect(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut functions = Vec::with_capacity(module.function_section.len());
+        for (local_index, type_index) in module.function_section.iter().copied().enumerate() {
+            let wasm_ty = &module.type_section[type_index as usize];
+            let code = &module.code_section[local_index];
+            let signature = FunctionType::new(
+                wasm_ty
+                    .params
+                    .iter()
+                    .map(|ty| interp_value_type(*ty))
+                    .collect(),
+                wasm_ty
+                    .results
+                    .iter()
+                    .map(|ty| interp_value_type(*ty))
+                    .collect(),
+            );
+            let local_types = code
+                .local_types
+                .iter()
+                .map(|ty| interp_value_type(*ty))
+                .collect::<Vec<_>>();
+            let lowered = Compiler
+                .lower_with_config(CompileConfig {
+                    body: &code.body,
+                    signature: signature.clone(),
+                    local_types: &local_types,
+                    functions: &module.function_section,
+                    types: &types,
+                    ..CompileConfig::new(&[])
+                })
+                .expect("function should lower");
+            functions.push(
+                Function::new_native(Signature::from(&signature), lowered.operations)
+                    .expect("lowered function should resolve labels"),
+            );
+        }
+        let fac_index = module
+            .export_section
+            .iter()
+            .find(|export| export.ty == ExternType::FUNC && export.name == "fac-ssa")
+            .expect("fac-ssa export")
+            .index as usize;
+        (
+            Interpreter::new(Module {
+                functions,
+                ..Module::default()
+            }),
+            0,
+            1,
+            fac_index,
+        )
     }
 
     #[test]
@@ -1859,6 +2548,38 @@ mod tests {
     }
 
     #[test]
+    fn executes_multivalue_loop_with_inner_return() {
+        let ty = FunctionType::new(vec![ValueType::I64, ValueType::I64], vec![ValueType::I64]);
+        let lowered = Compiler
+            .lower_with_config(CompileConfig {
+                body: &[0x03, 0x00, 0x1a, 0x0f, 0x0b, 0x0b],
+                signature: ty.clone(),
+                types: &[ty.clone()],
+                ..CompileConfig::new(&[])
+            })
+            .expect("loop body should lower");
+        let mut interpreter = Interpreter::new(Module {
+            functions: vec![
+                Function::new_native(Signature::from(&ty), lowered.operations).unwrap(),
+            ],
+            ..Module::default()
+        });
+
+        assert_eq!(vec![7], interpreter.call(0, &[7, 99]).unwrap());
+    }
+
+    #[test]
+    fn executes_fac_secbench_workload() {
+        let (mut interpreter, pick0, pick1, fac) = fac_interpreter();
+        assert_eq!(vec![7, 7], interpreter.call(pick0, &[7]).unwrap());
+        assert_eq!(vec![7, 9, 7], interpreter.call(pick1, &[7, 9]).unwrap());
+        assert_eq!(
+            vec![2_432_902_008_176_640_000],
+            interpreter.call(fac, &[20]).unwrap()
+        );
+    }
+
+    #[test]
     fn traps_on_indirect_signature_mismatch() {
         let entry = Function::new_native(
             Signature::new(vec![ValueType::I32], vec![ValueType::I32]),
@@ -1903,6 +2624,69 @@ mod tests {
         });
 
         assert!(interpreter.call(0, &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn executes_tail_call_return_call() {
+        let callee = Function::new_native(
+            Signature::new(vec![ValueType::I32], vec![ValueType::I32]),
+            vec![
+                Instruction::pick(0, false),
+                Instruction::const_i32(1),
+                Instruction::new(OperationKind::Add).with_b1(UnsignedType::I32 as u8),
+                Instruction::br(label(LabelKind::Return, 0)),
+            ],
+        )
+        .unwrap();
+        let caller = Function::new_native(
+            Signature::new(vec![ValueType::I32], vec![ValueType::I32]),
+            vec![Instruction::tail_call_return_call(1)],
+        )
+        .unwrap();
+        let mut interpreter = Interpreter::new(Module {
+            functions: vec![caller, callee],
+            ..Module::default()
+        });
+
+        assert_eq!(vec![42], interpreter.call(0, &[41]).unwrap());
+    }
+
+    #[test]
+    fn executes_atomic_rmw_and_wait_ops() {
+        let function = Function::new_native(
+            Signature::new(vec![], vec![ValueType::I32, ValueType::I32]),
+            vec![
+                Instruction::const_i32(0),
+                Instruction::const_i32(7),
+                Instruction::atomic_store(UnsignedType::I32, MemoryArg::default()),
+                Instruction::const_i32(0),
+                Instruction::const_i32(5),
+                Instruction::atomic_rmw(
+                    UnsignedType::I32,
+                    MemoryArg::default(),
+                    AtomicArithmeticOp::Add,
+                ),
+                Instruction::const_i32(0),
+                Instruction::const_i32(0),
+                Instruction::const_i64(0),
+                Instruction::atomic_memory_wait(UnsignedType::I32, MemoryArg::default()),
+                Instruction::br(label(LabelKind::Return, 0)),
+            ],
+        )
+        .unwrap();
+        let mut interpreter = Interpreter::new(Module {
+            functions: vec![function],
+            memory: Some(Memory {
+                bytes: vec![0; WASM_PAGE_SIZE],
+                max_pages: Some(1),
+                shared: true,
+            }),
+            ..Module::default()
+        });
+
+        assert_eq!(vec![7, 1], interpreter.call(0, &[]).unwrap());
+        let memory = interpreter.module.memory.as_ref().expect("memory");
+        assert_eq!(Some(12), memory.read_u32_le(0));
     }
 
     #[test]

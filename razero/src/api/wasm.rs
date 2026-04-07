@@ -15,11 +15,19 @@ use crate::{
     experimental::{
         close_notifier::CloseNotifier,
         fuel::FuelController,
-        listener::FunctionListener,
+        listener::{new_stack_iterator, FunctionListener, StackFrame},
         memory::LinearMemory,
-        r#yield::{Resumer, YieldError, YieldSuspend, Yielder},
+        r#yield::{Resumer, YieldError, Yielder},
         snapshotter::{Snapshot, Snapshotter},
     },
+};
+use razero_interp::{
+    engine::{take_suspended_invocation, InterpEngine, SuspendedInvocation},
+    interpreter::{is_yield_suspend_payload, YieldSuspend},
+};
+use razero_wasm::{
+    module::FunctionType as WasmFunctionType, module_instance_lookup::LookupError,
+    store::Store as WasmStore, store_module_list::ModuleInstanceId,
 };
 
 pub type HostCallback =
@@ -48,6 +56,34 @@ pub(crate) fn active_invocation() -> Option<(Context, Module)> {
     ACTIVE_INVOCATIONS.with(|active| active.borrow().last().cloned())
 }
 
+fn listener_stack_for_call(
+    ctx: &Context,
+    definition: &FunctionDefinition,
+    params: &[u64],
+    source_offset: u64,
+) -> Vec<StackFrame> {
+    let mut stack = ctx
+        .invocation
+        .as_ref()
+        .map(|invocation| invocation.listener_stack.clone())
+        .unwrap_or_default();
+    stack.reserve(
+        1 + ctx
+            .invocation
+            .as_ref()
+            .map(|invocation| invocation.listener_stack.len())
+            .unwrap_or_default(),
+    );
+    stack.push(StackFrame::new(
+        definition.clone(),
+        params.to_vec(),
+        Vec::new(),
+        0,
+        source_offset,
+    ));
+    stack
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum ExternType {
     Func,
@@ -65,6 +101,10 @@ impl ExternType {
             Self::Global => "global",
         }
     }
+}
+
+pub fn extern_type_name(extern_type: ExternType) -> &'static str {
+    extern_type.name()
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -91,6 +131,54 @@ impl ValueType {
             Self::FuncRef => "funcref",
         }
     }
+}
+
+pub fn value_type_name(value_type: ValueType) -> &'static str {
+    value_type.name()
+}
+
+pub fn encode_externref(input: usize) -> u64 {
+    input as u64
+}
+
+pub fn decode_externref(input: u64) -> usize {
+    input as usize
+}
+
+pub fn encode_i32(input: i32) -> u64 {
+    input as u32 as u64
+}
+
+pub fn decode_i32(input: u64) -> i32 {
+    input as u32 as i32
+}
+
+pub fn encode_u32(input: u32) -> u64 {
+    input as u64
+}
+
+pub fn decode_u32(input: u64) -> u32 {
+    input as u32
+}
+
+pub fn encode_i64(input: i64) -> u64 {
+    input as u64
+}
+
+pub fn encode_f32(input: f32) -> u64 {
+    input.to_bits() as u64
+}
+
+pub fn decode_f32(input: u64) -> f32 {
+    f32::from_bits(input as u32)
+}
+
+pub fn encode_f64(input: f64) -> u64 {
+    input.to_bits()
+}
+
+pub fn decode_f64(input: u64) -> f64 {
+    f64::from_bits(input)
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -345,6 +433,7 @@ impl Global {
 trait MemoryAccess: Send + Sync {
     fn size(&self) -> u32;
     fn read(&self, offset: usize, len: usize) -> Option<Vec<u8>>;
+    fn write(&self, offset: usize, values: &[u8]) -> bool;
     fn write_u32_le(&self, offset: u32, value: u32) -> bool;
     fn grow(&self, delta_pages: u32, maximum_pages: Option<u32>) -> Option<u32>;
 }
@@ -362,6 +451,19 @@ impl MemoryAccess for OwnedMemoryAccess {
         let memory = self.memory.lock().expect("memory poisoned");
         let end = offset.checked_add(len)?;
         memory.bytes().get(offset..end).map(ToOwned::to_owned)
+    }
+
+    fn write(&self, offset: usize, values: &[u8]) -> bool {
+        let mut memory = self.memory.lock().expect("memory poisoned");
+        let end = match offset.checked_add(values.len()) {
+            Some(end) => end,
+            None => return false,
+        };
+        let Some(slice) = memory.bytes_mut().get_mut(offset..end) else {
+            return false;
+        };
+        slice.copy_from_slice(values);
+        true
     }
 
     fn write_u32_le(&self, offset: u32, value: u32) -> bool {
@@ -393,6 +495,7 @@ impl MemoryAccess for OwnedMemoryAccess {
 struct DynamicMemoryAccess {
     size: Arc<dyn Fn() -> u32 + Send + Sync>,
     read: Arc<dyn Fn(usize, usize) -> Option<Vec<u8>> + Send + Sync>,
+    write: Arc<dyn Fn(usize, &[u8]) -> bool + Send + Sync>,
     write_u32_le: Arc<dyn Fn(u32, u32) -> bool + Send + Sync>,
     grow: Arc<dyn Fn(u32, Option<u32>) -> Option<u32> + Send + Sync>,
 }
@@ -404,6 +507,10 @@ impl MemoryAccess for DynamicMemoryAccess {
 
     fn read(&self, offset: usize, len: usize) -> Option<Vec<u8>> {
         (self.read)(offset, len)
+    }
+
+    fn write(&self, offset: usize, values: &[u8]) -> bool {
+        (self.write)(offset, values)
     }
 
     fn write_u32_le(&self, offset: u32, value: u32) -> bool {
@@ -435,6 +542,7 @@ impl Memory {
         definition: MemoryDefinition,
         size: impl Fn() -> u32 + Send + Sync + 'static,
         read: impl Fn(usize, usize) -> Option<Vec<u8>> + Send + Sync + 'static,
+        write: impl Fn(usize, &[u8]) -> bool + Send + Sync + 'static,
         write_u32_le: impl Fn(u32, u32) -> bool + Send + Sync + 'static,
         grow: impl Fn(u32, Option<u32>) -> Option<u32> + Send + Sync + 'static,
     ) -> Self {
@@ -443,6 +551,7 @@ impl Memory {
             access: Arc::new(DynamicMemoryAccess {
                 size: Arc::new(size),
                 read: Arc::new(read),
+                write: Arc::new(write),
                 write_u32_le: Arc::new(write_u32_le),
                 grow: Arc::new(grow),
             }),
@@ -463,6 +572,10 @@ impl Memory {
 
     pub fn read(&self, offset: usize, len: usize) -> Option<Vec<u8>> {
         self.access.read(offset, len)
+    }
+
+    pub fn write(&self, offset: usize, values: &[u8]) -> bool {
+        self.access.write(offset, values)
     }
 
     pub fn read_u32_le(&self, offset: u32) -> Option<u32> {
@@ -490,6 +603,7 @@ struct FunctionInner {
     definition: FunctionDefinition,
     callback: Option<HostCallback>,
     default_fuel: i64,
+    source_offset: u64,
 }
 
 impl Function {
@@ -498,6 +612,7 @@ impl Function {
         definition: FunctionDefinition,
         callback: Option<HostCallback>,
         default_fuel: i64,
+        source_offset: u64,
     ) -> Self {
         Self {
             inner: Arc::new(FunctionInner {
@@ -505,6 +620,7 @@ impl Function {
                 definition,
                 callback,
                 default_fuel,
+                source_offset,
             }),
         }
     }
@@ -515,6 +631,14 @@ impl Function {
 
     pub fn definition(&self) -> &FunctionDefinition {
         &self.inner.definition
+    }
+
+    pub fn source_offset_for_pc(&self, pc: u64) -> u64 {
+        if self.inner.source_offset == 0 {
+            0
+        } else {
+            self.inner.source_offset.saturating_add(pc)
+        }
     }
 
     pub fn call(&self, params: &[u64]) -> Result<Vec<u64>> {
@@ -555,28 +679,49 @@ impl Function {
         }
 
         let restored_results = Arc::new(Mutex::new(None));
+        let snapshot_active = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let snapshotter = ctx.snapshotter_enabled.then(|| {
-            Arc::new(ActiveSnapshotter::new(restored_results.clone())) as Arc<dyn Snapshotter>
+            Arc::new(ActiveSnapshotter::new(
+                restored_results.clone(),
+                snapshot_active.clone(),
+            )) as Arc<dyn Snapshotter>
         });
 
+        let listener_stack = listener_stack_for_call(
+            ctx,
+            &self.inner.definition,
+            params,
+            self.source_offset_for_pc(0),
+        );
         let resumer = Arc::new(PendingResumer::new(
             module.clone(),
             self.inner.definition.clone(),
             listener.clone(),
+            listener_stack.clone(),
             ctx.fuel_controller.clone(),
             fuel_remaining.clone(),
         ));
         let yielder = ctx
             .yielder_enabled
-            .then(|| Arc::new(ActiveYielder::new(resumer.clone())) as Arc<dyn Yielder>);
+            .then(|| Arc::new(ActiveYielder::new()) as Arc<dyn Yielder>);
         let invocation_ctx = ctx.with_invocation(InvocationContext {
             fuel_remaining: fuel_remaining.clone(),
             snapshotter,
             yielder,
+            function_listener: listener.clone(),
+            function_definition: Some(self.inner.definition.clone()),
+            listener_stack: listener_stack.clone(),
         });
 
         if let Some(listener) = &listener {
-            listener.before(&invocation_ctx, &module, &self.inner.definition, params);
+            let mut stack_iterator = new_stack_iterator(&listener_stack);
+            listener.before(
+                &invocation_ctx,
+                &module,
+                &self.inner.definition,
+                params,
+                &mut stack_iterator,
+            );
         }
 
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
@@ -605,8 +750,10 @@ impl Function {
                 if fuel_remaining.as_ref().is_some_and(|remaining| {
                     remaining.load(std::sync::atomic::Ordering::SeqCst) < 0
                 }) {
+                    snapshot_active.store(false, std::sync::atomic::Ordering::SeqCst);
                     return Err(RuntimeError::new("fuel exhausted"));
                 }
+                snapshot_active.store(false, std::sync::atomic::Ordering::SeqCst);
                 Ok(results)
             }
             Ok(Err(error)) => {
@@ -614,13 +761,21 @@ impl Function {
                     listener.abort(&invocation_ctx, &module, &self.inner.definition, &error);
                 }
                 consume_fuel(&ctx.fuel_controller, &fuel_remaining);
+                snapshot_active.store(false, std::sync::atomic::Ordering::SeqCst);
                 Err(error)
             }
             Err(payload) => {
-                if let Some(suspend) = payload.downcast_ref::<YieldSuspend>() {
+                if is_yield_suspend_payload(payload.as_ref()) {
                     consume_fuel(&ctx.fuel_controller, &fuel_remaining);
-                    return Err(RuntimeError::from(YieldError::new(suspend.resumer.clone())));
+                    resumer.note_fuel_checkpoint();
+                    if let Some(suspended) = take_suspended_invocation() {
+                        resumer.install_suspended_invocation(suspended);
+                    }
+                    snapshot_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                    let resumer: Arc<dyn Resumer> = resumer;
+                    return Err(RuntimeError::from(YieldError::new(Some(resumer))));
                 }
+                snapshot_active.store(false, std::sync::atomic::Ordering::SeqCst);
                 panic::resume_unwind(payload);
             }
         }
@@ -637,11 +792,16 @@ pub(crate) struct ModuleInner {
     functions: BTreeMap<String, Function>,
     memory: Option<Memory>,
     globals: BTreeMap<String, Global>,
+    all_globals: Vec<Global>,
     close_notifier: Option<Arc<dyn CloseNotifier>>,
     close_hook: Option<Arc<dyn Fn(u32) + Send + Sync>>,
     closed: AtomicBool,
     exit_code: AtomicU32,
+    default_fuel: i64,
     runtime_registry: Option<Weak<Mutex<BTreeMap<String, Module>>>>,
+    runtime_store: Option<Weak<Mutex<WasmStore<InterpEngine>>>>,
+    store_module_id: Option<ModuleInstanceId>,
+    import_aliases: Mutex<Vec<String>>,
 }
 
 pub type Instance = Module;
@@ -654,9 +814,13 @@ impl Module {
         default_fuel: i64,
         memory: Option<Memory>,
         globals: BTreeMap<String, Global>,
+        all_globals: Vec<Global>,
         close_notifier: Option<Arc<dyn CloseNotifier>>,
         close_hook: Option<Arc<dyn Fn(u32) + Send + Sync>>,
         runtime_registry: Option<Weak<Mutex<BTreeMap<String, Module>>>>,
+        runtime_store: Option<Weak<Mutex<WasmStore<InterpEngine>>>>,
+        function_source_offsets: BTreeMap<String, u64>,
+        store_module_id: Option<ModuleInstanceId>,
     ) -> Self {
         Self {
             inner: Arc::new_cyclic(|weak| {
@@ -670,6 +834,7 @@ impl Module {
                                 definition.clone(),
                                 host_callbacks.get(export_name).cloned(),
                                 default_fuel,
+                                *function_source_offsets.get(export_name).unwrap_or(&0),
                             ),
                         )
                     })
@@ -679,11 +844,16 @@ impl Module {
                     functions,
                     memory,
                     globals,
+                    all_globals,
                     close_notifier,
                     close_hook,
                     closed: AtomicBool::new(false),
                     exit_code: AtomicU32::new(0),
+                    default_fuel,
                     runtime_registry,
+                    runtime_store,
+                    store_module_id,
+                    import_aliases: Mutex::new(Vec::new()),
                 }
             }),
         }
@@ -695,6 +865,14 @@ impl Module {
 
     pub fn memory(&self) -> Option<Memory> {
         self.inner.memory.clone()
+    }
+
+    pub(crate) fn store_module_id(&self) -> Option<ModuleInstanceId> {
+        self.inner.store_module_id
+    }
+
+    pub(crate) fn runtime_store(&self) -> Option<Arc<Mutex<WasmStore<InterpEngine>>>> {
+        self.inner.runtime_store.as_ref().and_then(Weak::upgrade)
     }
 
     pub fn exported_function(&self, name: &str) -> Option<Function> {
@@ -739,11 +917,138 @@ impl Module {
         self.inner.globals.get(name).cloned()
     }
 
+    pub fn num_global(&self) -> usize {
+        self.inner.all_globals.len()
+    }
+
+    pub fn global(&self, index: usize) -> Global {
+        self.inner.all_globals[index].clone()
+    }
+
+    pub(crate) fn default_fuel(&self) -> i64 {
+        self.inner.default_fuel
+    }
+
+    pub(crate) fn register_import_alias(&self, alias: &str) -> Result<()> {
+        if alias.is_empty() {
+            return Ok(());
+        }
+        let Some(module_id) = self.inner.store_module_id else {
+            return Err(RuntimeError::new(
+                "import resolver requires an instantiated module handle",
+            ));
+        };
+        let Some(store) = self.inner.runtime_store.as_ref().and_then(Weak::upgrade) else {
+            return Err(RuntimeError::new(
+                "import resolver requires an active runtime store",
+            ));
+        };
+
+        let mut store = store.lock().expect("runtime store poisoned");
+        if let Some(existing) = store.name_to_module.get(alias) {
+            if *existing == module_id {
+                return Ok(());
+            }
+        }
+
+        store.name_to_module.insert(alias.to_string(), module_id);
+        let mut aliases = self
+            .inner
+            .import_aliases
+            .lock()
+            .expect("module alias list poisoned");
+        if !aliases.iter().any(|existing| existing == alias) {
+            aliases.push(alias.to_string());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn lookup_table_function(
+        &self,
+        table_index: u32,
+        table_offset: u32,
+        expected_param_types: &[ValueType],
+        expected_result_types: &[ValueType],
+    ) -> std::result::Result<Function, LookupError> {
+        let runtime_store = self
+            .inner
+            .runtime_store
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .ok_or(LookupError::TableIndexOutOfBounds(table_index))?;
+        let module_id = self
+            .inner
+            .store_module_id
+            .ok_or(LookupError::TableIndexOutOfBounds(table_index))?;
+
+        let mut store = runtime_store.lock().expect("runtime store poisoned");
+        let mut expected = WasmFunctionType::default();
+        expected.params = expected_param_types
+            .iter()
+            .copied()
+            .map(crate::runtime::to_wasm_value_type)
+            .collect();
+        expected.results = expected_result_types
+            .iter()
+            .copied()
+            .map(crate::runtime::to_wasm_value_type)
+            .collect();
+        expected.cache_num_in_u64();
+        let type_id =
+            store
+                .get_function_type_id(&mut expected)
+                .map_err(|_| LookupError::TypeMismatch {
+                    expected: u32::MAX,
+                    actual: u32::MAX,
+                })?;
+
+        let instance = store
+            .instance(module_id)
+            .cloned()
+            .ok_or(LookupError::TableIndexOutOfBounds(table_index))?;
+        let function_index = instance
+            .lookup_function(table_index, type_id, table_offset)?
+            .function_index;
+        let mut source = instance.source.clone();
+        let definition =
+            crate::runtime::convert_function_definition(source.function_definition(function_index));
+        let callback = crate::runtime::guest_callback_for_function_index(
+            runtime_store.clone(),
+            module_id,
+            function_index,
+        );
+
+        Ok(Function::new(
+            Arc::downgrade(&self.inner),
+            definition,
+            Some(callback),
+            self.default_fuel(),
+            crate::runtime::function_source_offset(&instance.source, function_index),
+        ))
+    }
+
     pub fn close_with_exit_code(&self, ctx: &Context, exit_code: u32) -> Result<()> {
         if self.inner.closed.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
         self.inner.exit_code.store(exit_code, Ordering::SeqCst);
+        if let (Some(module_id), Some(store)) = (
+            self.inner.store_module_id,
+            self.inner.runtime_store.as_ref().and_then(Weak::upgrade),
+        ) {
+            let aliases = self
+                .inner
+                .import_aliases
+                .lock()
+                .expect("module alias list poisoned")
+                .clone();
+            let mut store = store.lock().expect("runtime store poisoned");
+            for alias in aliases {
+                if store.name_to_module.get(&alias).copied() == Some(module_id) {
+                    store.name_to_module.remove(&alias);
+                }
+            }
+        }
         if let Some(notifier) = &self.inner.close_notifier {
             notifier.close_notify(ctx, exit_code);
         }
@@ -782,35 +1087,38 @@ impl Display for Module {
 
 struct ActiveSnapshotter {
     restored_results: Arc<Mutex<Option<Vec<u64>>>>,
+    active: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ActiveSnapshotter {
-    fn new(restored_results: Arc<Mutex<Option<Vec<u64>>>>) -> Self {
-        Self { restored_results }
+    fn new(
+        restored_results: Arc<Mutex<Option<Vec<u64>>>>,
+        active: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        Self {
+            restored_results,
+            active,
+        }
     }
 }
 
 impl Snapshotter for ActiveSnapshotter {
     fn snapshot(&self) -> Snapshot {
-        Snapshot::new(self.restored_results.clone())
+        Snapshot::new(self.restored_results.clone(), self.active.clone())
     }
 }
 
-struct ActiveYielder {
-    resumer: Arc<dyn Resumer>,
-}
+struct ActiveYielder;
 
 impl ActiveYielder {
-    fn new(resumer: Arc<dyn Resumer>) -> Self {
-        Self { resumer }
+    fn new() -> Self {
+        Self
     }
 }
 
 impl Yielder for ActiveYielder {
     fn r#yield(&self) {
-        panic::panic_any(YieldSuspend {
-            resumer: self.resumer.clone(),
-        });
+        panic::panic_any(YieldSuspend);
     }
 }
 
@@ -818,9 +1126,11 @@ struct PendingResumer {
     module: Module,
     definition: FunctionDefinition,
     listener: Option<Arc<dyn FunctionListener>>,
+    listener_stack: Vec<StackFrame>,
     fuel_controller: Option<Arc<dyn FuelController>>,
     fuel_remaining: Option<Arc<std::sync::atomic::AtomicI64>>,
-    completed: AtomicBool,
+    reported_remaining: std::sync::atomic::AtomicI64,
+    state: Mutex<PendingResumerState>,
 }
 
 impl PendingResumer {
@@ -828,42 +1138,186 @@ impl PendingResumer {
         module: Module,
         definition: FunctionDefinition,
         listener: Option<Arc<dyn FunctionListener>>,
+        listener_stack: Vec<StackFrame>,
         fuel_controller: Option<Arc<dyn FuelController>>,
         fuel_remaining: Option<Arc<std::sync::atomic::AtomicI64>>,
     ) -> Self {
+        let reported_remaining = fuel_remaining
+            .as_ref()
+            .map(|remaining| remaining.load(std::sync::atomic::Ordering::SeqCst))
+            .unwrap_or_default();
         Self {
             module,
             definition,
             listener,
+            listener_stack,
             fuel_controller,
             fuel_remaining,
-            completed: AtomicBool::new(false),
+            reported_remaining: std::sync::atomic::AtomicI64::new(reported_remaining),
+            state: Mutex::new(PendingResumerState::Pending {
+                suspended: None,
+                cancelled: false,
+            }),
+        }
+    }
+
+    fn install_suspended_invocation(&self, suspended: Arc<dyn SuspendedInvocation>) {
+        let mut state = self.state.lock().expect("resumer state poisoned");
+        if let PendingResumerState::Pending {
+            suspended: slot, ..
+        } = &mut *state
+        {
+            *slot = Some(suspended);
+        }
+    }
+
+    fn note_fuel_checkpoint(&self) {
+        if let Some(remaining) = &self.fuel_remaining {
+            self.reported_remaining.store(
+                remaining.load(std::sync::atomic::Ordering::SeqCst),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        }
+    }
+
+    fn consume_incremental_fuel(&self) {
+        if let (Some(controller), Some(remaining)) = (&self.fuel_controller, &self.fuel_remaining) {
+            let current = remaining.load(std::sync::atomic::Ordering::SeqCst);
+            let previous = self
+                .reported_remaining
+                .swap(current, std::sync::atomic::Ordering::SeqCst);
+            controller.consumed((previous - current).max(0));
         }
     }
 }
 
 impl Resumer for PendingResumer {
     fn resume(&self, ctx: &Context, host_results: &[u64]) -> Result<Vec<u64>> {
-        if self.completed.swap(true, Ordering::SeqCst) {
-            return Err(RuntimeError::new("resumer already completed"));
+        let suspended = {
+            let mut state = self.state.lock().expect("resumer state poisoned");
+            match std::mem::replace(&mut *state, PendingResumerState::Completed) {
+                PendingResumerState::Pending {
+                    suspended,
+                    cancelled: false,
+                } => suspended,
+                PendingResumerState::Pending {
+                    cancelled: true, ..
+                } => {
+                    return Err(RuntimeError::new(
+                        "cannot resume: resumer has been cancelled",
+                    ));
+                }
+                PendingResumerState::Completed => {
+                    return Err(RuntimeError::new("resumer already completed"));
+                }
+            }
+        };
+
+        if let Some(suspended) = suspended {
+            let yielder = ctx
+                .yielder_enabled
+                .then(|| Arc::new(ActiveYielder::new()) as Arc<dyn Yielder>);
+            let invocation_ctx = ctx.with_invocation(InvocationContext {
+                fuel_remaining: self.fuel_remaining.clone(),
+                snapshotter: None,
+                yielder,
+                function_listener: self.listener.clone(),
+                function_definition: Some(self.definition.clone()),
+                listener_stack: self.listener_stack.clone(),
+            });
+            let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+                with_active_invocation(&invocation_ctx, &self.module, || {
+                    suspended.resume(host_results)
+                })
+            }));
+            match outcome {
+                Ok(Ok(results)) => {
+                    if let Some(listener) = &self.listener {
+                        listener.after(&invocation_ctx, &self.module, &self.definition, &results);
+                    }
+                    self.consume_incremental_fuel();
+                    Ok(results)
+                }
+                Ok(Err(error)) => {
+                    let error = RuntimeError::new(error.to_string());
+                    if let Some(listener) = &self.listener {
+                        listener.abort(&invocation_ctx, &self.module, &self.definition, &error);
+                    }
+                    self.consume_incremental_fuel();
+                    Err(error)
+                }
+                Err(payload) => {
+                    if is_yield_suspend_payload(payload.as_ref()) {
+                        self.consume_incremental_fuel();
+                        let next = Arc::new(PendingResumer::new(
+                            self.module.clone(),
+                            self.definition.clone(),
+                            self.listener.clone(),
+                            self.listener_stack.clone(),
+                            self.fuel_controller.clone(),
+                            self.fuel_remaining.clone(),
+                        ));
+                        next.note_fuel_checkpoint();
+                        if let Some(suspended) = take_suspended_invocation() {
+                            next.install_suspended_invocation(suspended);
+                        }
+                        let next: Arc<dyn Resumer> = next;
+                        return Err(RuntimeError::from(YieldError::new(Some(next))));
+                    }
+                    panic::resume_unwind(payload);
+                }
+            }
+        } else {
+            if let Some(listener) = &self.listener {
+                listener.after(ctx, &self.module, &self.definition, host_results);
+            }
+            self.consume_incremental_fuel();
+            Ok(host_results.to_vec())
         }
-        if let Some(listener) = &self.listener {
-            listener.after(ctx, &self.module, &self.definition, host_results);
-        }
-        if let (Some(controller), Some(remaining)) = (&self.fuel_controller, &self.fuel_remaining) {
-            controller.consumed(remaining.load(std::sync::atomic::Ordering::SeqCst).max(0));
-        }
-        Ok(host_results.to_vec())
     }
 
     fn cancel(&self) {
-        self.completed.store(true, Ordering::SeqCst);
+        let suspended = {
+            let mut state = self.state.lock().expect("resumer state poisoned");
+            match std::mem::replace(
+                &mut *state,
+                PendingResumerState::Pending {
+                    suspended: None,
+                    cancelled: true,
+                },
+            ) {
+                PendingResumerState::Pending {
+                    suspended,
+                    cancelled: false,
+                } => suspended,
+                other => {
+                    *state = other;
+                    return;
+                }
+            }
+        };
+        if let Some(suspended) = suspended {
+            suspended.cancel();
+        }
     }
+}
+
+enum PendingResumerState {
+    Pending {
+        suspended: Option<Arc<dyn SuspendedInvocation>>,
+        cancelled: bool,
+    },
+    Completed,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{FunctionDefinition, ValueType};
+    use super::{
+        decode_externref, decode_f32, decode_f64, decode_i32, decode_u32, encode_externref,
+        encode_f32, encode_f64, encode_i32, encode_i64, encode_u32, extern_type_name,
+        value_type_name, ExternType, FunctionDefinition, ValueType,
+    };
+    use std::{f32, f64};
 
     #[test]
     fn function_definition_tracks_signature() {
@@ -873,5 +1327,133 @@ mod tests {
         assert_eq!("sum", definition.name());
         assert_eq!(2, definition.param_types().len());
         assert_eq!(1, definition.result_types().len());
+    }
+
+    #[test]
+    fn extern_type_names_match_wasm_text_format() {
+        assert_eq!("func", extern_type_name(ExternType::Func));
+        assert_eq!("table", extern_type_name(ExternType::Table));
+        assert_eq!("memory", extern_type_name(ExternType::Memory));
+        assert_eq!("global", extern_type_name(ExternType::Global));
+    }
+
+    #[test]
+    fn value_type_names_match_wasm_text_format() {
+        assert_eq!("i32", value_type_name(ValueType::I32));
+        assert_eq!("i64", value_type_name(ValueType::I64));
+        assert_eq!("f32", value_type_name(ValueType::F32));
+        assert_eq!("f64", value_type_name(ValueType::F64));
+        assert_eq!("externref", value_type_name(ValueType::ExternRef));
+        assert_eq!("funcref", value_type_name(ValueType::FuncRef));
+    }
+
+    #[test]
+    fn externref_round_trips() {
+        for value in [0usize, 0x1234_5678usize] {
+            assert_eq!(value, decode_externref(encode_externref(value)));
+        }
+    }
+
+    #[test]
+    fn f32_round_trips_and_keeps_upper_bits_clear() {
+        for value in [
+            0.0f32,
+            100.0,
+            -100.0,
+            100.01234,
+            f32::MAX,
+            f32::MIN_POSITIVE,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ] {
+            let encoded = encode_f32(value);
+            assert_eq!(0, encoded >> 32);
+            let decoded = decode_f32(encoded);
+            if value.is_nan() {
+                assert!(decoded.is_nan());
+            } else {
+                assert_eq!(value, decoded);
+            }
+        }
+    }
+
+    #[test]
+    fn f64_round_trips() {
+        for value in [
+            0.0f64,
+            100.0,
+            -100.0,
+            100.01234124,
+            f64::MAX,
+            f64::MIN_POSITIVE,
+            (1u64 << 36) as f64,
+            (1u64 << 37) as f64,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+        ] {
+            let decoded = decode_f64(encode_f64(value));
+            if value.is_nan() {
+                assert!(decoded.is_nan());
+            } else {
+                assert_eq!(value, decoded);
+            }
+        }
+    }
+
+    #[test]
+    fn i32_encoding_matches_low_word_go_semantics() {
+        for value in [0i32, 100, -100, 1, -1, i32::MAX, i32::MIN] {
+            let encoded = encode_i32(value);
+            assert_eq!(0, encoded >> 32);
+            assert_eq!(value, decode_i32(encoded));
+        }
+    }
+
+    #[test]
+    fn decode_i32_ignores_high_bits() {
+        let cases = [
+            (0u64, 0i32),
+            (1u64 << 60, 0i32),
+            (1u64 << 30, 1i32 << 30),
+            ((1u64 << 30) | (1u64 << 60), 1i32 << 30),
+            ((i32::MIN as u32 as u64) | (1u64 << 59), i32::MIN),
+            ((i32::MAX as u32 as u64) | (1u64 << 50), i32::MAX),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(expected, decode_i32(input));
+        }
+    }
+
+    #[test]
+    fn u32_encoding_matches_low_word_go_semantics() {
+        for value in [0u32, 100, 1, 1 << 31, i32::MAX as u32, u32::MAX] {
+            let encoded = encode_u32(value);
+            assert_eq!(0, encoded >> 32);
+            assert_eq!(value, decode_u32(encoded));
+        }
+    }
+
+    #[test]
+    fn decode_u32_ignores_high_bits() {
+        let cases = [
+            (0u64, 0u32),
+            (1u64 << 60, 0u32),
+            (1u64 << 30, 1u32 << 30),
+            ((1u64 << 30) | (1u64 << 60), 1u32 << 30),
+            ((i32::MIN as u32 as u64) | (1u64 << 59), i32::MIN as u32),
+            ((i32::MAX as u32 as u64) | (1u64 << 50), i32::MAX as u32),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(expected, decode_u32(input));
+        }
+    }
+
+    #[test]
+    fn i64_encoding_is_bit_preserving() {
+        for value in [0i64, 100, -100, 1, -1, i64::MAX, i64::MIN] {
+            assert_eq!(value, encode_i64(value) as i64);
+        }
     }
 }

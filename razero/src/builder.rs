@@ -282,3 +282,68 @@ impl HostFunctionBuilder {
         self.builder
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::HostModuleBuilder;
+    use crate::{api::wasm::ValueType, ctx_keys::Context};
+
+    #[test]
+    fn compile_preserves_function_metadata() {
+        let compiled = HostModuleBuilder::new("host")
+            .new_function_builder()
+            .with_func(
+                |_ctx, _module, params| Ok(vec![params[0]]),
+                &[ValueType::I32],
+                &[ValueType::I32],
+            )
+            .with_name("get")
+            .with_parameter_names(&["x"])
+            .with_result_names(&["y"])
+            .export("run")
+            .compile(&Context::default())
+            .unwrap();
+
+        let definition = compiled
+            .exported_functions()
+            .get("run")
+            .expect("run export should be compiled");
+        assert_eq!(Some("host"), definition.module_name());
+        assert_eq!("get", definition.name());
+        assert_eq!(&[ValueType::I32], definition.param_types());
+        assert_eq!(&[ValueType::I32], definition.result_types());
+        assert_eq!(&["run".to_string()], definition.export_names());
+        assert_eq!(&["x".to_string()], definition.param_names());
+        assert_eq!(&["y".to_string()], definition.result_names());
+    }
+
+    #[test]
+    fn reexport_overwrites_existing_function_definition() {
+        let compiled = HostModuleBuilder::new("host")
+            .new_function_builder()
+            .with_func(
+                |_ctx, _module, _params| Ok(vec![0]),
+                &[ValueType::I32],
+                &[ValueType::I32],
+            )
+            .export("same")
+            .new_function_builder()
+            .with_func(
+                |_ctx, _module, _params| Ok(vec![0]),
+                &[ValueType::I64],
+                &[ValueType::I32],
+            )
+            .export("same")
+            .compile(&Context::default())
+            .unwrap();
+
+        assert_eq!(1, compiled.exported_functions().len());
+        let definition = compiled
+            .exported_functions()
+            .get("same")
+            .expect("same export should exist");
+        assert_eq!(&[ValueType::I64], definition.param_types());
+        assert_eq!(&[ValueType::I32], definition.result_types());
+        assert_eq!("same", definition.name());
+    }
+}

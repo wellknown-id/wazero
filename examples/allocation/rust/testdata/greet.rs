@@ -107,7 +107,6 @@ fn allocate(size: usize) -> *mut u8 {
     Box::into_raw(vec.into_boxed_slice()) as *mut u8
 }
 
-
 /// WebAssembly export that deallocates a pointer of the given size (linear
 /// memory offset, byteCount) allocated by [`allocate`].
 #[cfg_attr(all(target_arch = "wasm32"), export_name = "deallocate")]

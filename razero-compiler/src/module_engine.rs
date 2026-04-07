@@ -461,7 +461,7 @@ mod tests {
         let mut instance = ModuleInstance::default();
         instance.source = module.clone();
         instance.memory_instance = Some(MemoryInstance {
-            bytes: vec![0; 32],
+            bytes: vec![0; 32].into(),
             ..MemoryInstance::default()
         });
         instance.globals.push(GlobalInstance::new(

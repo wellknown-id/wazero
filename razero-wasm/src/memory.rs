@@ -1,5 +1,9 @@
 #![doc = "Runtime-side linear memory instances."]
 
+use std::ops::{Deref, DerefMut};
+
+use razero_secmem::{GuardPageAllocator, GuardedAllocation};
+
 use crate::memory_definition::MemoryDefinition;
 use crate::module::Memory;
 
@@ -8,8 +12,106 @@ pub const MEMORY_LIMIT_PAGES: u32 = 65_536;
 pub const MEMORY_PAGE_SIZE_IN_BITS: u32 = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryBytes {
+    Plain(Vec<u8>),
+    Guarded {
+        allocation: GuardedAllocation,
+        len: usize,
+    },
+}
+
+impl Default for MemoryBytes {
+    fn default() -> Self {
+        Self::Plain(Vec::new())
+    }
+}
+
+impl From<Vec<u8>> for MemoryBytes {
+    fn from(value: Vec<u8>) -> Self {
+        Self::Plain(value)
+    }
+}
+
+impl Deref for MemoryBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Plain(bytes) => bytes,
+            Self::Guarded { allocation, len } => &allocation.as_slice()[..*len],
+        }
+    }
+}
+
+impl DerefMut for MemoryBytes {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Plain(bytes) => bytes,
+            Self::Guarded { allocation, len } => &mut allocation.as_mut_slice()[..*len],
+        }
+    }
+}
+
+impl MemoryBytes {
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Plain(bytes) => bytes.len(),
+            Self::Guarded { len, .. } => *len,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Plain(bytes) => bytes.is_empty(),
+            Self::Guarded { len, .. } => *len == 0,
+        }
+    }
+
+    pub fn resize(&mut self, new_len: usize, value: u8) {
+        match self {
+            Self::Plain(bytes) => bytes.resize(new_len, value),
+            Self::Guarded { allocation, len } => {
+                let slice = allocation.as_mut_slice();
+                let old_len = *len;
+                if new_len > slice.len() {
+                    panic!("guarded resize beyond reserved length");
+                }
+                if new_len > old_len {
+                    slice[old_len..new_len].fill(value);
+                } else if new_len < old_len {
+                    slice[new_len..old_len].fill(0);
+                }
+                *len = new_len;
+            }
+        }
+    }
+
+    pub fn reserved_len(&self) -> usize {
+        match self {
+            Self::Plain(bytes) => bytes.len(),
+            Self::Guarded { allocation, .. } => allocation.len(),
+        }
+    }
+
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.deref().to_vec()
+    }
+}
+
+impl MemoryBytes {
+    pub fn guarded(allocation: GuardedAllocation, len: usize) -> Self {
+        let reserved_len = allocation.len();
+        assert!(
+            len <= reserved_len,
+            "guarded visible length exceeds reservation"
+        );
+        Self::Guarded { allocation, len }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryInstance {
-    pub bytes: Vec<u8>,
+    pub bytes: MemoryBytes,
     pub min: u32,
     pub cap: u32,
     pub max: u32,
@@ -20,7 +122,7 @@ pub struct MemoryInstance {
 impl Default for MemoryInstance {
     fn default() -> Self {
         Self {
-            bytes: Vec::new(),
+            bytes: Vec::new().into(),
             min: 0,
             cap: 0,
             max: 0,
@@ -39,13 +141,31 @@ impl MemoryInstance {
         bytes.resize(min_bytes, 0);
 
         Self {
-            bytes,
+            bytes: bytes.into(),
             min: memory.min,
             cap,
             max: memory.max,
             shared: memory.is_shared,
             definition: None,
         }
+    }
+
+    pub fn new_guarded(memory: &Memory) -> Option<Self> {
+        let min_bytes = memory_pages_to_bytes_num(memory.min) as usize;
+        let cap = memory.cap.max(memory.min);
+        let cap_bytes = memory_pages_to_bytes_num(cap) as usize;
+        let mut bytes = GuardPageAllocator.allocate_zeroed(cap_bytes).ok()?;
+        if cap_bytes > min_bytes {
+            bytes.as_mut_slice()[min_bytes..cap_bytes].fill(0);
+        }
+        Some(Self {
+            bytes: MemoryBytes::guarded(bytes, min_bytes),
+            min: memory.min,
+            cap,
+            max: memory.max,
+            shared: memory.is_shared,
+            definition: None,
+        })
     }
 
     pub fn with_definition(mut self, definition: MemoryDefinition) -> Self {
@@ -281,7 +401,7 @@ mod tests {
     #[test]
     fn has_size_rejects_overflow() {
         let memory = MemoryInstance {
-            bytes: vec![0; MEMORY_PAGE_SIZE as usize],
+            bytes: vec![0; MEMORY_PAGE_SIZE as usize].into(),
             ..MemoryInstance::default()
         };
 
@@ -296,7 +416,7 @@ mod tests {
     #[test]
     fn reads_and_writes_are_little_endian_and_bounds_checked() {
         let mut memory = MemoryInstance {
-            bytes: vec![0; 16],
+            bytes: vec![0; 16].into(),
             ..MemoryInstance::default()
         };
 
@@ -317,7 +437,7 @@ mod tests {
     #[test]
     fn read_mut_and_write_string_share_memory() {
         let mut memory = MemoryInstance {
-            bytes: vec![0; 8],
+            bytes: vec![0; 8].into(),
             ..MemoryInstance::default()
         };
 
@@ -338,5 +458,20 @@ mod tests {
         assert_eq!(pages_to_unit_of_bytes(100), "6 Mi");
         assert_eq!(pages_to_unit_of_bytes(MEMORY_LIMIT_PAGES), "4 Gi");
         assert_eq!(pages_to_unit_of_bytes(u32::MAX), "3 Ti");
+    }
+
+    #[test]
+    fn guarded_constructor_uses_guarded_backing() {
+        let memory = Memory {
+            min: 1,
+            cap: 2,
+            max: 2,
+            is_max_encoded: true,
+            is_shared: false,
+        };
+        let guarded = MemoryInstance::new_guarded(&memory).expect("guarded allocation");
+        assert!(matches!(guarded.bytes, super::MemoryBytes::Guarded { .. }));
+        assert_eq!(MEMORY_PAGE_SIZE as usize, guarded.len());
+        assert_eq!(2, guarded.cap);
     }
 }

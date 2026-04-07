@@ -1,6 +1,9 @@
 #![doc = "Interpreter engine glue for razero-wasm stores."]
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::panic::{self, AssertUnwindSafe};
+use std::ptr::NonNull;
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 use razero_wasm::engine::{
@@ -20,10 +23,51 @@ use crate::compiler::{
     ValueType as InterpValueType,
 };
 use crate::interpreter::{
-    host_function, Function, HostFuncRef, Interpreter, Memory, Module as RuntimeModule,
-    RuntimeResult, Table, Trap,
+    host_function, is_yield_suspend_payload, Function, HostFuncRef, Interpreter,
+    InterpreterSuspend, Memory, Module as RuntimeModule, RuntimeResult, SuspendedCall, Table, Trap,
 };
 use crate::signature::Signature;
+
+thread_local! {
+    static ACTIVE_CALLER_MODULES: RefCell<Vec<NonNull<RuntimeModule>>> = const { RefCell::new(Vec::new()) };
+    static PENDING_SUSPENDED_INVOCATIONS: RefCell<Vec<Arc<dyn SuspendedInvocation>>> = const { RefCell::new(Vec::new()) };
+}
+
+fn with_active_caller_module<T>(module: &mut RuntimeModule, f: impl FnOnce() -> T) -> T {
+    ACTIVE_CALLER_MODULES.with(|active| active.borrow_mut().push(NonNull::from(module)));
+    let result = f();
+    ACTIVE_CALLER_MODULES.with(|active| {
+        active.borrow_mut().pop();
+    });
+    result
+}
+
+fn with_caller_module<T>(
+    default: &mut RuntimeModule,
+    f: impl FnOnce(&mut RuntimeModule) -> T,
+) -> T {
+    ACTIVE_CALLER_MODULES.with(|active| {
+        let binding = active.borrow();
+        if let Some(module) = binding.last() {
+            unsafe { f(&mut *module.as_ptr()) }
+        } else {
+            f(default)
+        }
+    })
+}
+
+pub trait SuspendedInvocation: Send + Sync {
+    fn resume(&self, host_results: &[u64]) -> RuntimeResult<Vec<u64>>;
+    fn cancel(&self);
+}
+
+pub fn take_suspended_invocation() -> Option<Arc<dyn SuspendedInvocation>> {
+    PENDING_SUSPENDED_INVOCATIONS.with(|pending| pending.borrow_mut().pop())
+}
+
+fn push_suspended_invocation(invocation: Arc<dyn SuspendedInvocation>) {
+    PENDING_SUSPENDED_INVOCATIONS.with(|pending| pending.borrow_mut().push(invocation));
+}
 
 #[derive(Clone, Debug)]
 pub struct CompiledModule {
@@ -38,52 +82,304 @@ struct CompiledModuleWithCount {
     ref_count: usize,
 }
 
+#[derive(Debug)]
+enum ModuleRuntimeState {
+    Empty,
+    Ready(RuntimeModule),
+    Suspended(SuspendedExecution),
+}
+
+impl Default for ModuleRuntimeState {
+    fn default() -> Self {
+        Self::Empty
+    }
+}
+
+impl ModuleRuntimeState {
+    fn module(&self) -> &RuntimeModule {
+        match self {
+            Self::Ready(module) => module,
+            Self::Suspended(suspended) => &suspended.interpreter.module,
+            Self::Empty => panic!("module runtime entered an invalid state"),
+        }
+    }
+
+    fn module_mut(&mut self) -> &mut RuntimeModule {
+        match self {
+            Self::Ready(module) => module,
+            Self::Suspended(suspended) => &mut suspended.interpreter.module,
+            Self::Empty => panic!("module runtime entered an invalid state"),
+        }
+    }
+
+    fn take_module(&mut self) -> RuntimeModule {
+        match std::mem::replace(self, Self::Empty) {
+            Self::Ready(module) => module,
+            Self::Suspended(suspended) => suspended.interpreter.module,
+            Self::Empty => panic!("module runtime entered an invalid state"),
+        }
+    }
+
+    fn suspend_id(&self) -> Option<u64> {
+        match self {
+            Self::Suspended(suspended) => Some(suspended.id),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SuspendedExecution {
+    id: u64,
+    interpreter: Interpreter,
+    call: SuspendedCall,
+}
+
+enum ModuleRuntimeAction {
+    Call {
+        function_index: usize,
+        params: Vec<u64>,
+    },
+    Resume {
+        suspend_id: u64,
+        host_results: Vec<u64>,
+    },
+}
+
+struct RuntimeSuspendedInvocation {
+    runtime: Arc<ModuleRuntime>,
+    suspend_id: u64,
+}
+
+impl SuspendedInvocation for RuntimeSuspendedInvocation {
+    fn resume(&self, host_results: &[u64]) -> RuntimeResult<Vec<u64>> {
+        self.runtime.resume(self.suspend_id, host_results)
+    }
+
+    fn cancel(&self) {
+        self.runtime.cancel(self.suspend_id);
+    }
+}
+
 #[derive(Debug, Default)]
 struct ModuleRuntime {
-    module: Mutex<RuntimeModule>,
+    state: Mutex<ModuleRuntimeState>,
     call_stack_ceiling: usize,
 }
 
 impl ModuleRuntime {
     fn new(module: RuntimeModule, call_stack_ceiling: usize) -> Self {
         Self {
-            module: Mutex::new(module),
+            state: Mutex::new(ModuleRuntimeState::Ready(module)),
             call_stack_ceiling,
         }
     }
 
-    fn call(&self, function_index: usize, params: &[u64]) -> RuntimeResult<Vec<u64>> {
-        let mut module = lock_or_poison(&self.module);
-        invoke_locked(&mut module, self.call_stack_ceiling, function_index, params)
+    fn call(self: &Arc<Self>, function_index: usize, params: &[u64]) -> RuntimeResult<Vec<u64>> {
+        let params = params.to_vec();
+        self.invoke(ModuleRuntimeAction::Call {
+            function_index,
+            params,
+        })
     }
 
-    fn call_from_import(&self, function_index: usize, params: &[u64]) -> RuntimeResult<Vec<u64>> {
-        let mut module = match self.module.try_lock() {
+    fn resume(self: &Arc<Self>, suspend_id: u64, host_results: &[u64]) -> RuntimeResult<Vec<u64>> {
+        self.invoke(ModuleRuntimeAction::Resume {
+            suspend_id,
+            host_results: host_results.to_vec(),
+        })
+    }
+
+    fn cancel(&self, suspend_id: u64) {
+        let mut state = lock_or_poison(&self.state);
+        if state.suspend_id() == Some(suspend_id) {
+            *state = ModuleRuntimeState::Ready(state.take_module());
+        }
+    }
+
+    fn call_from_import(
+        self: &Arc<Self>,
+        function_index: usize,
+        params: &[u64],
+    ) -> RuntimeResult<Vec<u64>> {
+        let mut state = match self.state.try_lock() {
             Ok(module) => module,
             Err(TryLockError::WouldBlock) => {
                 return Err(Trap::new("reentrant imported call not supported"));
             }
             Err(TryLockError::Poisoned(err)) => err.into_inner(),
         };
-        invoke_locked(&mut module, self.call_stack_ceiling, function_index, params)
+        if !matches!(*state, ModuleRuntimeState::Ready(_)) {
+            return Err(Trap::new("module execution already suspended"));
+        }
+        let runtime_state = std::mem::replace(&mut *state, ModuleRuntimeState::Empty);
+        drop(state);
+        let (next_state, result) = match runtime_state {
+            ModuleRuntimeState::Ready(module) => {
+                self.invoke_ready_without_suspension(module, function_index, params)
+            }
+            _ => unreachable!("ready state already checked"),
+        };
+        *lock_or_poison(&self.state) = next_state;
+        result
     }
 
     fn snapshot(&self) -> RuntimeModule {
-        lock_or_poison(&self.module).clone()
+        lock_or_poison(&self.state).module().clone()
     }
-}
 
-fn invoke_locked(
-    module: &mut RuntimeModule,
-    call_stack_ceiling: usize,
-    function_index: usize,
-    params: &[u64],
-) -> RuntimeResult<Vec<u64>> {
-    let mut interpreter = Interpreter::new(std::mem::take(module));
-    interpreter.call_stack_ceiling = call_stack_ceiling;
-    let result = interpreter.call(function_index, params);
-    *module = interpreter.module;
-    result
+    fn replace_function(&self, index: usize, function: Function) {
+        if let Some(slot) = lock_or_poison(&self.state)
+            .module_mut()
+            .functions
+            .get_mut(index)
+        {
+            *slot = function;
+        }
+    }
+
+    fn invoke(self: &Arc<Self>, action: ModuleRuntimeAction) -> RuntimeResult<Vec<u64>> {
+        let mut state = lock_or_poison(&self.state);
+        let runtime_state = std::mem::replace(&mut *state, ModuleRuntimeState::Empty);
+        drop(state);
+
+        let (next_state, result) = match (action, runtime_state) {
+            (
+                ModuleRuntimeAction::Call {
+                    function_index,
+                    params,
+                },
+                ModuleRuntimeState::Ready(module),
+            ) => self.invoke_ready(module, function_index, &params),
+            (
+                ModuleRuntimeAction::Resume {
+                    suspend_id,
+                    host_results,
+                },
+                ModuleRuntimeState::Suspended(suspended),
+            ) => {
+                if suspended.id != suspend_id {
+                    (
+                        ModuleRuntimeState::Suspended(suspended),
+                        Err(Trap::new("suspended execution is no longer resumable")),
+                    )
+                } else {
+                    self.invoke_resumed(suspended, &host_results)
+                }
+            }
+            (ModuleRuntimeAction::Call { .. }, ModuleRuntimeState::Suspended(suspended)) => (
+                ModuleRuntimeState::Suspended(suspended),
+                Err(Trap::new("module execution already suspended")),
+            ),
+            (ModuleRuntimeAction::Resume { .. }, ModuleRuntimeState::Ready(module)) => (
+                ModuleRuntimeState::Ready(module),
+                Err(Trap::new("suspended execution is no longer resumable")),
+            ),
+            (_, ModuleRuntimeState::Empty) => (
+                ModuleRuntimeState::Empty,
+                Err(Trap::new("module runtime entered an invalid state")),
+            ),
+        };
+
+        *lock_or_poison(&self.state) = next_state;
+        result
+    }
+
+    fn invoke_ready(
+        self: &Arc<Self>,
+        module: RuntimeModule,
+        function_index: usize,
+        params: &[u64],
+    ) -> (ModuleRuntimeState, RuntimeResult<Vec<u64>>) {
+        let mut interpreter = Interpreter::new(module);
+        interpreter.call_stack_ceiling = self.call_stack_ceiling;
+        let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+            interpreter.call(function_index, params)
+        }));
+        self.handle_outcome(interpreter, outcome, true)
+    }
+
+    fn invoke_ready_without_suspension(
+        self: &Arc<Self>,
+        module: RuntimeModule,
+        function_index: usize,
+        params: &[u64],
+    ) -> (ModuleRuntimeState, RuntimeResult<Vec<u64>>) {
+        let mut interpreter = Interpreter::new(module);
+        interpreter.call_stack_ceiling = self.call_stack_ceiling;
+        let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+            interpreter.call(function_index, params)
+        }));
+        self.handle_outcome(interpreter, outcome, false)
+    }
+
+    fn invoke_resumed(
+        self: &Arc<Self>,
+        suspended: SuspendedExecution,
+        host_results: &[u64],
+    ) -> (ModuleRuntimeState, RuntimeResult<Vec<u64>>) {
+        let mut interpreter = suspended.interpreter;
+        interpreter.call_stack_ceiling = self.call_stack_ceiling;
+        let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+            interpreter.resume(suspended.call, host_results)
+        }));
+        self.handle_outcome(interpreter, outcome, true)
+    }
+
+    fn handle_outcome(
+        self: &Arc<Self>,
+        interpreter: Interpreter,
+        outcome: std::thread::Result<RuntimeResult<Vec<u64>>>,
+        capture_suspension: bool,
+    ) -> (ModuleRuntimeState, RuntimeResult<Vec<u64>>) {
+        match outcome {
+            Ok(result) => (ModuleRuntimeState::Ready(interpreter.module), result),
+            Err(payload) => match payload.downcast::<InterpreterSuspend>() {
+                Ok(suspend) => {
+                    let InterpreterSuspend {
+                        payload,
+                        suspended_call,
+                    } = *suspend;
+                    if is_yield_suspend_payload(payload.as_ref()) {
+                        if !capture_suspension {
+                            *lock_or_poison(&self.state) =
+                                ModuleRuntimeState::Ready(interpreter.module);
+                            panic::resume_unwind(payload);
+                        }
+                        let suspended = SuspendedExecution {
+                            id: self.next_suspend_id(),
+                            interpreter,
+                            call: suspended_call,
+                        };
+                        let invocation: Arc<dyn SuspendedInvocation> =
+                            Arc::new(RuntimeSuspendedInvocation {
+                                runtime: self.clone(),
+                                suspend_id: suspended.id,
+                            });
+                        push_suspended_invocation(invocation);
+                        let state = ModuleRuntimeState::Suspended(suspended);
+                        *lock_or_poison(&self.state) = state;
+                        panic::resume_unwind(payload);
+                    } else {
+                        *lock_or_poison(&self.state) =
+                            ModuleRuntimeState::Ready(interpreter.module);
+                        panic::resume_unwind(payload);
+                    }
+                }
+                Err(payload) => {
+                    *lock_or_poison(&self.state) = ModuleRuntimeState::Ready(interpreter.module);
+                    panic::resume_unwind(payload);
+                }
+            },
+        }
+    }
+
+    fn next_suspend_id(&self) -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT_SUSPEND_ID: AtomicU64 = AtomicU64::new(1);
+        NEXT_SUSPEND_ID.fetch_add(1, Ordering::SeqCst)
+    }
 }
 
 fn lock_or_poison<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -140,28 +436,43 @@ impl InterpModuleEngine {
     }
 
     pub fn memory_size(&self) -> Option<u32> {
-        let module = lock_or_poison(&self.runtime.module);
-        Some(module.memory.as_ref()?.bytes().len() as u32)
+        let state = lock_or_poison(&self.runtime.state);
+        Some(state.module().memory.as_ref()?.bytes().len() as u32)
     }
 
     pub fn memory_read(&self, offset: usize, len: usize) -> Option<Vec<u8>> {
-        let module = lock_or_poison(&self.runtime.module);
-        let memory = module.memory.as_ref()?;
+        let state = lock_or_poison(&self.runtime.state);
+        let memory = state.module().memory.as_ref()?;
         let end = offset.checked_add(len)?;
         memory.bytes().get(offset..end).map(ToOwned::to_owned)
     }
 
+    pub fn memory_write(&self, offset: usize, values: &[u8]) -> bool {
+        let mut state = lock_or_poison(&self.runtime.state);
+        let Some(memory) = state.module_mut().memory.as_mut() else {
+            return false;
+        };
+        let Some(end) = offset.checked_add(values.len()) else {
+            return false;
+        };
+        let Some(slice) = memory.bytes_mut().get_mut(offset..end) else {
+            return false;
+        };
+        slice.copy_from_slice(values);
+        true
+    }
+
     pub fn memory_write_u32(&self, offset: Index, value: u32) -> bool {
-        let mut module = lock_or_poison(&self.runtime.module);
-        let Some(memory) = module.memory.as_mut() else {
+        let mut state = lock_or_poison(&self.runtime.state);
+        let Some(memory) = state.module_mut().memory.as_mut() else {
             return false;
         };
         memory.write_u32_le(offset, value)
     }
 
     pub fn memory_grow(&self, delta_pages: u32, maximum_pages: Option<u32>) -> Option<u32> {
-        let mut module = lock_or_poison(&self.runtime.module);
-        let memory = module.memory.as_mut()?;
+        let mut state = lock_or_poison(&self.runtime.state);
+        let memory = state.module_mut().memory.as_mut()?;
         if let Some(maximum_pages) = maximum_pages {
             memory.max_pages = Some(memory.max_pages.unwrap_or(maximum_pages).min(maximum_pages));
         }
@@ -169,19 +480,14 @@ impl InterpModuleEngine {
     }
 
     pub fn global_value(&self, index: Index) -> Option<(u64, u64, WasmValueType)> {
-        let module = lock_or_poison(&self.runtime.module);
-        let global = module.globals.get(index as usize)?;
+        let state = lock_or_poison(&self.runtime.state);
+        let global = state.module().globals.get(index as usize)?;
         let ty = self.instance.global_types.get(index as usize)?.val_type;
         Some((global.lo, global.hi, ty))
     }
 
     fn replace_function(&self, index: usize, function: Function) {
-        if let Some(slot) = lock_or_poison(&self.runtime.module)
-            .functions
-            .get_mut(index)
-        {
-            *slot = function;
-        }
+        self.runtime.replace_function(index, function);
     }
 
     fn signature_for_function(&self, index: Index) -> Result<Signature, EngineError> {
@@ -238,7 +544,7 @@ impl WasmModuleEngine for InterpModuleEngine {
 
     fn resolve_imported_memory(&mut self, imported_module_engine: &dyn WasmModuleEngine) {
         let imported = Self::resolve_imported_module_engine(imported_module_engine);
-        lock_or_poison(&self.runtime.module).memory = imported.snapshot().memory;
+        lock_or_poison(&self.runtime.state).module_mut().memory = imported.snapshot().memory;
     }
 
     fn lookup_function(
@@ -265,7 +571,8 @@ impl WasmModuleEngine for InterpModuleEngine {
     }
 
     fn set_global_value(&mut self, index: Index, lo: u64, hi: u64) {
-        if let Some(global) = lock_or_poison(&self.runtime.module)
+        if let Some(global) = lock_or_poison(&self.runtime.state)
+            .module_mut()
             .globals
             .get_mut(index as usize)
         {
@@ -315,6 +622,7 @@ impl InterpEngine {
             .map(signature_from_wasm_function_type)
             .collect::<Result<Vec<_>, _>>()?;
         let globals = visible_global_types(module)?;
+        let function_type_indices = module_function_type_indices(module)?;
         let interp_types = module
             .type_section
             .iter()
@@ -352,12 +660,14 @@ impl InterpEngine {
                         signature: function_type,
                         local_types: &local_types,
                         globals: &globals,
-                        functions: &module.function_section,
+                        functions: &function_type_indices,
                         types: &interp_types,
                         call_frame_stack_size_in_u64: 0,
                         ensure_termination: false,
                     })
-                    .map_err(|err| EngineError::new(err.to_string()))?;
+                    .map_err(|err| {
+                        EngineError::new(format!("local[{local_index}] failed: {err}"))
+                    })?;
                 Function::new_native(signature, lowered.operations)
                     .map_err(|err| EngineError::new(err.to_string()))
             })
@@ -369,6 +679,21 @@ impl InterpEngine {
             local_functions,
         })
     }
+}
+
+fn module_function_type_indices(module: &Module) -> Result<Vec<Index>, EngineError> {
+    let mut functions =
+        Vec::with_capacity(module.import_function_count as usize + module.function_section.len());
+    for import in &module.import_section {
+        if let ImportDesc::Func(type_index) = import.desc {
+            functions.push(type_index);
+        }
+    }
+    functions.extend(module.function_section.iter().copied());
+    if functions.len() != module.import_function_count as usize + module.function_section.len() {
+        return Err(EngineError::new("function import count mismatch"));
+    }
+    Ok(functions)
 }
 
 impl WasmEngine for InterpEngine {
@@ -468,11 +793,12 @@ fn build_runtime_module(
             .collect(),
         memory: instance.memory_instance.as_ref().map(|memory| {
             Memory::from_bytes(
-                memory.bytes.clone(),
+                memory.bytes.to_vec(),
                 instance
                     .memory_type
                     .as_ref()
                     .and_then(|memory_type| memory_type.is_max_encoded.then_some(memory_type.max)),
+                memory.shared,
             )
         }),
         tables: instance
@@ -508,17 +834,19 @@ fn imported_host_function<F>(signature: Signature, invoke: F) -> HostFuncRef
 where
     F: Fn(&[u64]) -> RuntimeResult<Vec<u64>> + Send + Sync + 'static,
 {
-    host_function(move |_, stack| {
-        let results = invoke(&stack[..signature.param_slots])?;
-        if results.len() != signature.result_slots {
-            return Err(Trap::new(format!(
-                "expected {} results, but imported call returned {}",
-                signature.result_slots,
-                results.len()
-            )));
-        }
-        stack[..signature.result_slots].copy_from_slice(&results);
-        Ok(())
+    host_function(move |module, stack| {
+        with_active_caller_module(module, || {
+            let results = invoke(&stack[..signature.param_slots])?;
+            if results.len() != signature.result_slots {
+                return Err(Trap::new(format!(
+                    "expected {} results, but imported call returned {}",
+                    signature.result_slots,
+                    results.len()
+                )));
+            }
+            stack[..signature.result_slots].copy_from_slice(&results);
+            Ok(())
+        })
     })
 }
 
@@ -534,10 +862,12 @@ fn host_function_from_code(
 }
 
 fn adapt_host_function(host: WasmHostFuncRef) -> HostFuncRef {
-    host_function(move |_, stack| {
-        let mut caller = Caller::default();
-        host.call(&mut caller, stack)
-            .map_err(|err| Trap::new(err.to_string()))
+    host_function(move |module, stack| {
+        with_caller_module(module, |caller_module| {
+            let mut caller = Caller::with_data(None, Some(caller_module));
+            host.call(&mut caller, stack)
+                .map_err(|err| Trap::new(err.to_string()))
+        })
     })
 }
 
@@ -608,6 +938,10 @@ fn interp_value_type_from_wasm(value: WasmValueType) -> Result<InterpValueType, 
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use razero_decoder::decoder::decode_module;
+    use razero_features::CoreFeatures;
     use razero_wasm::engine::Engine as _;
     use razero_wasm::host_func::stack_host_func;
     use razero_wasm::module::{
@@ -615,7 +949,11 @@ mod tests {
     };
     use razero_wasm::store::Store;
 
-    use super::{InterpEngine, InterpModuleEngine};
+    use super::{
+        interp_function_type_from_wasm, module_function_type_indices, visible_global_types,
+        wasm_value_types_to_interp, InterpEngine, InterpModuleEngine,
+    };
+    use crate::compiler::{CompileConfig, Compiler};
 
     fn function_type(params: &[ValueType], results: &[ValueType]) -> FunctionType {
         let mut ty = FunctionType::default();
@@ -623,6 +961,12 @@ mod tests {
         ty.results.extend_from_slice(results);
         ty.cache_num_in_u64();
         ty
+    }
+
+    fn fixture(path: &str) -> Vec<u8> {
+        let mut full_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        full_path.push(path);
+        std::fs::read(full_path).unwrap()
     }
 
     #[test]
@@ -726,5 +1070,143 @@ mod tests {
             .unwrap();
 
         assert_eq!(vec![42], engine.call(1, &[41]).unwrap());
+    }
+
+    #[test]
+    fn compile_module_allows_later_imported_function_indices() {
+        let mut engine = InterpEngine::new();
+        let consumer = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            import_section: vec![
+                Import::function("env", "inc", 0),
+                Import::function("env", "add_two", 0),
+            ],
+            import_function_count: 2,
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x10, 0x01, 0x0b],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        engine.compile_module(&consumer).unwrap();
+    }
+
+    #[test]
+    fn store_instantiation_preserves_i64_local_order() {
+        let mut store = Store::new(InterpEngine::new());
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I64])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                local_types: vec![ValueType::I64, ValueType::I64],
+                body: vec![
+                    0x42, 0x0e, 0x21, 0x00, // local0 = 14
+                    0x42, 0x05, 0x21, 0x01, // local1 = 5
+                    0x20, 0x00, // len
+                    0x20, 0x01, // ptr
+                    0x42, 0x20, // 32
+                    0x86, // i64.shl
+                    0x84, // i64.or
+                    0x0b,
+                ],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "pack".to_string(),
+                index: 0,
+            }],
+            ..Module::default()
+        };
+
+        let module_id = store.instantiate(module, "demo", None).unwrap();
+        let engine = store
+            .module_engine(module_id)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<InterpModuleEngine>()
+            .unwrap();
+
+        assert_eq!(vec![(5_u64 << 32) | 14], engine.call(0, &[]).unwrap());
+    }
+
+    #[test]
+    fn store_instantiation_advances_past_multibyte_block_type() {
+        let mut store = Store::new(InterpEngine::new());
+        let mut type_section = (0..128)
+            .map(|_| function_type(&[], &[]))
+            .collect::<Vec<_>>();
+        type_section.push(function_type(&[], &[ValueType::I32]));
+
+        let module = Module {
+            type_section,
+            function_section: vec![128],
+            code_section: vec![Code {
+                body: vec![
+                    0x02, 0x80, 0x01, // block (type 128)
+                    0x41, 0x07, // i32.const 7
+                    0x0b, // end block
+                    0x0b, // end function
+                ],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            ..Module::default()
+        };
+
+        let module_id = store.instantiate(module, "demo", None).unwrap();
+        let engine = store
+            .module_engine(module_id)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<InterpModuleEngine>()
+            .unwrap();
+
+        assert_eq!(vec![7], engine.call(0, &[]).unwrap());
+    }
+
+    #[test]
+    fn compile_allocation_fixture_modules() {
+        for path in [
+            "../examples/allocation/rust/testdata/greet.wasm",
+            "../examples/allocation/zig/testdata/greet.wasm",
+        ] {
+            let module = decode_module(&fixture(path), CoreFeatures::V2).unwrap();
+            let globals = visible_global_types(&module).unwrap();
+            let function_type_indices = module_function_type_indices(&module).unwrap();
+            let interp_types = module
+                .type_section
+                .iter()
+                .map(interp_function_type_from_wasm)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+
+            for (local_index, type_index) in module.function_section.iter().copied().enumerate() {
+                let code = module.code_section.get(local_index).unwrap();
+                if code.is_host_function() {
+                    continue;
+                }
+                let function_type = interp_types.get(type_index as usize).cloned().unwrap();
+                let local_types = wasm_value_types_to_interp(&code.local_types).unwrap();
+                if let Err(err) = Compiler.lower_with_config(CompileConfig {
+                    body: &code.body,
+                    signature: function_type,
+                    local_types: &local_types,
+                    globals: &globals,
+                    functions: &function_type_indices,
+                    types: &interp_types,
+                    call_frame_stack_size_in_u64: 0,
+                    ensure_termination: false,
+                }) {
+                    panic!("{path} local[{local_index}] failed: {err}");
+                }
+            }
+        }
     }
 }

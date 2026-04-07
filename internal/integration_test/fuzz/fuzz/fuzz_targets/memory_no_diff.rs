@@ -1,7 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-mod util;
 
 fuzz_target!(|data: &[u8]| {
-    let _ = util::run_nodiff(data, true, false);
+    let _ = wazero_fuzz_fuzz::run_native_parity(data, true, false);
 });

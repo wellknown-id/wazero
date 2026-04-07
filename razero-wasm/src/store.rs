@@ -24,6 +24,7 @@ pub struct Store<E = NullEngine> {
     pub type_ids: BTreeMap<String, FunctionTypeId>,
     pub function_max_types: u32,
     pub modules: BTreeMap<ModuleInstanceId, ModuleInstance>,
+    pub secure_memory: bool,
     next_module_id: ModuleInstanceId,
     closed: bool,
 }
@@ -101,9 +102,14 @@ impl<E> Store<E> {
             type_ids: BTreeMap::new(),
             function_max_types: MAXIMUM_FUNCTION_TYPES,
             modules: BTreeMap::new(),
+            secure_memory: false,
             next_module_id: 1,
             closed: false,
         }
+    }
+
+    pub fn set_secure_memory(&mut self, enabled: bool) {
+        self.secure_memory = enabled;
     }
 
     pub fn module(&self, module_name: &str) -> Result<&ModuleInstance, StoreError> {
@@ -458,7 +464,15 @@ impl<E> Store<E> {
 
         if instance.memory_instance.is_none() {
             if let Some(memory) = &source.memory_section {
-                instance.define_memory(memory);
+                if self.secure_memory {
+                    if !instance.define_memory_guarded(memory) {
+                        return Err(StoreError::Instantiation(
+                            "memory allocation failed".to_string(),
+                        ));
+                    }
+                } else {
+                    instance.define_memory(memory);
+                }
             }
         }
 

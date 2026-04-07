@@ -4,9 +4,16 @@ use std::{
 };
 
 use crate::experimental::{
-    close_notifier::CloseNotifier, fuel::FuelController, listener::FunctionListenerFactory,
-    memory::MemoryAllocator, r#yield::Yielder, snapshotter::Snapshotter,
+    close_notifier::CloseNotifier,
+    fuel::FuelController,
+    listener::FunctionListenerFactory,
+    listener::{FunctionListener, StackFrame},
+    memory::MemoryAllocator,
+    r#yield::Yielder,
+    snapshotter::Snapshotter,
 };
+
+use crate::api::wasm::FunctionDefinition;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ContextKey {
@@ -35,6 +42,9 @@ pub struct Context {
     pub(crate) yielder_enabled: bool,
     pub(crate) memory_allocator: Option<Arc<dyn MemoryAllocator>>,
     pub(crate) close_notifier: Option<Arc<dyn CloseNotifier>>,
+    pub(crate) compilation_workers: usize,
+    pub(crate) import_resolver:
+        Option<Arc<dyn Fn(&str) -> Option<crate::api::wasm::Module> + Send + Sync>>,
     pub(crate) invocation: Option<InvocationContext>,
 }
 
@@ -43,6 +53,11 @@ pub(crate) struct InvocationContext {
     pub(crate) fuel_remaining: Option<Arc<AtomicI64>>,
     pub(crate) snapshotter: Option<Arc<dyn Snapshotter>>,
     pub(crate) yielder: Option<Arc<dyn Yielder>>,
+    #[allow(dead_code)]
+    pub(crate) function_listener: Option<Arc<dyn FunctionListener>>,
+    #[allow(dead_code)]
+    pub(crate) function_definition: Option<FunctionDefinition>,
+    pub(crate) listener_stack: Vec<StackFrame>,
 }
 
 impl Context {
@@ -61,6 +76,23 @@ impl Context {
     pub(crate) fn with_invocation(&self, invocation: InvocationContext) -> Self {
         let mut cloned = self.clone();
         cloned.invocation = Some(invocation);
+        cloned
+    }
+
+    pub(crate) fn with_listener_stack(&self, listener_stack: Vec<StackFrame>) -> Self {
+        let mut cloned = self.clone();
+        let invocation = cloned.invocation.take().unwrap_or(InvocationContext {
+            fuel_remaining: None,
+            snapshotter: None,
+            yielder: None,
+            function_listener: None,
+            function_definition: None,
+            listener_stack: Vec::new(),
+        });
+        cloned.invocation = Some(InvocationContext {
+            listener_stack,
+            ..invocation
+        });
         cloned
     }
 }

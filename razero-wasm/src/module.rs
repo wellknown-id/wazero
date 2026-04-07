@@ -7,7 +7,7 @@ use std::fmt;
 use razero_features::CoreFeatures;
 
 use crate::const_expr::{evaluate_const_expr, ConstExprError};
-use crate::func_validation::validate_wasm_function;
+use crate::func_validation::{validate_wasm_function, wasm_function_uses_memory};
 use crate::function_definition::FunctionDefinition;
 use crate::host_func::HostFuncRef;
 use crate::memory_definition::MemoryDefinition;
@@ -508,7 +508,8 @@ impl Module {
             declarations.memory.as_ref(),
             &declarations.tables,
         )?;
-        self.validate_functions(MAXIMUM_FUNCTION_INDEX)?;
+        self.validate_functions(enabled_features, &declarations.tables, MAXIMUM_FUNCTION_INDEX)?;
+        self.validate_function_memory_usage(declarations.memory.as_ref())?;
         self.validate_tables(enabled_features, &declarations.tables, MAXIMUM_TABLE_INDEX)?;
         self.validate_data_count_section()?;
         Ok(())
@@ -804,7 +805,12 @@ impl Module {
         Ok(())
     }
 
-    fn validate_functions(&self, maximum_function_index: u32) -> Result<(), ModuleError> {
+    fn validate_functions(
+        &self,
+        enabled_features: CoreFeatures,
+        tables: &[Table],
+        maximum_function_index: u32,
+    ) -> Result<(), ModuleError> {
         let function_count = self.section_element_count(SectionId::FUNCTION);
         let code_count = self.section_element_count(SectionId::CODE);
         let total_functions = self.import_function_count + function_count;
@@ -835,8 +841,22 @@ impl Module {
                     "code count ({code_count}) != function count ({function_count})"
                 )));
             };
-            validate_wasm_function(code)
+            validate_wasm_function(code, enabled_features, type_count, tables)
                 .map_err(|err| validation_error(format!("invalid {desc}: {err}")))?;
+        }
+        Ok(())
+    }
+
+    fn validate_function_memory_usage(&self, memory: Option<&Memory>) -> Result<(), ModuleError> {
+        if memory.is_some() {
+            return Ok(());
+        }
+        for code in &self.code_section {
+            if wasm_function_uses_memory(code)
+                .map_err(|err| validation_error(format!("invalid function body: {err}")))?
+            {
+                return Err(validation_error("unknown memory"));
+            }
         }
         Ok(())
     }
@@ -1591,6 +1611,33 @@ mod tests {
                 "element[0].init exceeds min table size".to_string()
             )),
             module.validate(CoreFeatures::empty(), MEMORY_LIMIT_PAGES)
+        );
+    }
+
+    #[test]
+    fn module_validate_rejects_unknown_tail_call_indirect_table() {
+        let module = Module {
+            type_section: vec![FunctionType::default()],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![
+                    crate::instruction::OPCODE_I32_CONST,
+                    0x00,
+                    crate::instruction::OPCODE_TAIL_CALL_RETURN_CALL_INDIRECT,
+                    0x00,
+                    0x01,
+                    crate::instruction::OPCODE_END,
+                ],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        assert_eq!(
+            Err(ModuleError::Validation(
+                "invalid function[0]: unknown table index: 1".to_string()
+            )),
+            module.validate(CoreFeatures::V2 | CoreFeatures::TAIL_CALL, MEMORY_LIMIT_PAGES)
         );
     }
 }
