@@ -279,6 +279,7 @@ impl<'a> Compiler<'a> {
                     let args = self.n_peek_dup(block_type.params.len());
                     self.insert_jump_to_block(args, loop_header);
                     self.switch_to(original_len, loop_header);
+                    self.insert_termination_check();
                 }
             }
             OPCODE_IF => {
@@ -445,6 +446,16 @@ impl<'a> Compiler<'a> {
                 let table_index = self.read_u32();
                 if !self.lowering_state.unreachable {
                     self.lower_call_indirect(type_index, table_index);
+                }
+            }
+            OPCODE_I32_LOAD8_U => {
+                let _align = self.read_u32();
+                let offset = self.read_u32();
+                if !self.lowering_state.unreachable {
+                    let base_addr = self.lowering_state.pop();
+                    let addr = self.lower_local_memory_address(base_addr, offset as u64, 1);
+                    let value = self.emit_ext_load(Opcode::Uload8, addr, offset, Type::I32);
+                    self.lowering_state.push(value);
                 }
             }
             _ => panic!(
@@ -702,6 +713,41 @@ impl<'a> Compiler<'a> {
         self.emit_binary(Opcode::Iadd, table_base, scaled, table_base.ty())
     }
 
+    fn lower_local_memory_address(
+        &mut self,
+        base_addr: Value,
+        const_offset: u64,
+        operation_size_in_bytes: u64,
+    ) -> Value {
+        let offsets = self
+            .offset
+            .as_ref()
+            .expect("module context offsets are required for memory access");
+        let mem_len_offset = offsets.local_memory_len().u32();
+        let mem_base_offset = offsets.local_memory_base().u32();
+        let ext_base_addr = self.emit_uextend(base_addr, Type::I64);
+        let ceil = self.emit_iconst64(const_offset + operation_size_in_bytes);
+        let base_addr_plus_ceil = self.emit_binary(Opcode::Iadd, ext_base_addr, ceil, Type::I64);
+        let mem_len = self.emit_ext_load(
+            Opcode::Uload32,
+            self.module_ctx_ptr_value,
+            mem_len_offset,
+            Type::I64,
+        );
+        let out_of_bounds = self.emit_icmp(
+            mem_len,
+            base_addr_plus_ceil,
+            IntegerCmpCond::UnsignedLessThan,
+        );
+        self.emit_exit_if_true_with_code(
+            self.exec_ctx_ptr_value,
+            out_of_bounds,
+            ExitCode::MEMORY_OUT_OF_BOUNDS,
+        );
+        let mem_base = self.emit_load(self.module_ctx_ptr_value, mem_base_offset, Type::I64);
+        self.emit_binary(Opcode::Iadd, mem_base, ext_base_addr, Type::I64)
+    }
+
     fn lower_br_table(&mut self, labels: &[u32], index: Value) {
         let (_, arg_num) = self.lowering_state.br_target_arg_num_for(labels[0]);
         let current_block = self
@@ -780,6 +826,35 @@ impl<'a> Compiler<'a> {
         self.ssa_builder.instruction(id).return_()
     }
 
+    fn insert_termination_check(&mut self) {
+        if !self.ensure_termination {
+            return;
+        }
+
+        let ptr = self.emit_load(
+            self.exec_ctx_ptr_value,
+            crate::wazevoapi::offsetdata::EXECUTION_CONTEXT_OFFSET_CHECK_MODULE_EXIT_CODE_TRAMPOLINE_ADDRESS
+                .u32(),
+            Type::I64,
+        );
+        self.ssa_builder.insert_instruction(
+            self.ssa_builder.allocate_instruction().as_call_indirect(
+                ptr,
+                self.check_module_exit_code_sig.id,
+                Values::from_vec(vec![self.exec_ctx_ptr_value]),
+            ),
+        );
+    }
+
+    fn emit_ext_load(&mut self, opcode: Opcode, ptr: Value, offset: u32, ty: Type) -> Value {
+        let mut instr = self.ssa_builder.allocate_instruction().with_opcode(opcode);
+        instr.v = ptr;
+        instr.u1 = offset as u64;
+        instr.typ = ty;
+        let id = self.ssa_builder.insert_instruction(instr);
+        self.ssa_builder.instruction(id).return_()
+    }
+
     fn emit_store(&mut self, value: Value, ptr: Value, offset: u32) {
         self.ssa_builder
             .insert_instruction(self.ssa_builder.allocate_instruction().as_store(
@@ -794,6 +869,17 @@ impl<'a> Compiler<'a> {
         let id = self
             .ssa_builder
             .insert_instruction(self.ssa_builder.allocate_instruction().as_iconst64(value));
+        self.ssa_builder.instruction(id).return_()
+    }
+
+    fn emit_uextend(&mut self, value: Value, ty: Type) -> Value {
+        let mut instr = self
+            .ssa_builder
+            .allocate_instruction()
+            .with_opcode(Opcode::UExtend);
+        instr.v = value;
+        instr.typ = ty;
+        let id = self.ssa_builder.insert_instruction(instr);
         self.ssa_builder.instruction(id).return_()
     }
 
@@ -923,11 +1009,18 @@ mod tests {
     }
 
     fn compiler_for(module: &Module) -> Compiler<'_> {
+        compiler_for_with_ensure_termination(module, false)
+    }
+
+    fn compiler_for_with_ensure_termination(
+        module: &Module,
+        ensure_termination: bool,
+    ) -> Compiler<'_> {
         Compiler::new(
             module,
             Builder::new(),
             Some(ModuleContextOffsetData::new(module, false)),
-            false,
+            ensure_termination,
             false,
             false,
             false,
@@ -1065,6 +1158,30 @@ mod tests {
     }
 
     #[test]
+    fn lowers_loop_header_module_exit_check_when_termination_is_enabled() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOOP, 0x40, OPCODE_BR, 0, OPCODE_END, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for_with_ensure_termination(&module, true);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        let formatted = compiler.format();
+        let offset = crate::wazevoapi::offsetdata::EXECUTION_CONTEXT_OFFSET_CHECK_MODULE_EXIT_CODE_TRAMPOLINE_ADDRESS
+            .u32();
+        assert!(formatted.contains(&format!("Load exec_ctx, {offset:#x}")));
+        assert!(formatted.contains("CallIndirect sig1,"));
+        assert!(formatted.contains("exec_ctx"));
+    }
+
+    #[test]
     fn lowers_call_indirect_with_table_checks() {
         let empty = function_type(&[], &[]);
         let callee = function_type(&[], &[ValueType::I32]);
@@ -1181,6 +1298,35 @@ mod tests {
                 vec![Type::I64, Type::I64, Type::I64, Type::F32],
                 vec![Type::F64]
             )
+        );
+    }
+
+    #[test]
+    fn lowers_i32_load8_u_with_local_memory_bounds_check() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            memory_section: Some(wasm::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                is_shared: false,
+            }),
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_I32_LOAD8_U, 0, 0, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32)\n\tv3:i64 = UExtend v2\n\tv4:i64 = Iconst 1\n\tv5:i64 = Iadd v3, v4\n\tv6:i64 = Uload32 module_ctx, 0x10\n\tv7:i32 = Icmp v6, v5\n\tExitIfTrueWithCode v7, exec_ctx, memory_out_of_bounds\n\tv8:i64 = Load module_ctx, 0x8\n\tv9:i64 = Iadd v8, v3\n\tv10:i32 = Uload8 v9, 0x0\n\tJump blk_ret, v10\n"
         );
     }
 }

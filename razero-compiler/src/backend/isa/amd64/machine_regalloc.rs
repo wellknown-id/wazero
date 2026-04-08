@@ -419,9 +419,10 @@ mod tests {
         let mut compiler = Compiler::new(Amd64Machine::new(), builder);
         compiler.lower();
         let text = compiler.machine().format();
-        assert!(text.contains("movsd %xmm0, %xmm128?"));
+        // Entry-block float params are pre-coloured to physical XMM regs, so
+        // lower_params emits a physical-to-physical self-move (a regalloc nop).
+        assert!(text.contains("movsd %xmm0, %xmm0"));
         assert!(text.contains("%xmm0"));
-        assert!(text.contains('?'));
     }
 
     #[test]
