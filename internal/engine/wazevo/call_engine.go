@@ -159,7 +159,7 @@ func (c *callEngine) Call(ctx context.Context, params ...uint64) ([]uint64, erro
 	return paramResultSlice[:c.numberOfResults], nil
 }
 
-func (c *callEngine) addFrame(builder wasmdebug.ErrorBuilder, addr uintptr) (def api.FunctionDefinition, listener experimental.FunctionListener) {
+func (c *callEngine) addFrame(builder wasmdebug.ErrorBuilder, addr uintptr) (def api.FunctionDefinition, listener experimental.FunctionListener, hostModule bool) {
 	eng := c.parent.parent.parent
 	cm := eng.compiledModuleOfAddr(addr)
 	if cm == nil {
@@ -183,6 +183,7 @@ func (c *callEngine) addFrame(builder wasmdebug.ErrorBuilder, addr uintptr) (def
 	}
 
 	if cm != nil {
+		hostModule = cm.module.IsHostModule
 		index := cm.functionIndexOf(addr)
 		def = cm.module.FunctionDefinition(cm.module.ImportFunctionCount + index)
 		var sources []string
@@ -340,8 +341,9 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 
 			var listeners []listenerForAbort
 			builder := wasmdebug.NewErrorBuilder()
-			def, lsn := c.addFrame(builder, uintptr(unsafe.Pointer(c.execCtx.goCallReturnAddress)))
-			if lsn != nil {
+			skipTopHostListenerAbort := c.execCtx.exitCode == wazevoapi.ExitCodePolicyDenied
+			def, lsn, hostModule := c.addFrame(builder, uintptr(unsafe.Pointer(c.execCtx.goCallReturnAddress)))
+			if lsn != nil && !(skipTopHostListenerAbort && hostModule) {
 				listeners = append(listeners, listenerForAbort{def, lsn})
 			}
 
@@ -353,7 +355,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 					nil,
 				)
 				for _, retAddr := range returnAddrs[:len(returnAddrs)-1] { // the last return addr is the trampoline, so we skip it.
-					def, lsn = c.addFrame(builder, retAddr)
+					def, lsn, _ = c.addFrame(builder, retAddr)
 					if lsn != nil {
 						listeners = append(listeners, listenerForAbort{def, lsn})
 					}
@@ -1183,7 +1185,7 @@ func (r *compilerResumer) Resume(ctx context.Context, hostResults []uint64) (res
 	spp := *(**uint64)(unsafe.Pointer(&r.sp))
 	view := goCallStackView(spp)
 	copy(view, hostResults)
-	if def, lsn := c.addFrame(wasmdebug.NewErrorBuilder(), uintptr(unsafe.Pointer(r.returnAddress))); lsn != nil {
+	if def, lsn, _ := c.addFrame(wasmdebug.NewErrorBuilder(), uintptr(unsafe.Pointer(r.returnAddress))); lsn != nil {
 		lsn.After(ctx, r.module, def, hostResults)
 	}
 
@@ -1270,8 +1272,9 @@ func (r *compilerResumer) Resume(ctx context.Context, hostResults []uint64) (res
 				lsn experimental.FunctionListener
 			}
 			builder := wasmdebug.NewErrorBuilder()
-			def, lsn := c.addFrame(builder, uintptr(unsafe.Pointer(c.execCtx.goCallReturnAddress)))
-			if lsn != nil {
+			skipTopHostListenerAbort := c.execCtx.exitCode == wazevoapi.ExitCodePolicyDenied
+			def, lsn, hostModule := c.addFrame(builder, uintptr(unsafe.Pointer(c.execCtx.goCallReturnAddress)))
+			if lsn != nil && !(skipTopHostListenerAbort && hostModule) {
 				listeners = append(listeners, struct {
 					def api.FunctionDefinition
 					lsn experimental.FunctionListener

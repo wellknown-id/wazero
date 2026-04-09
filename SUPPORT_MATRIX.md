@@ -57,9 +57,7 @@ These rules cover the currently shipped observer/policy/config surfaces:
   any yield attempt. If it denies the call, `YieldPolicy` is never consulted.
 - `FunctionListener.Before` for an imported host function runs only after
   `HostCallPolicy` allows that call. A denied host import therefore reports the
-  policy decision and aborts the caller listener. On the compiler path today,
-  stack unwinding can also emit an orphan `FunctionListener.Abort` for the
-  denied callee even though no matching `Before` ran.
+  policy decision and aborts only the caller listener.
 - `YieldPolicy` is checked only when the host function actually calls
   `Yielder.Yield()`. A denial terminates execution with
   `ErrRuntimePolicyDenied`.

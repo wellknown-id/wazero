@@ -367,10 +367,8 @@ func TestFunctionListener_AbortTrapPaths(t *testing.T) {
 			wantTrapCount: 1,
 			wantEvents: []expectedListenerEvent{
 				{phase: "before", function: "run"},
-				{phase: "abort", function: "check", errIs: wasmruntime.ErrRuntimePolicyDenied},
 				{phase: "abort", function: "run", errIs: wasmruntime.ErrRuntimePolicyDenied},
 			},
-			allowedOrphanAbortFunctions: []string{"check"},
 		},
 		{
 			name:         "interpreter/host-panic",
@@ -552,7 +550,6 @@ func TestFunctionListener_TrapObserverOrdering(t *testing.T) {
 			wantCause: experimental.TrapCausePolicyDenied,
 			wantSubsequence: []string{
 				"listener before run",
-				"listener abort check (policy_denied)",
 				"listener abort run (policy_denied)",
 				"trap policy_denied",
 			},
@@ -690,15 +687,6 @@ func TestFunctionListener_PolicyObserverOrdering(t *testing.T) {
 				"policy denied env.check",
 				"listener abort run (policy_denied)",
 				"trap policy_denied",
-			}
-			if ec.name == "compiler" {
-				want = []string{
-					"listener before run",
-					"policy denied env.check",
-					"listener abort check (policy_denied)",
-					"listener abort run (policy_denied)",
-					"trap policy_denied",
-				}
 			}
 			assertOrderedEvents(t, recorder.snapshot(), want)
 		})
