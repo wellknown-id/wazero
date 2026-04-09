@@ -680,6 +680,109 @@ func TestMultiTrapObserver_MemoryFault(t *testing.T) {
 	}, wasmruntime.ErrRuntimeMemoryFault, left, right)
 }
 
+func TestMultiTrapObserver_ArithmeticTraps(t *testing.T) {
+	testCases := []struct {
+		name         string
+		cfg          func() wazero.RuntimeConfig
+		supported    func() bool
+		moduleBinary func() []byte
+		wantErr      error
+		wantCause    experimental.TrapCause
+	}{
+		{
+			name:         "interpreter/unreachable",
+			cfg:          wazero.NewRuntimeConfigInterpreter,
+			supported:    func() bool { return true },
+			moduleBinary: trapRuntimeUnreachableBinary,
+			wantErr:      wasmruntime.ErrRuntimeUnreachable,
+			wantCause:    experimental.TrapCauseUnreachable,
+		},
+		{
+			name:         "compiler/unreachable",
+			cfg:          wazero.NewRuntimeConfigCompiler,
+			supported:    platform.CompilerSupported,
+			moduleBinary: trapRuntimeUnreachableBinary,
+			wantErr:      wasmruntime.ErrRuntimeUnreachable,
+			wantCause:    experimental.TrapCauseUnreachable,
+		},
+		{
+			name:         "interpreter/integer-divide-by-zero",
+			cfg:          wazero.NewRuntimeConfigInterpreter,
+			supported:    func() bool { return true },
+			moduleBinary: trapRuntimeIntegerDivideByZeroBinary,
+			wantErr:      wasmruntime.ErrRuntimeIntegerDivideByZero,
+			wantCause:    experimental.TrapCauseIntegerDivideByZero,
+		},
+		{
+			name:         "compiler/integer-divide-by-zero",
+			cfg:          wazero.NewRuntimeConfigCompiler,
+			supported:    platform.CompilerSupported,
+			moduleBinary: trapRuntimeIntegerDivideByZeroBinary,
+			wantErr:      wasmruntime.ErrRuntimeIntegerDivideByZero,
+			wantCause:    experimental.TrapCauseIntegerDivideByZero,
+		},
+		{
+			name:         "interpreter/integer-overflow",
+			cfg:          wazero.NewRuntimeConfigInterpreter,
+			supported:    func() bool { return true },
+			moduleBinary: trapRuntimeIntegerOverflowBinary,
+			wantErr:      wasmruntime.ErrRuntimeIntegerOverflow,
+			wantCause:    experimental.TrapCauseIntegerOverflow,
+		},
+		{
+			name:         "compiler/integer-overflow",
+			cfg:          wazero.NewRuntimeConfigCompiler,
+			supported:    platform.CompilerSupported,
+			moduleBinary: trapRuntimeIntegerOverflowBinary,
+			wantErr:      wasmruntime.ErrRuntimeIntegerOverflow,
+			wantCause:    experimental.TrapCauseIntegerOverflow,
+		},
+		{
+			name:         "interpreter/invalid-conversion-to-integer",
+			cfg:          wazero.NewRuntimeConfigInterpreter,
+			supported:    func() bool { return true },
+			moduleBinary: trapRuntimeInvalidConversionToIntegerBinary,
+			wantErr:      wasmruntime.ErrRuntimeInvalidConversionToInteger,
+			wantCause:    experimental.TrapCauseInvalidConversionToInteger,
+		},
+		{
+			name:         "compiler/invalid-conversion-to-integer",
+			cfg:          wazero.NewRuntimeConfigCompiler,
+			supported:    platform.CompilerSupported,
+			moduleBinary: trapRuntimeInvalidConversionToIntegerBinary,
+			wantErr:      wasmruntime.ErrRuntimeInvalidConversionToInteger,
+			wantCause:    experimental.TrapCauseInvalidConversionToInteger,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !tc.supported() {
+				t.Skip("engine is not supported on this host")
+			}
+
+			ctx := context.Background()
+			rt := wazero.NewRuntimeWithConfig(ctx, tc.cfg())
+			defer rt.Close(ctx)
+
+			mod, err := rt.InstantiateWithConfig(ctx, tc.moduleBinary(), wazero.NewModuleConfig().WithName("guest"))
+			require.NoError(t, err)
+
+			left := &recordingTrapObserver{}
+			right := &recordingTrapObserver{}
+			_, err = mod.ExportedFunction("run").Call(
+				experimental.WithTrapObserver(ctx, experimental.MultiTrapObserver(left, right)),
+			)
+			require.ErrorIs(t, err, tc.wantErr)
+
+			requireEquivalentTrapObservation(t, trapObservationSnapshot{
+				Cause:      tc.wantCause,
+				ModuleName: "guest",
+			}, tc.wantErr, left, right)
+		})
+	}
+}
+
 func TestMultiYieldPolicy_ComposesAllowAndDenyFlows(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
