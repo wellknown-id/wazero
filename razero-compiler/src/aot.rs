@@ -1,12 +1,12 @@
-#![doc = "AOT-exportable compiler metadata."]
+#![doc = "AOT-exportable compiler metadata.\n\nThe versioned Rust AOT packaging contract is documented in `../AOT_PACKAGING_ABI.md`."]
 
 use std::fmt::{Display, Formatter};
 use std::io::{Cursor, Read};
 use std::mem::size_of;
 
 use razero_wasm::module::{
-    Export, ExternType, GlobalType, Import, ImportDesc, Index, Memory, Module, ModuleId, RefType,
-    Table, ValueType,
+    ElementMode, Export, ExternType, GlobalType, Import, ImportDesc, Index, Memory, Module,
+    ModuleId, RefType, Table, ValueType,
 };
 
 use crate::backend::RelocationInfo;
@@ -34,8 +34,10 @@ use crate::wazevoapi::offsetdata::{
 };
 use crate::wazevoapi::{ExitCode, ModuleContextOffsetData};
 
-const MAGIC: &[u8; 8] = b"RAZEROAT";
-const EXECUTION_CONTEXT_ABI_VERSION: u32 = 1;
+/// Magic header for the serialized Razero AOT metadata sidecar.
+pub const AOT_METADATA_MAGIC: &[u8; 8] = b"RAZEROAT";
+/// Version of the execution-context layout embedded in [`AotExecutionContextMetadata`].
+pub const EXECUTION_CONTEXT_ABI_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AotTargetArchitecture {
@@ -332,6 +334,44 @@ impl From<&razero_wasm::module::DataSegment> for AotDataSegmentMetadata {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AotGlobalInitializerMetadata {
+    pub init_expression: Vec<u8>,
+}
+
+impl From<&razero_wasm::module::Global> for AotGlobalInitializerMetadata {
+    fn from(value: &razero_wasm::module::Global) -> Self {
+        Self {
+            init_expression: value.init.data.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AotElementSegmentMetadata {
+    pub offset_expression: Vec<u8>,
+    pub table_index: Index,
+    pub init_expressions: Vec<Vec<u8>>,
+    pub ty: RefType,
+    pub mode: ElementMode,
+}
+
+impl From<&razero_wasm::module::ElementSegment> for AotElementSegmentMetadata {
+    fn from(value: &razero_wasm::module::ElementSegment) -> Self {
+        Self {
+            offset_expression: value.offset_expr.data.clone(),
+            table_index: value.table_index,
+            init_expressions: value.init.iter().map(|expr| expr.data.clone()).collect(),
+            ty: value.ty,
+            mode: value.mode,
+        }
+    }
+}
+
+/// Versioned layout information for the per-module context consumed by linked AOT code.
+///
+/// These byte offsets are part of the documented packaging ABI. Negative offsets indicate that
+/// the corresponding region is absent for the current module shape.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AotModuleContextMetadata {
     pub total_size: usize,
     pub module_instance_offset: i32,
@@ -388,6 +428,9 @@ pub struct AotModuleShapeMetadata {
     pub is_host_module: bool,
 }
 
+/// Versioned layout information for the runtime execution context used by linked AOT code.
+///
+/// Incompatible layout changes require bumping [`EXECUTION_CONTEXT_ABI_VERSION`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AotExecutionContextMetadata {
     pub abi_version: u32,
@@ -466,6 +509,9 @@ impl Default for AotExecutionContextMetadata {
     }
 }
 
+/// Stable helper identifiers embedded in the AOT metadata sidecar.
+///
+/// Numeric assignments are part of the serialized packaging ABI and must remain append-only.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AotHelperId {
     MemoryGrow,
@@ -572,6 +618,10 @@ fn current_helper_metadata() -> Vec<AotHelperMetadata> {
     ]
 }
 
+/// Serialized sidecar schema paired with ELF relocatable output from `emit_relocatable_object()`.
+///
+/// This metadata is part of the supported Rust AOT packaging contract used by linker and
+/// runtime-support code.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AotCompiledMetadata {
     pub target: AotTarget,
@@ -583,6 +633,8 @@ pub struct AotCompiledMetadata {
     pub exports: Vec<AotExportMetadata>,
     pub start_function_index: Option<Index>,
     pub data_segments: Vec<AotDataSegmentMetadata>,
+    pub global_initializers: Vec<AotGlobalInitializerMetadata>,
+    pub element_segments: Vec<AotElementSegmentMetadata>,
     pub memory: Option<AotMemoryMetadata>,
     pub tables: Vec<AotTableMetadata>,
     pub globals: Vec<AotGlobalTypeMetadata>,
@@ -609,6 +661,8 @@ impl Default for AotCompiledMetadata {
             exports: Vec::new(),
             start_function_index: None,
             data_segments: Vec::new(),
+            global_initializers: Vec::new(),
+            element_segments: Vec::new(),
             memory: None,
             tables: Vec::new(),
             globals: Vec::new(),
@@ -665,6 +719,16 @@ impl AotCompiledMetadata {
                 .data_section
                 .iter()
                 .map(AotDataSegmentMetadata::from)
+                .collect(),
+            global_initializers: module
+                .global_section
+                .iter()
+                .map(AotGlobalInitializerMetadata::from)
+                .collect(),
+            element_segments: module
+                .element_section
+                .iter()
+                .map(AotElementSegmentMetadata::from)
                 .collect(),
             memory: module.memory_section.as_ref().map(AotMemoryMetadata::from),
             tables: module
@@ -737,9 +801,10 @@ pub fn relocations_for_function(
         .collect()
 }
 
+/// Serializes the stable Razero AOT metadata sidecar.
 pub fn serialize_aot_metadata(metadata: &AotCompiledMetadata) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.extend_from_slice(MAGIC);
+    buf.extend_from_slice(AOT_METADATA_MAGIC);
     buf.push(metadata.target.architecture.to_byte());
     buf.push(metadata.target.operating_system.to_byte());
     buf.extend_from_slice(&metadata.module_id);
@@ -930,9 +995,31 @@ pub fn serialize_aot_metadata(metadata: &AotCompiledMetadata) -> Vec<u8> {
         write_bytes(&mut buf, &data.init);
     }
 
+    buf.extend_from_slice(&(metadata.global_initializers.len() as u32).to_le_bytes());
+    for global in &metadata.global_initializers {
+        write_bytes(&mut buf, &global.init_expression);
+    }
+
+    buf.extend_from_slice(&(metadata.element_segments.len() as u32).to_le_bytes());
+    for element in &metadata.element_segments {
+        write_bytes(&mut buf, &element.offset_expression);
+        buf.extend_from_slice(&element.table_index.to_le_bytes());
+        buf.push(element.ty.0);
+        buf.push(match element.mode {
+            ElementMode::Active => 0,
+            ElementMode::Passive => 1,
+            ElementMode::Declarative => 2,
+        });
+        buf.extend_from_slice(&(element.init_expressions.len() as u32).to_le_bytes());
+        for init in &element.init_expressions {
+            write_bytes(&mut buf, init);
+        }
+    }
+
     buf
 }
 
+/// Deserializes the stable Razero AOT metadata sidecar.
 pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, AotMetadataError> {
     let mut cursor = Cursor::new(bytes);
     let mut magic = [0u8; 8];
@@ -941,7 +1028,7 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
         &mut magic,
         "aot metadata: invalid header length",
     )?;
-    if &magic != MAGIC {
+    if &magic != AOT_METADATA_MAGIC {
         return Err(AotMetadataError::InvalidHeader(
             "aot metadata: invalid magic number".to_string(),
         ));
@@ -1071,6 +1158,8 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
         execution_context,
         helpers,
         data_segments,
+        global_initializers,
+        element_segments,
     ) = if remaining(&cursor) == 0 {
         (
             Vec::new(),
@@ -1081,6 +1170,8 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
             None,
             AotExecutionContextMetadata::current(),
             current_helper_metadata(),
+            Vec::new(),
+            Vec::new(),
             Vec::new(),
         )
     } else {
@@ -1146,46 +1237,58 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
             globals.push(read_global_type_metadata(&mut cursor)?);
         }
 
-        let (exports, start_function_index, execution_context, helpers, data_segments) =
-            if remaining(&cursor) == 0 {
-                (
-                    Vec::new(),
-                    None,
-                    AotExecutionContextMetadata::current(),
-                    current_helper_metadata(),
-                    Vec::new(),
-                )
-            } else {
-                let export_len = read_u32(&mut cursor)? as u64;
-                let export_len = checked_vec_len(
-                    &cursor,
-                    export_len,
-                    9,
-                    "aot metadata: invalid export metadata length",
-                )?;
-                let mut exports = Vec::with_capacity(export_len);
-                for _ in 0..export_len {
-                    exports.push(AotExportMetadata {
-                        ty: ExternType(read_u8(&mut cursor)?),
-                        name: read_string(&mut cursor, "export name")?,
-                        index: read_u32(&mut cursor)?,
-                    });
+        let (
+            exports,
+            start_function_index,
+            execution_context,
+            helpers,
+            data_segments,
+            global_initializers,
+            element_segments,
+        ) = if remaining(&cursor) == 0 {
+            (
+                Vec::new(),
+                None,
+                AotExecutionContextMetadata::current(),
+                current_helper_metadata(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+        } else {
+            let export_len = read_u32(&mut cursor)? as u64;
+            let export_len = checked_vec_len(
+                &cursor,
+                export_len,
+                9,
+                "aot metadata: invalid export metadata length",
+            )?;
+            let mut exports = Vec::with_capacity(export_len);
+            for _ in 0..export_len {
+                exports.push(AotExportMetadata {
+                    ty: ExternType(read_u8(&mut cursor)?),
+                    name: read_string(&mut cursor, "export name")?,
+                    index: read_u32(&mut cursor)?,
+                });
+            }
+
+            let start_function_index = match read_u8(&mut cursor)? {
+                0 => None,
+                1 => Some(read_u32(&mut cursor)?),
+                _ => {
+                    return Err(AotMetadataError::InvalidHeader(
+                        "aot metadata: invalid start metadata flag".to_string(),
+                    ))
                 }
+            };
 
-                let start_function_index = match read_u8(&mut cursor)? {
-                    0 => None,
-                    1 => Some(read_u32(&mut cursor)?),
-                    _ => {
-                        return Err(AotMetadataError::InvalidHeader(
-                            "aot metadata: invalid start metadata flag".to_string(),
-                        ))
-                    }
-                };
-
-                let (execution_context, helpers, data_segments) = if remaining(&cursor) == 0 {
+            let (execution_context, helpers, data_segments, global_initializers, element_segments) =
+                if remaining(&cursor) == 0 {
                     (
                         AotExecutionContextMetadata::current(),
                         current_helper_metadata(),
+                        Vec::new(),
+                        Vec::new(),
                         Vec::new(),
                     )
                 } else {
@@ -1269,17 +1372,91 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
                         }
                         data_segments
                     };
-                    (execution_context, helpers, data_segments)
+                    let global_initializers = if remaining(&cursor) == 0 {
+                        Vec::new()
+                    } else {
+                        let len = read_u32(&mut cursor)? as u64;
+                        let len = checked_vec_len(
+                            &cursor,
+                            len,
+                            4,
+                            "aot metadata: invalid global initializer length",
+                        )?;
+                        let mut globals = Vec::with_capacity(len);
+                        for _ in 0..len {
+                            globals.push(AotGlobalInitializerMetadata {
+                                init_expression: read_bytes(&mut cursor, "global init")?,
+                            });
+                        }
+                        globals
+                    };
+                    let element_segments = if remaining(&cursor) == 0 {
+                        Vec::new()
+                    } else {
+                        let len = read_u32(&mut cursor)? as u64;
+                        let len = checked_vec_len(
+                            &cursor,
+                            len,
+                            10,
+                            "aot metadata: invalid element segment length",
+                        )?;
+                        let mut elements = Vec::with_capacity(len);
+                        for _ in 0..len {
+                            let offset_expression =
+                                read_bytes(&mut cursor, "element offset expression")?;
+                            let table_index = read_u32(&mut cursor)?;
+                            let ty = RefType(read_u8(&mut cursor)?);
+                            let mode = match read_u8(&mut cursor)? {
+                                0 => ElementMode::Active,
+                                1 => ElementMode::Passive,
+                                2 => ElementMode::Declarative,
+                                _ => {
+                                    return Err(AotMetadataError::InvalidHeader(
+                                        "aot metadata: invalid element mode".to_string(),
+                                    ))
+                                }
+                            };
+                            let init_len = read_u32(&mut cursor)? as u64;
+                            let init_len = checked_vec_len(
+                                &cursor,
+                                init_len,
+                                4,
+                                "aot metadata: invalid element init length",
+                            )?;
+                            let mut init_expressions = Vec::with_capacity(init_len);
+                            for _ in 0..init_len {
+                                init_expressions
+                                    .push(read_bytes(&mut cursor, "element init expression")?);
+                            }
+                            elements.push(AotElementSegmentMetadata {
+                                offset_expression,
+                                table_index,
+                                init_expressions,
+                                ty,
+                                mode,
+                            });
+                        }
+                        elements
+                    };
+                    (
+                        execution_context,
+                        helpers,
+                        data_segments,
+                        global_initializers,
+                        element_segments,
+                    )
                 };
 
-                (
-                    exports,
-                    start_function_index,
-                    execution_context,
-                    helpers,
-                    data_segments,
-                )
-            };
+            (
+                exports,
+                start_function_index,
+                execution_context,
+                helpers,
+                data_segments,
+                global_initializers,
+                element_segments,
+            )
+        };
 
         (
             imports,
@@ -1291,6 +1468,8 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
             execution_context,
             helpers,
             data_segments,
+            global_initializers,
+            element_segments,
         )
     };
 
@@ -1307,6 +1486,8 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
         exports,
         start_function_index,
         data_segments,
+        global_initializers,
+        element_segments,
         memory,
         tables,
         globals,
@@ -1589,11 +1770,12 @@ mod tests {
     use super::{
         current_helper_metadata, deserialize_aot_metadata, relocations_for_function,
         serialize_aot_metadata, AotCompiledMetadata, AotDataSegmentMetadata,
-        AotExecutionContextMetadata, AotExportMetadata, AotFunctionMetadata,
-        AotFunctionTypeMetadata, AotGlobalTypeMetadata, AotHelperId, AotImportDescMetadata,
-        AotImportMetadata, AotMemoryMetadata, AotModuleContextMetadata, AotModuleShapeMetadata,
-        AotSourceMapEntry, AotTableMetadata, AotTarget, AotTargetArchitecture,
-        AotTargetOperatingSystem, EXECUTION_CONTEXT_ABI_VERSION,
+        AotElementSegmentMetadata, AotExecutionContextMetadata, AotExportMetadata,
+        AotFunctionMetadata, AotFunctionTypeMetadata, AotGlobalInitializerMetadata,
+        AotGlobalTypeMetadata, AotHelperId, AotImportDescMetadata, AotImportMetadata,
+        AotMemoryMetadata, AotModuleContextMetadata, AotModuleShapeMetadata, AotSourceMapEntry,
+        AotTableMetadata, AotTarget, AotTargetArchitecture, AotTargetOperatingSystem,
+        AOT_METADATA_MAGIC, EXECUTION_CONTEXT_ABI_VERSION,
     };
     use crate::backend::RelocationInfo;
     use crate::call_engine::ExecutionContext;
@@ -1610,7 +1792,7 @@ mod tests {
         EXECUTION_CONTEXT_OFFSET_TABLE_GROW_TRAMPOLINE_ADDRESS,
     };
     use crate::wazevoapi::ExitCode;
-    use razero_wasm::module::{ExternType, RefType, ValueType};
+    use razero_wasm::module::{ElementMode, ExternType, RefType, ValueType};
     use std::mem::size_of;
 
     #[test]
@@ -1689,6 +1871,16 @@ mod tests {
                 offset_expression: vec![0x41, 0x00, 0x0b],
                 init: b"hello".to_vec(),
                 passive: false,
+            }],
+            global_initializers: vec![AotGlobalInitializerMetadata {
+                init_expression: vec![0x41, 0x01, 0x0b],
+            }],
+            element_segments: vec![AotElementSegmentMetadata {
+                offset_expression: vec![0x41, 0x00, 0x0b],
+                table_index: 0,
+                init_expressions: vec![vec![0xd2, 0x03, 0x0b]],
+                ty: RefType::FUNCREF,
+                mode: ElementMode::Active,
             }],
             memory: Some(AotMemoryMetadata {
                 min: 2,
@@ -1893,7 +2085,8 @@ mod tests {
         };
 
         let mut encoded = serialize_aot_metadata(&metadata);
-        let trailing_metadata_len = 4 + 1 + 4 + 8 + (22 * 4) + 4 + metadata.helpers.len() * 10 + 4;
+        let trailing_metadata_len =
+            4 + 1 + 4 + 8 + (22 * 4) + 4 + metadata.helpers.len() * 10 + 4 + 4 + 4;
         encoded.truncate(encoded.len() - trailing_metadata_len);
 
         let decoded = deserialize_aot_metadata(&encoded).unwrap();
@@ -1908,6 +2101,32 @@ mod tests {
         );
         assert_eq!(decoded.helpers, current_helper_metadata());
         assert!(decoded.data_segments.is_empty());
+    }
+
+    #[test]
+    fn deserialize_rejects_invalid_memory_presence_flag() {
+        let metadata = AotCompiledMetadata {
+            memory: Some(AotMemoryMetadata {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                is_shared: false,
+            }),
+            ..AotCompiledMetadata::default()
+        };
+
+        let mut encoded = serialize_aot_metadata(&metadata);
+        let memory_flag_offset =
+            AOT_METADATA_MAGIC.len() + 2 + 32 + 4 + 2 + 4 + 4 + 48 + 4 + 4 + 52 + 8 + 4;
+        assert_eq!(encoded[memory_flag_offset], 1);
+        encoded[memory_flag_offset] = 2;
+
+        let err = deserialize_aot_metadata(&encoded).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "aot metadata: invalid memory metadata flag"
+        );
     }
 
     #[test]

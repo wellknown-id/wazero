@@ -371,21 +371,16 @@ impl CompiledModule {
                 self.aot.target.operating_system
             )));
         }
-        if self.aot.target.architecture != AotTargetArchitecture::X86_64 {
-            return Err(ObjectEmissionError::new(format!(
-                "relocatable object emission currently supports x86_64 only (got {:?})",
-                self.aot.target.architecture
-            )));
-        }
+        let object_architecture = relocatable_object_architecture(self.aot.target.architecture)?;
 
         let mut text_bytes = self.executables.executable.as_slice().to_vec();
-        normalize_x86_64_relocation_sites(&mut text_bytes, &self.aot.relocations)?;
+        normalize_relocation_sites(
+            self.aot.target.architecture,
+            &mut text_bytes,
+            &self.aot.relocations,
+        )?;
 
-        let mut object = ElfObject::new(
-            BinaryFormat::Elf,
-            ObjectArchitecture::X86_64,
-            Endianness::Little,
-        );
+        let mut object = ElfObject::new(BinaryFormat::Elf, object_architecture, Endianness::Little);
         object.add_file_symbol(b"razero-module".to_vec());
         let text_section = object.section_id(StandardSection::Text);
         object.set_section_data(text_section, text_bytes, 16);
@@ -412,16 +407,7 @@ impl CompiledModule {
             object
                 .add_relocation(
                     text_section,
-                    ElfRelocation {
-                        offset: x86_64_relocation_offset(relocation)?,
-                        symbol,
-                        addend: -4,
-                        flags: RelocationFlags::Generic {
-                            kind: RelocationKind::Relative,
-                            encoding: RelocationEncoding::X86Branch,
-                            size: 32,
-                        },
-                    },
+                    object_relocation(self.aot.target.architecture, relocation, symbol)?,
                 )
                 .map_err(|err| ObjectEmissionError::new(err.to_string()))?;
         }
@@ -459,6 +445,105 @@ impl CompiledModule {
             self.source_map.wasm_binary_offsets[index - 1]
         }
     }
+}
+
+fn relocatable_object_architecture(
+    architecture: AotTargetArchitecture,
+) -> Result<ObjectArchitecture, ObjectEmissionError> {
+    match architecture {
+        AotTargetArchitecture::X86_64 => Ok(ObjectArchitecture::X86_64),
+        AotTargetArchitecture::Aarch64 => Ok(ObjectArchitecture::Aarch64),
+        other => Err(ObjectEmissionError::new(format!(
+            "relocatable object emission currently supports x86_64 and aarch64 only (got {other:?})"
+        ))),
+    }
+}
+
+fn object_relocation(
+    architecture: AotTargetArchitecture,
+    relocation: &AotRelocationMetadata,
+    symbol: object::write::SymbolId,
+) -> Result<ElfRelocation, ObjectEmissionError> {
+    match architecture {
+        AotTargetArchitecture::X86_64 => Ok(ElfRelocation {
+            offset: x86_64_relocation_offset(relocation)?,
+            symbol,
+            addend: -4,
+            flags: RelocationFlags::Generic {
+                kind: RelocationKind::Relative,
+                encoding: RelocationEncoding::X86Branch,
+                size: 32,
+            },
+        }),
+        AotTargetArchitecture::Aarch64 => Ok(ElfRelocation {
+            offset: aarch64_relocation_offset(relocation)?,
+            symbol,
+            addend: 0,
+            flags: RelocationFlags::Generic {
+                kind: RelocationKind::Relative,
+                encoding: RelocationEncoding::AArch64Call,
+                size: 26,
+            },
+        }),
+        other => Err(ObjectEmissionError::new(format!(
+            "unsupported relocation architecture {other:?}"
+        ))),
+    }
+}
+
+fn normalize_relocation_sites(
+    architecture: AotTargetArchitecture,
+    text_bytes: &mut [u8],
+    relocations: &[AotRelocationMetadata],
+) -> Result<(), ObjectEmissionError> {
+    match architecture {
+        AotTargetArchitecture::X86_64 => normalize_x86_64_relocation_sites(text_bytes, relocations),
+        AotTargetArchitecture::Aarch64 => {
+            normalize_aarch64_relocation_sites(text_bytes, relocations)
+        }
+        other => Err(ObjectEmissionError::new(format!(
+            "unsupported relocation architecture {other:?}"
+        ))),
+    }
+}
+
+fn normalize_aarch64_relocation_sites(
+    text_bytes: &mut [u8],
+    relocations: &[AotRelocationMetadata],
+) -> Result<(), ObjectEmissionError> {
+    for relocation in relocations {
+        let offset = usize::try_from(relocation.executable_offset).map_err(|_| {
+            ObjectEmissionError::new(format!(
+                "invalid negative relocation offset {}",
+                relocation.executable_offset
+            ))
+        })?;
+        let text_len = text_bytes.len();
+        let word = if relocation.is_tail_call {
+            0x1400_0000u32
+        } else {
+            0x9400_0000u32
+        };
+        let range = text_bytes.get_mut(offset..offset + 4).ok_or_else(|| {
+            ObjectEmissionError::new(format!(
+                "relocation site at {offset} is out of bounds for {} bytes",
+                text_len
+            ))
+        })?;
+        range.copy_from_slice(&word.to_le_bytes());
+    }
+    Ok(())
+}
+
+fn aarch64_relocation_offset(
+    relocation: &AotRelocationMetadata,
+) -> Result<u64, ObjectEmissionError> {
+    u64::try_from(relocation.executable_offset).map_err(|_| {
+        ObjectEmissionError::new(format!(
+            "invalid negative relocation offset {}",
+            relocation.executable_offset
+        ))
+    })
 }
 
 fn import_function_symbols(
@@ -1459,7 +1544,8 @@ mod tests {
 
     use crate::aot::{
         deserialize_aot_metadata, AotCompiledMetadata, AotExecutionContextMetadata,
-        AotFunctionMetadata, AotHelperId, AotRelocationMetadata,
+        AotFunctionMetadata, AotHelperId, AotRelocationMetadata, AotTargetArchitecture,
+        AotTargetOperatingSystem,
     };
     use crate::engine_cache::InMemoryCompiledModuleCache;
     use crate::wazevoapi::ModuleContextOffsetData;
@@ -1721,7 +1807,10 @@ mod tests {
         assert!(compiled.function_ptr(0).is_some());
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     #[test]
     fn emit_relocatable_object_emits_elf_text_symbols_and_sidecar() {
         let mut engine = CompilerEngine::new();
@@ -1748,9 +1837,14 @@ mod tests {
         let artifact = compiled.emit_relocatable_object().unwrap();
         let file = object::File::parse(artifact.object_bytes.as_slice()).unwrap();
         let text = file.section_by_name(".text").unwrap();
+        let expected_architecture = match AotTargetArchitecture::current() {
+            AotTargetArchitecture::X86_64 => object::Architecture::X86_64,
+            AotTargetArchitecture::Aarch64 => object::Architecture::Aarch64,
+            other => panic!("unexpected native test architecture {other:?}"),
+        };
 
         assert_eq!(file.kind(), ObjectKind::Relocatable);
-        assert_eq!(file.architecture(), object::Architecture::X86_64);
+        assert_eq!(file.architecture(), expected_architecture);
         assert_eq!(text.kind(), SectionKind::Text);
         assert_eq!(text.align(), 16);
         assert_eq!(
@@ -1832,6 +1926,64 @@ mod tests {
         assert_eq!(&text.data().unwrap()[..5], &[0xE8, 0, 0, 0, 0]);
         assert_eq!(relocations.len(), 1);
         assert_eq!(relocations[0].0, 1);
+    }
+
+    #[test]
+    fn emit_relocatable_object_preserves_aarch64_call_relocations() {
+        let compiled = CompiledModule {
+            executables: Executables::from_executable_bytes(vec![
+                0xff, 0xff, 0xff, 0xff, 0xc0, 0x03, 0x5f, 0xd6,
+            ]),
+            function_offsets: vec![0, 4],
+            module: Module::default(),
+            offsets: ModuleContextOffsetData::default(),
+            aot: AotCompiledMetadata {
+                target: crate::aot::AotTarget {
+                    architecture: AotTargetArchitecture::Aarch64,
+                    operating_system: AotTargetOperatingSystem::Linux,
+                },
+                import_function_count: 0,
+                functions: vec![
+                    AotFunctionMetadata {
+                        local_function_index: 0,
+                        wasm_function_index: 0,
+                        type_index: 0,
+                        executable_offset: 0,
+                        executable_len: 4,
+                    },
+                    AotFunctionMetadata {
+                        local_function_index: 1,
+                        wasm_function_index: 1,
+                        type_index: 0,
+                        executable_offset: 4,
+                        executable_len: 4,
+                    },
+                ],
+                relocations: vec![AotRelocationMetadata {
+                    source_wasm_function_index: 0,
+                    target_function_index: 1,
+                    executable_offset: 0,
+                    is_tail_call: false,
+                }],
+                ..AotCompiledMetadata::default()
+            },
+            shared_functions: Arc::new(SharedFunctions::default()),
+            ensure_termination: false,
+            fuel_enabled: false,
+            fuel: 0,
+            memory_isolation_enabled: false,
+            source_map: SourceMap::default(),
+        };
+
+        let artifact = compiled.emit_relocatable_object().unwrap();
+        let file = object::File::parse(artifact.object_bytes.as_slice()).unwrap();
+        let text = file.section_by_name(".text").unwrap();
+        let relocations: Vec<_> = text.relocations().collect();
+
+        assert_eq!(file.architecture(), object::Architecture::Aarch64);
+        assert_eq!(&text.data().unwrap()[..4], &[0x00, 0x00, 0x00, 0x94]);
+        assert_eq!(relocations.len(), 1);
+        assert_eq!(relocations[0].0, 0);
     }
 
     #[test]

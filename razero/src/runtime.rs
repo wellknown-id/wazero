@@ -128,8 +128,15 @@ struct RuntimeInner {
     closed: AtomicU64,
 }
 
+// This runtime-owned cache format is distinct from razero-compiler native packaging
+// (`.razero-package` + ELF object/executable artifacts).
 const PRECOMPILED_ARTIFACT_MAGIC: &[u8; 8] = b"RZAOT001";
 
+/// Runtime-owned precompiled module artifact used by `razero` embedding APIs.
+///
+/// This format is intentionally separate from the native packaging ABI owned by
+/// `razero-compiler`. Packaged native executables do not replace the interpreter or the
+/// embedding/runtime APIs exposed by `razero`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PrecompiledArtifact {
     wasm_bytes: Vec<u8>,

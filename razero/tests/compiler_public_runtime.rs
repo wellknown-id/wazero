@@ -13,6 +13,20 @@ const HOST_IMPORT_WASM: &[u8] = &[
     0x00, 0x10, 0x00, 0x0b,
 ];
 
+fn register_increment_host_module(runtime: &Runtime) {
+    runtime
+        .new_host_module_builder("env")
+        .new_function_builder()
+        .with_func(
+            |_ctx, _module, params| Ok(vec![params[0] + 1]),
+            &[ValueType::I32],
+            &[ValueType::I32],
+        )
+        .export("inc")
+        .instantiate(&Context::default())
+        .unwrap();
+}
+
 #[test]
 fn compiler_public_runtime_executes_guest_exports() {
     if !razero_platform::compiler_supported() {
@@ -116,4 +130,69 @@ fn compiler_public_runtime_executes_host_imports_from_precompiled_artifact() {
         vec![42],
         guest.exported_function("run").unwrap().call(&[41]).unwrap()
     );
+}
+
+#[test]
+fn public_runtime_executes_multiple_host_imports_across_supported_flows() {
+    for config in [
+        RuntimeConfig::new_interpreter(),
+        RuntimeConfig::new_compiler(),
+    ] {
+        if config.engine_kind() == razero::RuntimeEngineKind::Compiler
+            && !razero_platform::compiler_supported()
+        {
+            continue;
+        }
+
+        let runtime = Runtime::with_config(config);
+        register_increment_host_module(&runtime);
+        let guest = runtime
+            .instantiate_binary(HOST_IMPORT_WASM, ModuleConfig::new())
+            .unwrap();
+        assert_eq!(
+            vec![42],
+            guest.exported_function("run").unwrap().call(&[41]).unwrap()
+        );
+    }
+
+    if !razero_platform::compiler_supported() {
+        return;
+    }
+
+    let runtime = Runtime::with_config(RuntimeConfig::new_compiler());
+    register_increment_host_module(&runtime);
+    let artifact = runtime
+        .build_precompiled_artifact(HOST_IMPORT_WASM)
+        .unwrap();
+    let guest = runtime
+        .instantiate_precompiled_artifact(&artifact, ModuleConfig::new())
+        .unwrap();
+
+    assert_eq!(
+        vec![42],
+        guest.exported_function("run").unwrap().call(&[41]).unwrap()
+    );
+}
+
+#[test]
+fn interpreter_runtime_rejects_precompiled_artifacts() {
+    if !razero_platform::compiler_supported() {
+        return;
+    }
+
+    let compiler_runtime = Runtime::with_config(RuntimeConfig::new_compiler());
+    let artifact = compiler_runtime
+        .build_precompiled_artifact(ADD_ONE_WASM)
+        .unwrap();
+    let interpreter_runtime = Runtime::with_config(RuntimeConfig::new_interpreter());
+    let err = match interpreter_runtime
+        .instantiate_precompiled_artifact(&artifact, ModuleConfig::new())
+    {
+        Ok(_) => panic!("interpreter runtime unexpectedly accepted a precompiled artifact"),
+        Err(err) => err,
+    };
+
+    assert!(err
+        .to_string()
+        .contains("precompiled artifacts are unsupported by this engine"));
 }

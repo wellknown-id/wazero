@@ -1,4 +1,4 @@
-#![doc = "Minimal Linux/x86_64 startup support for linked AOT objects."]
+#![doc = "Minimal Linux/ELF startup support for linked AOT objects.\n\nThe versioned ABI assumptions are documented in `../AOT_PACKAGING_ABI.md`. This module intentionally covers a much narrower runtime shape than the general linker path and does not replace `razero`'s interpreter/runtime embedding APIs."]
 
 use std::fmt::{Display, Formatter};
 
@@ -13,14 +13,49 @@ use crate::backend::machine::Machine;
 use crate::call_engine::{CallEngine, CallEngineError};
 use crate::engine::AlignedBytes;
 use crate::frontend::signature_for_wasm_function_type;
+use crate::runtime_state::{build_linked_runtime_plan, LinkedRuntimePlan};
 use razero_wasm::engine::EngineError;
 
+/// Metadata-driven startup/call surface for a narrowly supported linked AOT module.
+///
+/// The stable inputs are the linked raw function symbols plus the serialized AOT sidecar. This
+/// helper supports the current metadata-driven linked-runtime slice: local memory/globals/tables,
+/// active data/element initialization, and start-section execution for modules without imports.
 #[derive(Debug)]
 pub struct LinkedModule {
     metadata: AotCompiledMetadata,
     text_base: usize,
     entry_preambles: AlignedBytes,
     entry_preamble_offsets: Vec<usize>,
+    runtime_state: LinkedRuntimeState,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+struct LinkedRuntimeState {
+    module_context: AlignedBytes,
+    memory_bytes: Option<Vec<u8>>,
+    type_ids: Vec<u32>,
+    function_instances: Vec<LinkedFunctionInstance>,
+    table_elements: Vec<Vec<usize>>,
+    tables: Vec<LinkedTableInstance>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+struct LinkedFunctionInstance {
+    executable_ptr: usize,
+    module_context_ptr: usize,
+    type_id: u32,
+    reserved: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+struct LinkedTableInstance {
+    base_address: *const usize,
+    len: u32,
+    reserved: u32,
 }
 
 #[derive(Debug)]
@@ -62,12 +97,18 @@ impl LinkedModule {
     ) -> Result<Self, LinkedModuleError> {
         validate_metadata(&metadata)?;
         let (entry_preambles, entry_preamble_offsets) = compile_entry_preambles(&metadata)?;
-        Ok(Self {
+        let runtime_state = LinkedRuntimeState::new(&metadata, text_base)?;
+        let linked = Self {
             metadata,
             text_base,
             entry_preambles,
             entry_preamble_offsets,
-        })
+            runtime_state,
+        };
+        if let Some(start_index) = linked.metadata.start_function_index {
+            linked.run_void_function(start_index)?;
+        }
+        Ok(linked)
     }
 
     pub fn from_metadata_and_first_local_function(
@@ -113,28 +154,21 @@ impl LinkedModule {
     }
 
     pub fn start(&self) -> Result<(), LinkedModuleError> {
+        if self.metadata.start_function_index.is_some() {
+            return Ok(());
+        }
         let target = self
             .metadata
-            .start_function_index
-            .or_else(|| {
-                self.metadata
-                    .exports
-                    .iter()
-                    .find(|export| export.ty == ExternType::FUNC && export.name == "_start")
-                    .map(|export| export.index)
-            })
+            .exports
+            .iter()
+            .find(|export| export.ty == ExternType::FUNC && export.name == "_start")
+            .map(|export| export.index)
             .ok_or_else(|| {
                 LinkedModuleError::InvalidMetadata(
                     "linked module metadata has no start function".to_string(),
                 )
             })?;
-        let results = self.call_function_index(target, &[])?;
-        if !results.is_empty() {
-            return Err(LinkedModuleError::Unsupported(
-                "start functions must not return values".to_string(),
-            ));
-        }
-        Ok(())
+        self.run_void_function(target)
     }
 
     fn call_function_index(
@@ -187,7 +221,7 @@ impl LinkedModule {
             wasm_function_index,
             executable_ptr,
             preamble_ptr,
-            0,
+            self.runtime_state.module_context_ptr(),
             slots,
             ty.param_num_in_u64,
             ty.result_num_in_u64,
@@ -197,57 +231,178 @@ impl LinkedModule {
         );
         Ok(call_engine.call(&mut stack)?.to_vec())
     }
+
+    fn run_void_function(&self, wasm_function_index: Index) -> Result<(), LinkedModuleError> {
+        let results = self.call_function_index(wasm_function_index, &[])?;
+        if !results.is_empty() {
+            return Err(LinkedModuleError::Unsupported(
+                "start functions must not return values".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn validate_metadata(metadata: &AotCompiledMetadata) -> Result<(), LinkedModuleError> {
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    #[cfg(not(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64")
+    )))]
     {
         let _ = metadata;
         return Err(LinkedModuleError::Unsupported(
-            "linked AOT startup support currently targets Linux/x86_64 only".to_string(),
+            "linked AOT startup support currently targets Linux/x86_64 and Linux/aarch64 only"
+                .to_string(),
         ));
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64")
+    ))]
     {
+        let supported_architecture = crate::aot::AotTargetArchitecture::current();
         if metadata.target.operating_system != crate::aot::AotTargetOperatingSystem::Linux
-            || metadata.target.architecture != crate::aot::AotTargetArchitecture::X86_64
+            || metadata.target.architecture != supported_architecture
         {
-            return Err(LinkedModuleError::Unsupported(
-                "linked module metadata does not target Linux/x86_64".to_string(),
-            ));
+            return Err(LinkedModuleError::Unsupported(format!(
+                "linked module metadata does not target Linux/{}",
+                supported_architecture.name()
+            )));
         }
         if metadata.execution_context != AotExecutionContextMetadata::current() {
             return Err(LinkedModuleError::Unsupported(
                 "linked module execution-context ABI does not match this runtime".to_string(),
             ));
         }
-        if metadata.module_shape.is_host_module {
-            return Err(LinkedModuleError::Unsupported(
-                "host modules are not supported by linked startup support".to_string(),
-            ));
-        }
-        if metadata.module_shape.import_function_count != 0
-            || metadata.module_shape.import_global_count != 0
-            || metadata.module_shape.import_memory_count != 0
-            || metadata.module_shape.import_table_count != 0
-            || metadata.module_shape.local_global_count != 0
-            || metadata.module_shape.local_table_count != 0
-            || metadata.module_shape.has_any_memory
-            || metadata.module_shape.data_segment_count != 0
-            || metadata.module_shape.element_segment_count != 0
-            || metadata.ensure_termination
-        {
-            return Err(LinkedModuleError::Unsupported(
-                "linked startup support currently requires modules without imports, memory, tables, globals, data, or runtime-injected helpers".to_string(),
-            ));
-        }
-        if metadata.functions.is_empty() {
-            return Err(LinkedModuleError::InvalidMetadata(
-                "linked module metadata does not contain any compiled local functions".to_string(),
-            ));
-        }
+        build_linked_runtime_plan(metadata).map_err(LinkedModuleError::Unsupported)?;
         Ok(())
     }
+}
+
+impl LinkedRuntimeState {
+    fn new(metadata: &AotCompiledMetadata, text_base: usize) -> Result<Self, LinkedModuleError> {
+        let plan = build_linked_runtime_plan(metadata).map_err(LinkedModuleError::Unsupported)?;
+        let LinkedRuntimePlan {
+            memory_bytes,
+            globals,
+            tables: table_plans,
+            type_ids,
+        } = plan;
+        let mut function_instances = metadata
+            .functions
+            .iter()
+            .map(|function| LinkedFunctionInstance {
+                executable_ptr: text_base + function.executable_offset,
+                module_context_ptr: 0,
+                type_id: function.type_index,
+                reserved: 0,
+            })
+            .collect::<Vec<_>>();
+        let mut table_elements = table_plans
+            .iter()
+            .map(|table| vec![0usize; table.elements.len()])
+            .collect::<Vec<_>>();
+        let mut tables = table_plans
+            .iter()
+            .map(|table| LinkedTableInstance {
+                base_address: std::ptr::null(),
+                len: table.elements.len() as u32,
+                reserved: 0,
+            })
+            .collect::<Vec<_>>();
+        let mut module_context = AlignedBytes::zeroed(metadata.module_context.total_size.max(1));
+        let module_context_ptr = module_context.as_ptr() as usize;
+        for function_instance in &mut function_instances {
+            function_instance.module_context_ptr = module_context_ptr;
+        }
+        for (table_index, table) in table_plans.iter().enumerate() {
+            for (element_index, wasm_function_index) in table.elements.iter().enumerate() {
+                table_elements[table_index][element_index] = wasm_function_index
+                    .and_then(|wasm_function_index| {
+                        metadata.functions.iter().position(|function| {
+                            function.wasm_function_index == wasm_function_index
+                        })
+                    })
+                    .map(|slot| &function_instances[slot] as *const LinkedFunctionInstance as usize)
+                    .unwrap_or(0);
+            }
+            tables[table_index].base_address = table_elements[table_index].as_ptr();
+        }
+        initialize_module_context(
+            metadata,
+            memory_bytes.as_deref(),
+            &globals,
+            &mut module_context,
+            &type_ids,
+            &tables,
+        );
+        Ok(Self {
+            module_context,
+            memory_bytes,
+            type_ids,
+            function_instances,
+            table_elements,
+            tables,
+        })
+    }
+
+    fn module_context_ptr(&self) -> usize {
+        self.module_context.as_ptr() as usize
+    }
+}
+
+fn initialize_module_context(
+    metadata: &AotCompiledMetadata,
+    memory_bytes: Option<&[u8]>,
+    globals: &[crate::runtime_state::LinkedGlobalValue],
+    module_context: &mut AlignedBytes,
+    type_ids: &[u32],
+    tables: &[LinkedTableInstance],
+) {
+    let bytes = module_context.as_mut_slice();
+    if metadata.module_context.local_memory_begin >= 0 {
+        let offset = metadata.module_context.local_memory_begin as usize;
+        let (base, len) = memory_bytes
+            .map(|memory| {
+                (
+                    memory
+                        .first()
+                        .map_or(0usize, |byte| byte as *const u8 as usize),
+                    memory.len(),
+                )
+            })
+            .unwrap_or((0, 0));
+        write_u64(bytes, offset, base as u64);
+        write_u64(bytes, offset + 8, len as u64);
+    }
+    if metadata.module_context.globals_begin >= 0 {
+        let mut offset = metadata.module_context.globals_begin as usize;
+        for global in globals {
+            write_u64(bytes, offset, global.value_lo);
+            write_u64(bytes, offset + 8, global.value_hi);
+            offset += 16;
+        }
+    }
+    if metadata.module_context.type_ids_1st_element >= 0 && !type_ids.is_empty() {
+        write_u64(
+            bytes,
+            metadata.module_context.type_ids_1st_element as usize,
+            type_ids.as_ptr() as usize as u64,
+        );
+    }
+    if metadata.module_context.tables_begin >= 0 {
+        for (index, table) in tables.iter().enumerate() {
+            write_u64(
+                bytes,
+                metadata.module_context.tables_begin as usize + index * 8,
+                table as *const LinkedTableInstance as usize as u64,
+            );
+        }
+    }
+}
+
+fn write_u64(bytes: &mut [u8], offset: usize, value: u64) {
+    bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
 }
 
 fn compile_entry_preambles(
@@ -291,10 +446,17 @@ fn native_compile_entry_preamble(ty: &AotFunctionTypeMetadata) -> Result<Vec<u8>
 
 #[cfg(test)]
 mod tests {
+    use razero_features::CoreFeatures;
     use razero_wasm::engine::Engine;
-    use razero_wasm::module::{Code, Export, ExternType, FunctionType, Module, ValueType};
+    use razero_wasm::module::{
+        Code, ConstExpr, DataSegment, ElementMode, ElementSegment, Export, ExternType,
+        FunctionType, Global, GlobalType, Module, RefType, Table, ValueType,
+    };
 
     use super::LinkedModule;
+    use crate::aot::{
+        AotExecutionContextMetadata, AotTargetArchitecture, AotTargetOperatingSystem,
+    };
     use crate::engine::CompilerEngine;
 
     fn function_type(params: &[ValueType], results: &[ValueType]) -> FunctionType {
@@ -305,7 +467,10 @@ mod tests {
         ty
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     #[test]
     fn linked_module_calls_exported_function() {
         let mut engine = CompilerEngine::new();
@@ -335,7 +500,10 @@ mod tests {
         assert_eq!(linked.call_export("run", &[41]).unwrap(), vec![42]);
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     #[test]
     fn linked_module_runs_start_export_when_no_start_section_exists() {
         let mut engine = CompilerEngine::new();
@@ -365,9 +533,91 @@ mod tests {
         linked.start().unwrap();
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     #[test]
-    fn linked_module_rejects_runtime_dependent_shapes() {
+    fn linked_module_initializes_runtime_state_from_metadata() {
+        let mut engine = CompilerEngine::new();
+        let module = Module {
+            type_section: vec![
+                function_type(&[], &[]),
+                function_type(&[], &[ValueType::I32]),
+            ],
+            function_section: vec![1, 0, 1],
+            table_section: vec![Table {
+                min: 1,
+                max: Some(1),
+                ty: RefType::FUNCREF,
+            }],
+            memory_section: Some(razero_wasm::module::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                ..razero_wasm::module::Memory::default()
+            }),
+            global_section: vec![Global {
+                ty: GlobalType {
+                    val_type: ValueType::I32,
+                    mutable: false,
+                },
+                init: ConstExpr::from_i32(0),
+            }],
+            code_section: vec![
+                Code {
+                    body: vec![0x41, 0x07, 0x0b],
+                    ..Code::default()
+                },
+                Code {
+                    body: vec![0x0b],
+                    ..Code::default()
+                },
+                Code {
+                    body: vec![0x41, 0x05, 0x0b],
+                    ..Code::default()
+                },
+            ],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 2,
+            }],
+            start_section: Some(1),
+            data_section: vec![DataSegment {
+                offset_expression: ConstExpr::from_opcode(0x23, &[0]),
+                init: vec![5],
+                passive: false,
+            }],
+            element_section: vec![ElementSegment {
+                offset_expr: ConstExpr::from_opcode(0x23, &[0]),
+                table_index: 0,
+                init: vec![ConstExpr::from_opcode(0xd2, &[0])],
+                ty: RefType::FUNCREF,
+                mode: ElementMode::Active,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+
+        engine.compile_module(&module).unwrap();
+        let compiled = engine.compiled_module(&module).unwrap();
+        let linked = LinkedModule::from_metadata_and_first_local_function(
+            compiled.aot.clone(),
+            compiled.function_ptr(0).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(linked.call_export("run", &[]).unwrap(), vec![5]);
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn linked_module_rejects_imported_runtime_shapes() {
         let mut engine = CompilerEngine::new();
         let module = Module {
             type_section: vec![function_type(&[], &[])],
@@ -396,6 +646,78 @@ mod tests {
 
         assert!(err
             .to_string()
-            .contains("requires modules without imports, memory, tables, globals, data, or runtime-injected helpers"));
+            .contains("linked runtime packaging currently requires modules without imports"));
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn linked_module_rejects_non_linux_x86_64_targets() {
+        let mut engine = CompilerEngine::new();
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x41, 0x01, 0x6a, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            ..Module::default()
+        };
+
+        engine.compile_module(&module).unwrap();
+        let compiled = engine.compiled_module(&module).unwrap();
+        let mut metadata = compiled.aot.clone();
+        metadata.target.operating_system = AotTargetOperatingSystem::Windows;
+        metadata.target.architecture = AotTargetArchitecture::Aarch64;
+        let err = LinkedModule::from_metadata_and_first_local_function(
+            metadata,
+            compiled.function_ptr(0).unwrap(),
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("linked module metadata does not target Linux/x86_64"));
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn linked_module_rejects_execution_context_abi_mismatch() {
+        let mut engine = CompilerEngine::new();
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x41, 0x01, 0x6a, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            ..Module::default()
+        };
+
+        engine.compile_module(&module).unwrap();
+        let compiled = engine.compiled_module(&module).unwrap();
+        let mut metadata = compiled.aot.clone();
+        metadata.execution_context = AotExecutionContextMetadata {
+            abi_version: AotExecutionContextMetadata::current().abi_version + 1,
+            ..metadata.execution_context.clone()
+        };
+        let err = LinkedModule::from_metadata_and_first_local_function(
+            metadata,
+            compiled.function_ptr(0).unwrap(),
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("linked module execution-context ABI does not match this runtime"));
     }
 }

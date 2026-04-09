@@ -20,9 +20,26 @@ Expected output:
 hello world from guest
 ```
 
+## Supported packaging contract
+
+The frozen Rust AOT packaging ABI now lives in
+`razero-compiler/AOT_PACKAGING_ABI.md`.
+
+Key points for this example and future packaging work:
+
+- `.razero-package` stores module metadata plus explicit packaged host-import
+  descriptors.
+- execution-context offsets, module-context offsets, helper IDs, and the
+  documented link-visible symbols are treated as supported ABI.
+- the general native-link path remains Linux/ELF first and C ABI first.
+- `hello-host` now uses the reusable packaged host-import descriptor path, while
+  keeping its concrete host behavior explicit.
+- `razero` keeps owning interpreter/runtime embedding and precompiled artifacts;
+  `razero-ffi` remains optional.
+
 ## Native packaging status in the Rust port
 
-The Rust port now also has a first **Linux/x86_64** AOT packaging slice for this
+The Rust port now also has a first **Linux/ELF** AOT packaging slice for this
 guest.
 
 Current building blocks:
@@ -32,16 +49,25 @@ Current building blocks:
 - `razero_compiler::linker::link_native_executable(...)` links modules whose
   exported functions fit the current scalar C ABI wrapper surface.
 - `razero_compiler::linker::link_hello_host_executable(...)` packages this
-  specific `hello-host` guest by wiring the guest's `env.print(ptr, len)` import
-  to a tiny generated host stub that prints from guest memory.
+  specific `hello-host` guest by emitting a packaged host descriptor for
+  `env.print(ptr, len)` and wiring it to an explicit generated host stub that
+  prints from guest memory.
 
 This path is intentionally narrow today:
 
-- Linux/x86_64 only
+- Linux/x86_64 and Linux/aarch64
 - no WASI
-- intended for AOT-linked execution, not interpreter embedding
-- `hello-host` packaging is specialized to the current example shape:
-  one `env.print(i32, i32)` import, one local memory, and an exported `run()`
+- interpreter support remains a required product path; this is an additional
+  AOT-linked deployment target, not a replacement
+- host ownership stays explicit: the linker/runtime support dispatches through
+  declared packaged host descriptors instead of hidden runtime behavior
+- runtime-state packaging is still specialized to the current example shape:
+  one local memory, active data loading, one `env.print(i32, i32)` import, and
+  an exported `run()`
+
+The frozen contract for the current Rust AOT packaging slice lives in
+`razero-compiler/AOT_PACKAGING_ABI.md`. That document defines what is treated as
+versioned/link-visible/package-stable versus what remains private/internal.
 
 The end-to-end proof currently lives in
 `razero-compiler/src/linker.rs::link_hello_host_executable_runs_example_guest`,

@@ -1,4 +1,4 @@
-#![doc = "Scaffold for the razero optimizing compiler crate."]
+#![doc = "Scaffold for the razero optimizing compiler crate.\n\nSee `../AOT_PACKAGING_ABI.md` for the frozen Rust AOT packaging contract."]
 
 pub mod aot;
 pub mod backend;
@@ -16,6 +16,7 @@ pub mod isa_other;
 pub mod linker;
 pub mod memmove;
 pub mod module_engine;
+mod runtime_state;
 pub mod runtime_support;
 pub mod sighandler_linux;
 pub mod sighandler_linux_amd64;
