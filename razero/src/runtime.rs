@@ -868,6 +868,13 @@ fn resolve_imports_with_context(
         return Ok(());
     };
 
+    let module_name = module
+        .name_section
+        .as_ref()
+        .map(|names| names.module_name.clone())
+        .unwrap_or_default();
+    let observer = ctx.import_resolver_observer.clone();
+
     for import_name in module
         .import_section
         .iter()
@@ -875,20 +882,84 @@ fn resolve_imports_with_context(
         .collect::<std::collections::BTreeSet<_>>()
     {
         if let Some(acl) = cfg.acl.as_ref() {
-            acl.check_import(import_name)?;
+            if let Err(err) = acl.check_import(import_name) {
+                notify_import_resolver_observer(
+                    &observer,
+                    ctx,
+                    &module_name,
+                    import_name,
+                    None,
+                    crate::ImportResolverEvent::AclDenied,
+                );
+                return Err(err);
+            }
+            notify_import_resolver_observer(
+                &observer,
+                ctx,
+                &module_name,
+                import_name,
+                None,
+                crate::ImportResolverEvent::AclAllowed,
+            );
         }
         if let Some(module) = cfg.resolver.as_ref().and_then(|resolver| resolver(import_name)) {
+            notify_import_resolver_observer(
+                &observer,
+                ctx,
+                &module_name,
+                import_name,
+                Some(module.clone()),
+                crate::ImportResolverEvent::ResolverResolved,
+            );
             module.register_import_alias(import_name)?;
             continue;
         }
         if cfg.fail_closed {
+            notify_import_resolver_observer(
+                &observer,
+                ctx,
+                &module_name,
+                import_name,
+                None,
+                crate::ImportResolverEvent::FailClosedDenied,
+            );
             return Err(RuntimeError::new(format!(
                 "module[{import_name}] unresolved by import resolver"
             )));
         }
+        notify_import_resolver_observer(
+            &observer,
+            ctx,
+            &module_name,
+            import_name,
+            None,
+            crate::ImportResolverEvent::StoreFallback,
+        );
     }
 
     Ok(())
+}
+
+fn notify_import_resolver_observer(
+    observer: &Option<Arc<dyn crate::ImportResolverObserver>>,
+    ctx: &Context,
+    module_name: &str,
+    import_module: &str,
+    resolved_module: Option<Module>,
+    event: crate::ImportResolverEvent,
+) {
+    let Some(observer) = observer else {
+        return;
+    };
+    observer.observe_import_resolution(
+        ctx,
+        crate::ImportResolverObservation {
+            module_name: module_name.to_string(),
+            import_module: import_module.to_string(),
+            resolved_module,
+            event,
+        },
+    );
 }
 
 #[allow(dead_code)]
@@ -2094,6 +2165,7 @@ mod tests {
         }
     }
 
+
     #[test]
     fn runtime_defaults_to_interpreter_until_auto_is_safe() {
         let runtime = Runtime::new();
@@ -2487,6 +2559,35 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct ImportObserverRecord {
+        import_module: String,
+        event: crate::ImportResolverEvent,
+        resolved: bool,
+    }
+
+    #[derive(Clone)]
+    struct RecordingImportResolverObserver {
+        events: Arc<Mutex<Vec<ImportObserverRecord>>>,
+    }
+
+    impl crate::ImportResolverObserver for RecordingImportResolverObserver {
+        fn observe_import_resolution(
+            &self,
+            _ctx: &Context,
+            observation: crate::ImportResolverObservation,
+        ) {
+            self.events
+                .lock()
+                .expect("import observer events poisoned")
+                .push(ImportObserverRecord {
+                    import_module: observation.import_module,
+                    event: observation.event,
+                    resolved: observation.resolved_module.is_some(),
+                });
+        }
+    }
+
     #[test]
     fn import_resolver_acl_allows_store_fallback_by_exact_name() {
         let runtime = Runtime::new();
@@ -2532,6 +2633,58 @@ mod tests {
     }
 
     #[test]
+    fn import_resolver_observer_reports_acl_allowed_then_store_fallback() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("env")
+            .new_function_builder()
+            .with_callback(|_ctx, _module, _params| Ok(Vec::new()), &[], &[])
+            .export("start")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let ctx = crate::with_import_resolver_observer(
+            &crate::experimental::with_import_resolver_acl(
+                &Context::default(),
+                crate::experimental::ImportACL::new().allow_modules(["env"]),
+            ),
+            RecordingImportResolverObserver {
+                events: events.clone(),
+            },
+        );
+        let compiled_guest = runtime
+            .compile(&[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
+                0x00, 0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r',
+                b't', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u',
+                b'n', 0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+            ])
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_with_context(&ctx, &compiled_guest, ModuleConfig::new())
+            .unwrap();
+        guest.exported_function("run").unwrap().call(&[]).unwrap();
+
+        assert_eq!(
+            vec![
+                ImportObserverRecord {
+                    import_module: "env".to_string(),
+                    event: crate::ImportResolverEvent::AclAllowed,
+                    resolved: false,
+                },
+                ImportObserverRecord {
+                    import_module: "env".to_string(),
+                    event: crate::ImportResolverEvent::StoreFallback,
+                    resolved: false,
+                },
+            ],
+            *events.lock().expect("import observer events poisoned")
+        );
+    }
+
+    #[test]
     fn import_resolver_acl_denies_store_import_by_exact_name() {
         let runtime = Runtime::new();
         runtime
@@ -2560,6 +2713,51 @@ mod tests {
             .err()
             .expect("instantiation should fail");
         assert!(err.to_string().contains("module[env] denied by import ACL"));
+    }
+
+    #[test]
+    fn import_resolver_observer_reports_acl_denial() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("env")
+            .new_function_builder()
+            .with_callback(|_ctx, _module, _params| Ok(Vec::new()), &[], &[])
+            .export("start")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let ctx = crate::with_import_resolver_observer(
+            &crate::experimental::with_import_resolver_acl(
+                &Context::default(),
+                crate::experimental::ImportACL::new().deny_modules(["env"]),
+            ),
+            RecordingImportResolverObserver {
+                events: events.clone(),
+            },
+        );
+        let compiled_guest = runtime
+            .compile(&[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
+                0x00, 0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r',
+                b't', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u',
+                b'n', 0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+            ])
+            .unwrap();
+
+        let err = runtime
+            .instantiate_with_context(&ctx, &compiled_guest, ModuleConfig::new())
+            .err()
+            .expect("instantiation should fail");
+        assert!(err.to_string().contains("module[env] denied by import ACL"));
+        assert_eq!(
+            vec![ImportObserverRecord {
+                import_module: "env".to_string(),
+                event: crate::ImportResolverEvent::AclDenied,
+                resolved: false,
+            }],
+            *events.lock().expect("import observer events poisoned")
+        );
     }
 
     #[test]
@@ -2633,6 +2831,64 @@ mod tests {
     }
 
     #[test]
+    fn import_resolver_observer_reports_fail_closed_denial() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("env")
+            .new_function_builder()
+            .with_callback(|_ctx, _module, _params| Ok(Vec::new()), &[], &[])
+            .export("start")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let ctx = crate::with_import_resolver_observer(
+            &crate::experimental::with_import_resolver_config(
+                &Context::default(),
+                crate::experimental::ImportResolverConfig {
+                    acl: Some(crate::experimental::ImportACL::new().allow_modules(["env"])),
+                    fail_closed: true,
+                    ..crate::experimental::ImportResolverConfig::default()
+                },
+            ),
+            RecordingImportResolverObserver {
+                events: events.clone(),
+            },
+        );
+        let compiled_guest = runtime
+            .compile(&[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
+                0x00, 0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r',
+                b't', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u',
+                b'n', 0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+            ])
+            .unwrap();
+
+        let err = runtime
+            .instantiate_with_context(&ctx, &compiled_guest, ModuleConfig::new())
+            .err()
+            .expect("instantiation should fail");
+        assert!(err
+            .to_string()
+            .contains("module[env] unresolved by import resolver"));
+        assert_eq!(
+            vec![
+                ImportObserverRecord {
+                    import_module: "env".to_string(),
+                    event: crate::ImportResolverEvent::AclAllowed,
+                    resolved: false,
+                },
+                ImportObserverRecord {
+                    import_module: "env".to_string(),
+                    event: crate::ImportResolverEvent::FailClosedDenied,
+                    resolved: false,
+                },
+            ],
+            *events.lock().expect("import observer events poisoned")
+        );
+    }
+
+    #[test]
     fn import_resolver_config_resolver_links_anonymous_module_instances() {
         let runtime = Runtime::new();
         let resolved_count = Arc::new(AtomicU32::new(0));
@@ -2686,6 +2942,76 @@ mod tests {
         guest.exported_function("run").unwrap().call(&[]).unwrap();
 
         assert_eq!(1, resolved_count.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn import_resolver_observer_reports_resolver_resolution() {
+        let runtime = Runtime::new();
+        let resolved_count = Arc::new(AtomicU32::new(0));
+        let compiled_host = runtime
+            .new_host_module_builder("env0")
+            .new_function_builder()
+            .with_func(
+                {
+                    let resolved_count = resolved_count.clone();
+                    move |_ctx, _module, _params| {
+                        resolved_count.fetch_add(1, Ordering::SeqCst);
+                        Ok(Vec::new())
+                    }
+                },
+                &[],
+                &[],
+            )
+            .with_name("start")
+            .export("start")
+            .compile(&Context::default())
+            .unwrap();
+        let anonymous_import = runtime
+            .instantiate_with_context(
+                &Context::default(),
+                &compiled_host,
+                ModuleConfig::new().with_name(""),
+            )
+            .unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let ctx = crate::with_import_resolver_observer(
+            &crate::experimental::with_import_resolver_config(
+                &Context::default(),
+                crate::experimental::ImportResolverConfig {
+                    resolver: Some(Arc::new(move |name| {
+                        (name == "env").then_some(anonymous_import.clone())
+                    })),
+                    ..crate::experimental::ImportResolverConfig::default()
+                },
+            ),
+            RecordingImportResolverObserver {
+                events: events.clone(),
+            },
+        );
+        let compiled_guest = runtime
+            .compile(&[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
+                0x00, 0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r',
+                b't', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u',
+                b'n', 0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+            ])
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_with_context(&ctx, &compiled_guest, ModuleConfig::new())
+            .unwrap();
+        guest.exported_function("run").unwrap().call(&[]).unwrap();
+
+        assert_eq!(1, resolved_count.load(Ordering::SeqCst));
+        assert_eq!(
+            vec![ImportObserverRecord {
+                import_module: "env".to_string(),
+                event: crate::ImportResolverEvent::ResolverResolved,
+                resolved: true,
+            }],
+            *events.lock().expect("import observer events poisoned")
+        );
     }
 
     #[test]

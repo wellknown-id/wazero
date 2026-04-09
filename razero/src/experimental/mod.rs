@@ -5,6 +5,7 @@ pub mod experimental;
 pub mod features;
 pub mod fuel;
 pub mod import_resolver;
+pub mod import_resolver_observer;
 pub mod listener;
 pub mod memory;
 pub mod snapshotter;
@@ -26,6 +27,10 @@ pub use import_resolver::{
     get_import_resolver, get_import_resolver_config, with_import_resolver,
     with_import_resolver_acl, with_import_resolver_config, ImportACL, ImportResolver,
     ImportResolverConfig,
+};
+pub use import_resolver_observer::{
+    get_import_resolver_observer, with_import_resolver_observer, ImportResolverEvent,
+    ImportResolverObservation, ImportResolverObserver,
 };
 pub use listener::{
     benchmark_function_listener, new_stack_iterator, with_function_listener_factory,

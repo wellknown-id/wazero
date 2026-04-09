@@ -56,6 +56,8 @@ pub struct Context {
     pub(crate) close_notifier: Option<Arc<dyn CloseNotifier>>,
     pub(crate) import_resolver:
         Option<crate::experimental::import_resolver::ImportResolverConfig>,
+    pub(crate) import_resolver_observer:
+        Option<Arc<dyn crate::experimental::import_resolver_observer::ImportResolverObserver>>,
     pub(crate) invocation: Option<InvocationContext>,
 }
 
