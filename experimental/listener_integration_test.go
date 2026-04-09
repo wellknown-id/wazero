@@ -2367,6 +2367,148 @@ func TestFunctionListener_YieldObserverOrderingWithMultiFunctionListener(t *test
 	}
 }
 
+func TestFunctionListener_MultiYieldObserver_ReyieldUsesResumedObserver(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
+
+			ctx := context.Background()
+			recorder := &orderedEventRecorder{}
+			leftEvents := &recordingFunctionListener{}
+			rightEvents := &recordingFunctionListener{}
+			instantiateCtx := experimental.WithFunctionListenerFactory(ctx, experimental.MultiFunctionListenerFactory(
+				newFunctionListenerFactory(&namedOrderedRecordingFunctionListener{
+					name:     "listener left",
+					recorder: recorder,
+					events:   leftEvents,
+				}),
+				newFunctionListenerFactory(&namedOrderedRecordingFunctionListener{
+					name:     "listener right",
+					recorder: recorder,
+					events:   rightEvents,
+				}),
+			))
+
+			rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg)
+			defer rt.Close(ctx)
+
+			_, err := rt.NewHostModuleBuilder("example").
+				NewFunctionBuilder().
+				WithGoModuleFunction(&yieldingHostFunc{t: t}, nil, []api.ValueType{api.ValueTypeI32}).
+				Export("async_work").
+				Instantiate(instantiateCtx)
+			require.NoError(t, err)
+
+			mod, err := rt.InstantiateWithConfig(instantiateCtx, yieldWasm, wazero.NewModuleConfig().WithName("guest"))
+			require.NoError(t, err)
+
+			initialLeft := &recordingYieldObserver{}
+			initialRight := &recordingYieldObserver{}
+			initialProvider := newObservingTimeProvider()
+			_, err = mod.ExportedFunction("run_twice").Call(
+				experimental.WithYieldObserver(
+					experimental.WithTimeProvider(experimental.WithYielder(ctx), initialProvider),
+					experimental.MultiYieldObserver(
+						experimental.YieldObserverFunc(func(ctx context.Context, observation experimental.YieldObservation) {
+							initialLeft.ObserveYield(ctx, observation)
+							recorder.add("yield initial left %s #%d", observation.Event, observation.YieldCount)
+						}),
+						experimental.YieldObserverFunc(func(ctx context.Context, observation experimental.YieldObservation) {
+							initialRight.ObserveYield(ctx, observation)
+							recorder.add("yield initial right %s #%d", observation.Event, observation.YieldCount)
+						}),
+					),
+				),
+			)
+			firstYield := requireYieldError(t, err)
+
+			resumeLeft := &recordingYieldObserver{}
+			resumeRight := &recordingYieldObserver{}
+			resumeProvider := newObservingTimeProvider()
+			_, err = firstYield.Resumer().Resume(
+				experimental.WithYieldObserver(
+					experimental.WithTimeProvider(experimental.WithYielder(ctx), resumeProvider),
+					experimental.MultiYieldObserver(
+						experimental.YieldObserverFunc(func(ctx context.Context, observation experimental.YieldObservation) {
+							resumeLeft.ObserveYield(ctx, observation)
+							recorder.add("yield resumed left %s #%d", observation.Event, observation.YieldCount)
+						}),
+						experimental.YieldObserverFunc(func(ctx context.Context, observation experimental.YieldObservation) {
+							resumeRight.ObserveYield(ctx, observation)
+							recorder.add("yield resumed right %s #%d", observation.Event, observation.YieldCount)
+						}),
+					),
+				),
+				[]uint64{40},
+			)
+			secondYield := requireYieldError(t, err)
+			secondYield.Resumer().Cancel()
+
+			wantInitial := []yieldObservationSnapshot{{
+				Event:               experimental.YieldEventYielded,
+				YieldCount:          1,
+				ExpectedHostResults: 1,
+				SuspendedNanos:      0,
+			}}
+			wantResumed := []yieldObservationSnapshot{
+				{
+					Event:               experimental.YieldEventResumed,
+					YieldCount:          1,
+					ExpectedHostResults: 1,
+					SuspendedNanos:      1_000_000,
+				},
+				{
+					Event:               experimental.YieldEventYielded,
+					YieldCount:          2,
+					ExpectedHostResults: 1,
+					SuspendedNanos:      0,
+				},
+				{
+					Event:               experimental.YieldEventCancelled,
+					YieldCount:          2,
+					ExpectedHostResults: 1,
+					SuspendedNanos:      1_000_000,
+				},
+			}
+			require.Equal(t, wantInitial, snapshotYieldObservations(initialLeft.snapshot()))
+			require.Equal(t, wantInitial, snapshotYieldObservations(initialRight.snapshot()))
+			require.Equal(t, wantResumed, snapshotYieldObservations(resumeLeft.snapshot()))
+			require.Equal(t, wantResumed, snapshotYieldObservations(resumeRight.snapshot()))
+
+			wantEvents := []expectedListenerEvent{
+				{phase: "before", function: "run_twice"},
+				{phase: "before", function: "async_work"},
+				{phase: "after", function: "async_work"},
+				{phase: "before", function: "async_work"},
+			}
+			for _, events := range [][]listenerEvent{leftEvents.snapshot(), rightEvents.snapshot()} {
+				assertListenerEvents(t, events, wantEvents)
+			}
+
+			assertOrderedEvents(t, recorder.snapshot(), []string{
+				"listener left before run_twice",
+				"listener right before run_twice",
+				"listener left before async_work",
+				"listener right before async_work",
+				"yield initial left yielded #1",
+				"yield initial right yielded #1",
+				"yield resumed left resumed #1",
+				"yield resumed right resumed #1",
+				"listener left after async_work",
+				"listener right after async_work",
+				"listener left before async_work",
+				"listener right before async_work",
+				"yield resumed left yielded #2",
+				"yield resumed right yielded #2",
+				"yield resumed left cancelled #2",
+				"yield resumed right cancelled #2",
+			})
+		})
+	}
+}
+
 func TestFunctionListener_YieldPolicyObserverAcrossResume(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
