@@ -36,3 +36,4 @@ This repository is a security-focused `wazero` fork. The Go module path is still
 - Keep the low-dependency posture intact. Reuse existing internal helpers and packages before introducing new third-party dependencies.
 - Rust files are expected to stay `rustfmt`-clean; `lefthook` runs `cargo fmt --all -- {staged_files}` for staged Rust files on commit.
 - If asked to create a commit, use DCO signoff (`git commit -s`) because `CONTRIBUTING.md` requires it.
+- Workstream in `SE-ROADMAP.md` bullet point lists that track progress estimates as percentages beside git short hashes when the particular workstream item was last updated. Update the percentage and hash when making progress on a workstream item, and add new items as needed.
