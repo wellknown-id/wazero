@@ -89,6 +89,31 @@ func (l *orderedFunctionListener) Abort(_ context.Context, _ api.Module, def api
 	l.recorder.add("listener abort %s", listenerFunctionName(def))
 }
 
+type orderedRecordingFunctionListener struct {
+	recorder *orderedEventRecorder
+	events   *recordingFunctionListener
+}
+
+func (l *orderedRecordingFunctionListener) Before(ctx context.Context, mod api.Module, def api.FunctionDefinition, params []uint64, stack experimental.StackIterator) {
+	l.events.Before(ctx, mod, def, params, stack)
+	l.recorder.add("listener before %s", listenerFunctionName(def))
+}
+
+func (l *orderedRecordingFunctionListener) After(ctx context.Context, mod api.Module, def api.FunctionDefinition, results []uint64) {
+	l.events.After(ctx, mod, def, results)
+	l.recorder.add("listener after %s", listenerFunctionName(def))
+}
+
+func (l *orderedRecordingFunctionListener) Abort(ctx context.Context, mod api.Module, def api.FunctionDefinition, err error) {
+	l.events.Abort(ctx, mod, def, err)
+	cause, ok := experimental.TrapCauseOf(err)
+	if ok {
+		l.recorder.add("listener abort %s (%s)", listenerFunctionName(def), cause)
+		return
+	}
+	l.recorder.add("listener abort %s", listenerFunctionName(def))
+}
+
 func listenerFunctionName(def api.FunctionDefinition) string {
 	if exports := def.ExportNames(); len(exports) > 0 {
 		return exports[0]
@@ -142,6 +167,28 @@ func assertListenerEvents(t *testing.T, events []listenerEvent, want []expectedL
 			require.Contains(t, got.err.Error(), wantEvent.errContains)
 		}
 	}
+}
+
+func assertAbortTrapCauseClassification(t *testing.T, events []listenerEvent, wantCause experimental.TrapCause, wantTrap bool) {
+	t.Helper()
+
+	abortCount := 0
+	for _, event := range events {
+		if event.phase != "abort" {
+			continue
+		}
+
+		abortCount++
+		cause, ok := experimental.TrapCauseOf(event.err)
+		require.Equal(t, wantTrap, ok, "abort %s trap classification mismatch: %v", event.function, event.err)
+		if wantTrap {
+			require.Equal(t, wantCause, cause, "abort %s trap cause mismatch", event.function)
+		} else {
+			require.Equal(t, experimental.TrapCause(""), cause, "abort %s should not expose a trap cause", event.function)
+		}
+	}
+
+	require.True(t, abortCount > 0, "expected at least one abort event")
 }
 
 func assertBeforeCompletionPairing(t *testing.T, events []listenerEvent) {
@@ -246,83 +293,97 @@ func TestFunctionListener_AbortTrapPaths(t *testing.T) {
 		setupHost                   func(t *testing.T, ctx context.Context, rt wazero.Runtime)
 		callCtx                     func(context.Context) context.Context
 		wantErr                     error
+		wantCause                   experimental.TrapCause
+		wantTrapClassification      bool
 		wantTrapCount               int
 		wantEvents                  []expectedListenerEvent
 		allowedOrphanAbortFunctions []string
 	}{
 		{
-			name:          "interpreter/unreachable",
-			cfg:           wazero.NewRuntimeConfigInterpreter,
-			supported:     func() bool { return true },
-			moduleBinary:  func(t *testing.T) []byte { return trapRuntimeUnreachableBinary() },
-			exportName:    "run",
-			wantErr:       wasmruntime.ErrRuntimeUnreachable,
-			wantTrapCount: 1,
+			name:                   "interpreter/unreachable",
+			cfg:                    wazero.NewRuntimeConfigInterpreter,
+			supported:              func() bool { return true },
+			moduleBinary:           func(t *testing.T) []byte { return trapRuntimeUnreachableBinary() },
+			exportName:             "run",
+			wantErr:                wasmruntime.ErrRuntimeUnreachable,
+			wantCause:              experimental.TrapCauseUnreachable,
+			wantTrapClassification: true,
+			wantTrapCount:          1,
 			wantEvents: []expectedListenerEvent{
 				{phase: "before", function: "run"},
 				{phase: "abort", function: "run", errIs: wasmruntime.ErrRuntimeUnreachable},
 			},
 		},
 		{
-			name:          "compiler/unreachable",
-			cfg:           wazero.NewRuntimeConfigCompiler,
-			supported:     platform.CompilerSupported,
-			moduleBinary:  func(t *testing.T) []byte { return trapRuntimeUnreachableBinary() },
-			exportName:    "run",
-			wantErr:       wasmruntime.ErrRuntimeUnreachable,
-			wantTrapCount: 1,
+			name:                   "compiler/unreachable",
+			cfg:                    wazero.NewRuntimeConfigCompiler,
+			supported:              platform.CompilerSupported,
+			moduleBinary:           func(t *testing.T) []byte { return trapRuntimeUnreachableBinary() },
+			exportName:             "run",
+			wantErr:                wasmruntime.ErrRuntimeUnreachable,
+			wantCause:              experimental.TrapCauseUnreachable,
+			wantTrapClassification: true,
+			wantTrapCount:          1,
 			wantEvents: []expectedListenerEvent{
 				{phase: "before", function: "run"},
 				{phase: "abort", function: "run", errIs: wasmruntime.ErrRuntimeUnreachable},
 			},
 		},
 		{
-			name:          "interpreter/memory-oob",
-			cfg:           wazero.NewRuntimeConfigInterpreter,
-			supported:     func() bool { return true },
-			moduleBinary:  func(t *testing.T) []byte { return trapRuntimeOutOfBoundsLoadBinary() },
-			exportName:    "run",
-			wantErr:       wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess,
-			wantTrapCount: 1,
+			name:                   "interpreter/memory-oob",
+			cfg:                    wazero.NewRuntimeConfigInterpreter,
+			supported:              func() bool { return true },
+			moduleBinary:           func(t *testing.T) []byte { return trapRuntimeOutOfBoundsLoadBinary() },
+			exportName:             "run",
+			wantErr:                wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess,
+			wantCause:              experimental.TrapCauseOutOfBoundsMemoryAccess,
+			wantTrapClassification: true,
+			wantTrapCount:          1,
 			wantEvents: []expectedListenerEvent{
 				{phase: "before", function: "run"},
 				{phase: "abort", function: "run", errIs: wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess},
 			},
 		},
 		{
-			name:          "compiler/memory-oob",
-			cfg:           wazero.NewRuntimeConfigCompiler,
-			supported:     platform.CompilerSupported,
-			moduleBinary:  func(t *testing.T) []byte { return trapRuntimeOutOfBoundsLoadBinary() },
-			exportName:    "run",
-			wantErr:       wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess,
-			wantTrapCount: 1,
+			name:                   "compiler/memory-oob",
+			cfg:                    wazero.NewRuntimeConfigCompiler,
+			supported:              platform.CompilerSupported,
+			moduleBinary:           func(t *testing.T) []byte { return trapRuntimeOutOfBoundsLoadBinary() },
+			exportName:             "run",
+			wantErr:                wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess,
+			wantCause:              experimental.TrapCauseOutOfBoundsMemoryAccess,
+			wantTrapClassification: true,
+			wantTrapCount:          1,
 			wantEvents: []expectedListenerEvent{
 				{phase: "before", function: "run"},
 				{phase: "abort", function: "run", errIs: wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess},
 			},
 		},
 		{
-			name:          "compiler/memory-fault",
-			cfg:           func() wazero.RuntimeConfig { return wazero.NewRuntimeConfigCompiler().WithSecureMode(true) },
-			supported:     supportsGuardedMemoryFaultTrap,
-			moduleBinary:  trapRuntimeMemoryFaultFixture,
-			exportName:    "oob",
-			wantErr:       wasmruntime.ErrRuntimeMemoryFault,
-			wantTrapCount: 1,
+			name:                   "compiler/memory-fault",
+			cfg:                    func() wazero.RuntimeConfig { return wazero.NewRuntimeConfigCompiler().WithSecureMode(true) },
+			supported:              supportsGuardedMemoryFaultTrap,
+			moduleBinary:           trapRuntimeMemoryFaultFixture,
+			exportName:             "oob",
+			wantErr:                wasmruntime.ErrRuntimeMemoryFault,
+			wantCause:              experimental.TrapCauseMemoryFault,
+			wantTrapClassification: true,
+			wantTrapCount:          1,
 			wantEvents: []expectedListenerEvent{
 				{phase: "before", function: "oob"},
 				{phase: "abort", function: "oob", errIs: wasmruntime.ErrRuntimeMemoryFault},
 			},
 		},
 		{
-			name:          "compiler/fuel-exhausted",
-			cfg:           func() wazero.RuntimeConfig { return wazero.NewRuntimeConfigCompiler().WithFuel(1) },
-			supported:     platform.CompilerSupported,
-			moduleBinary:  func(t *testing.T) []byte { return trapObserverFuelLoopBinary() },
-			exportName:    "run",
-			wantErr:       wasmruntime.ErrRuntimeFuelExhausted,
-			wantTrapCount: 1,
+			name:                   "compiler/fuel-exhausted",
+			cfg:                    func() wazero.RuntimeConfig { return wazero.NewRuntimeConfigCompiler().WithFuel(1) },
+			supported:              platform.CompilerSupported,
+			moduleBinary:           func(t *testing.T) []byte { return trapObserverFuelLoopBinary() },
+			exportName:             "run",
+			wantErr:                wasmruntime.ErrRuntimeFuelExhausted,
+			wantCause:              experimental.TrapCauseFuelExhausted,
+			wantTrapClassification: true,
+			wantTrapCount:          1,
 			wantEvents: []expectedListenerEvent{
 				{phase: "before", function: "run"},
 				{phase: "abort", function: "run", errIs: wasmruntime.ErrRuntimeFuelExhausted},
@@ -342,8 +403,10 @@ func TestFunctionListener_AbortTrapPaths(t *testing.T) {
 					func(context.Context, api.Module, api.FunctionDefinition) bool { return false },
 				))
 			},
-			wantErr:       wasmruntime.ErrRuntimePolicyDenied,
-			wantTrapCount: 1,
+			wantErr:                wasmruntime.ErrRuntimePolicyDenied,
+			wantCause:              experimental.TrapCausePolicyDenied,
+			wantTrapClassification: true,
+			wantTrapCount:          1,
 			wantEvents: []expectedListenerEvent{
 				{phase: "before", function: "run"},
 				{phase: "abort", function: "run", errIs: wasmruntime.ErrRuntimePolicyDenied},
@@ -363,8 +426,10 @@ func TestFunctionListener_AbortTrapPaths(t *testing.T) {
 					func(context.Context, api.Module, api.FunctionDefinition) bool { return false },
 				))
 			},
-			wantErr:       wasmruntime.ErrRuntimePolicyDenied,
-			wantTrapCount: 1,
+			wantErr:                wasmruntime.ErrRuntimePolicyDenied,
+			wantCause:              experimental.TrapCausePolicyDenied,
+			wantTrapClassification: true,
+			wantTrapCount:          1,
 			wantEvents: []expectedListenerEvent{
 				{phase: "before", function: "run"},
 				{phase: "abort", function: "run", errIs: wasmruntime.ErrRuntimePolicyDenied},
@@ -379,7 +444,8 @@ func TestFunctionListener_AbortTrapPaths(t *testing.T) {
 			setupHost: func(t *testing.T, ctx context.Context, rt wazero.Runtime) {
 				instantiateListenerHostModule(t, ctx, rt, func() { panic("boom") })
 			},
-			wantTrapCount: 0,
+			wantTrapClassification: false,
+			wantTrapCount:          0,
 			wantEvents: []expectedListenerEvent{
 				{phase: "before", function: "run"},
 				{phase: "before", function: "check"},
@@ -396,7 +462,8 @@ func TestFunctionListener_AbortTrapPaths(t *testing.T) {
 			setupHost: func(t *testing.T, ctx context.Context, rt wazero.Runtime) {
 				instantiateListenerHostModule(t, ctx, rt, func() { panic("boom") })
 			},
-			wantTrapCount: 0,
+			wantTrapClassification: false,
+			wantTrapCount:          0,
 			wantEvents: []expectedListenerEvent{
 				{phase: "before", function: "run"},
 				{phase: "before", function: "check"},
@@ -439,18 +506,9 @@ func TestFunctionListener_AbortTrapPaths(t *testing.T) {
 
 			events := recorder.snapshot()
 			assertListenerEvents(t, events, tc.wantEvents)
+			assertAbortTrapCauseClassification(t, events, tc.wantCause, tc.wantTrapClassification)
 			assertBeforeCompletionPairingExcept(t, events, tc.allowedOrphanAbortFunctions...)
 			require.Equal(t, tc.wantTrapCount, trapObserver.count())
-
-			if tc.wantTrapCount == 0 {
-				for _, event := range events {
-					if event.phase != "abort" {
-						continue
-					}
-					_, ok := experimental.TrapCauseOf(event.err)
-					require.False(t, ok, "host panic abort was misclassified as a trap: %v", event.err)
-				}
-			}
 		})
 	}
 }
@@ -689,6 +747,83 @@ func TestFunctionListener_PolicyObserverOrdering(t *testing.T) {
 				"trap policy_denied",
 			}
 			assertOrderedEvents(t, recorder.snapshot(), want)
+		})
+	}
+}
+
+func TestFunctionListener_YieldPolicyDeniedTrapObserverOrdering(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
+
+			ctx := context.Background()
+			recorder := &orderedEventRecorder{}
+			listenerEvents := &recordingFunctionListener{}
+			instantiateCtx := experimental.WithFunctionListenerFactory(ctx, newFunctionListenerFactory(&orderedRecordingFunctionListener{
+				recorder: recorder,
+				events:   listenerEvents,
+			}))
+
+			rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg)
+			defer rt.Close(ctx)
+
+			_, err := rt.NewHostModuleBuilder("example").
+				NewFunctionBuilder().
+				WithGoModuleFunction(&yieldingHostFunc{t: t}, nil, []api.ValueType{api.ValueTypeI32}).
+				Export("async_work").
+				Instantiate(instantiateCtx)
+			require.NoError(t, err)
+
+			mod, err := rt.InstantiateWithConfig(instantiateCtx, yieldWasm, wazero.NewModuleConfig().WithName("guest"))
+			require.NoError(t, err)
+
+			trapObserver := &recordingTrapObserver{}
+			callCtx := experimental.WithTrapObserver(
+				experimental.WithYieldPolicy(
+					experimental.WithYielder(ctx),
+					experimental.YieldPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+						require.NotNil(t, caller)
+						require.Equal(t, "example.async_work", hostFunction.DebugName())
+						return false
+					}),
+				),
+				experimental.TrapObserverFunc(func(ctx context.Context, observation experimental.TrapObservation) {
+					trapObserver.ObserveTrap(ctx, observation)
+					recorder.add("trap %s", observation.Cause)
+				}),
+			)
+
+			_, err = mod.ExportedFunction("run").Call(callCtx)
+			require.ErrorIs(t, err, wasmruntime.ErrRuntimePolicyDenied)
+
+			cause, ok := experimental.TrapCauseOf(err)
+			require.True(t, ok)
+			require.Equal(t, experimental.TrapCausePolicyDenied, cause)
+
+			events := listenerEvents.snapshot()
+			assertListenerEvents(t, events, []expectedListenerEvent{
+				{phase: "before", function: "run"},
+				{phase: "before", function: "async_work"},
+				{phase: "abort", function: "async_work", errIs: wasmruntime.ErrRuntimePolicyDenied},
+				{phase: "abort", function: "run", errIs: wasmruntime.ErrRuntimePolicyDenied},
+			})
+			assertAbortTrapCauseClassification(t, events, experimental.TrapCausePolicyDenied, true)
+			assertBeforeCompletionPairing(t, events)
+
+			observation := trapObserver.single(t)
+			require.Equal(t, experimental.TrapCausePolicyDenied, observation.Cause)
+			require.ErrorIs(t, observation.Err, wasmruntime.ErrRuntimePolicyDenied)
+			require.Equal(t, mod.Name(), observation.Module.Name())
+
+			assertOrderedEvents(t, recorder.snapshot(), []string{
+				"listener before run",
+				"listener before async_work",
+				"listener abort async_work (policy_denied)",
+				"listener abort run (policy_denied)",
+				"trap policy_denied",
+			})
 		})
 	}
 }

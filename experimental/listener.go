@@ -317,8 +317,7 @@ func BenchmarkFunctionListener(n int, module api.Module, stack []StackFrame, lis
 	}
 }
 
-// TODO: the calls to Abort are not yet tested in internal/testing/enginetest,
-// but they are validated indirectly in tests which exercise host logging,
-// like Test_procExit in imports/wasi_snapshot_preview1. Eventually we should
-// add dedicated tests to validate the behavior of the interpreter and compiler
-// engines independently.
+// TODO: the calls to Abort are still not covered in internal/testing/enginetest.
+// Listener integration tests now validate interpreter/compiler Abort behavior,
+// including trap-cause classification, but we should eventually add dedicated
+// engine-level coverage here, too.
