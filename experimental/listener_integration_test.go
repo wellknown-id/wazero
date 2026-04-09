@@ -3064,6 +3064,122 @@ func TestFunctionListener_ResumeMultiHostCallPolicyObserverDeniedOrdering(t *tes
 	}
 }
 
+func TestFunctionListener_MultiHostCallPolicyObserverYieldResumeLifecycle(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
+
+			ctx := context.Background()
+			recorder := &orderedEventRecorder{}
+			leftEvents := &recordingFunctionListener{}
+			rightEvents := &recordingFunctionListener{}
+			observerLeft := &recordingHostCallPolicyObserver{}
+			observerRight := &recordingHostCallPolicyObserver{}
+			instantiateCtx := experimental.WithFunctionListenerFactory(ctx, experimental.MultiFunctionListenerFactory(
+				newFunctionListenerFactory(&namedOrderedRecordingFunctionListener{
+					name:     "listener left",
+					recorder: recorder,
+					events:   leftEvents,
+				}),
+				newFunctionListenerFactory(&namedOrderedRecordingFunctionListener{
+					name:     "listener right",
+					recorder: recorder,
+					events:   rightEvents,
+				}),
+			))
+
+			rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg)
+			defer rt.Close(ctx)
+
+			_, err := rt.NewHostModuleBuilder("example").
+				NewFunctionBuilder().
+				WithGoModuleFunction(&yieldingHostFunc{t: t}, nil, []api.ValueType{api.ValueTypeI32}).
+				Export("async_work").
+				Instantiate(instantiateCtx)
+			require.NoError(t, err)
+
+			mod, err := rt.InstantiateWithConfig(instantiateCtx, yieldWasm, wazero.NewModuleConfig().WithName("guest"))
+			require.NoError(t, err)
+
+			callCtx := experimental.WithHostCallPolicyObserver(
+				experimental.WithHostCallPolicy(
+					experimental.WithYielder(ctx),
+					experimental.HostCallPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+						require.Equal(t, mod.Name(), caller.Name())
+						require.Equal(t, "example.async_work", hostFunction.DebugName())
+						return true
+					}),
+				),
+				experimental.MultiHostCallPolicyObserver(
+					experimental.HostCallPolicyObserverFunc(func(ctx context.Context, observation experimental.HostCallPolicyObservation) {
+						observerLeft.ObserveHostCallPolicy(ctx, observation)
+						recorder.add("policy left %s %s", observation.Event, observation.HostFunction.DebugName())
+					}),
+					experimental.HostCallPolicyObserverFunc(func(ctx context.Context, observation experimental.HostCallPolicyObservation) {
+						observerRight.ObserveHostCallPolicy(ctx, observation)
+						recorder.add("policy right %s %s", observation.Event, observation.HostFunction.DebugName())
+					}),
+				),
+			)
+
+			_, err = mod.ExportedFunction("run_twice").Call(callCtx)
+			firstResumer := requireYieldError(t, err).Resumer()
+
+			_, err = firstResumer.Resume(callCtx, []uint64{40})
+			secondResumer := requireYieldError(t, err).Resumer()
+
+			results, err := secondResumer.Resume(callCtx, []uint64{2})
+			require.NoError(t, err)
+			require.Equal(t, []uint64{42}, results)
+
+			wantEvents := []expectedListenerEvent{
+				{phase: "before", function: "run_twice"},
+				{phase: "before", function: "async_work"},
+				{phase: "after", function: "async_work"},
+				{phase: "before", function: "async_work"},
+				{phase: "after", function: "async_work"},
+				{phase: "after", function: "run_twice"},
+			}
+			for _, events := range [][]listenerEvent{leftEvents.snapshot(), rightEvents.snapshot()} {
+				assertListenerEvents(t, events, wantEvents)
+				assertBeforeCompletionPairing(t, events)
+				assertBeforeCompletionStackPairing(t, events)
+			}
+
+			for _, observations := range [][]experimental.HostCallPolicyObservation{observerLeft.snapshot(), observerRight.snapshot()} {
+				require.Equal(t, 2, len(observations))
+				require.Equal(t, experimental.HostCallPolicyEventAllowed, observations[0].Event)
+				require.Equal(t, mod.Name(), observations[0].Module.Name())
+				require.Equal(t, "example.async_work", observations[0].HostFunction.DebugName())
+				require.Equal(t, experimental.HostCallPolicyEventAllowed, observations[1].Event)
+				require.Equal(t, mod.Name(), observations[1].Module.Name())
+				require.Equal(t, "example.async_work", observations[1].HostFunction.DebugName())
+			}
+
+			assertOrderedEvents(t, recorder.snapshot(), []string{
+				"listener left before run_twice",
+				"listener right before run_twice",
+				"policy left allowed example.async_work",
+				"policy right allowed example.async_work",
+				"listener left before async_work",
+				"listener right before async_work",
+				"listener left after async_work",
+				"listener right after async_work",
+				"policy left allowed example.async_work",
+				"policy right allowed example.async_work",
+				"listener left before async_work",
+				"listener right before async_work",
+				"listener left after async_work",
+				"listener right after async_work",
+				"listener left after run_twice",
+				"listener right after run_twice",
+			})
+		})
+	}
+}
+
 func TestFunctionListener_FuelObserverOrdering(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
