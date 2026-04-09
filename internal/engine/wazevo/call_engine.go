@@ -251,18 +251,36 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 	// Declared before defer so the closure captures these for consumption reporting on trap.
 	var fuelCtrl experimental.FuelController
 	var initialFuel int64
+	var runtimeFuel int64
+	var fuelAdded int64
+	fuelObserver := experimental.GetFuelObserver(ctx)
+	fuelObserverCtx := ctx
 	if fc, ok := ctx.Value(expctxkeys.FuelControllerKey{}).(experimental.FuelController); ok && fc != nil {
 		fuelCtrl = fc
 		initialFuel = fc.Budget()
+		if initialFuel > 0 {
+			runtimeFuel = initialFuel
+		} else {
+			runtimeFuel = 1<<63 - 1
+		}
 	} else if p.parent.fuelEnabled {
 		initialFuel = p.parent.fuel
+		runtimeFuel = initialFuel
 	}
-	if initialFuel > 0 {
-		c.execCtx.fuel = initialFuel
+	if runtimeFuel > 0 {
+		c.execCtx.fuel = runtimeFuel
 		// Inject a FuelAccessor into the context so that host functions called
 		// during this execution can inspect and modify the fuel counter via
 		// experimental.AddFuel / experimental.RemainingFuel.
-		ctx = context.WithValue(ctx, expctxkeys.FuelAccessorKey{}, &expctxkeys.FuelAccessor{Ptr: &c.execCtx.fuel})
+		if initialFuel > 0 {
+			ctx = context.WithValue(ctx, expctxkeys.FuelAccessorKey{}, &expctxkeys.FuelAccessor{Ptr: &c.execCtx.fuel, Module: m, Added: &fuelAdded})
+			notifyFuelObserver(ctx, fuelObserverCtx, fuelObserver, experimental.FuelObservation{
+				Module:    m,
+				Event:     experimental.FuelEventBudgeted,
+				Budget:    initialFuel,
+				Remaining: initialFuel,
+			})
+		}
 	}
 
 	defer func() {
@@ -294,6 +312,9 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 				paramResultStack:    paramResultStack,
 				fuelCtrl:            fuelCtrl,
 				initialFuel:         initialFuel,
+				fuelAdded:           fuelAdded,
+				fuelObserver:        fuelObserver,
+				fuelObserverCtx:     ctx,
 				expectedHostResults: c.currentHostFunctionResultCount(),
 				yieldCount:          1,
 				yieldObserver:       experimental.GetYieldObserver(ctx),
@@ -347,9 +368,28 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 
 		if err != nil {
 			notifyTrapObserver(ctx, m, err)
+			if errors.Is(err, wasmruntime.ErrRuntimeFuelExhausted) {
+				budget := currentFuelBudget(initialFuel, fuelAdded)
+				notifyFuelObserver(ctx, fuelObserverCtx, fuelObserver, experimental.FuelObservation{
+					Module:    m,
+					Event:     experimental.FuelEventExhausted,
+					Budget:    budget,
+					Consumed:  budget - c.execCtx.fuel,
+					Remaining: c.execCtx.fuel,
+				})
+			} else if initialFuel > 0 {
+				budget := currentFuelBudget(initialFuel, fuelAdded)
+				notifyFuelObserver(ctx, fuelObserverCtx, fuelObserver, experimental.FuelObservation{
+					Module:    m,
+					Event:     experimental.FuelEventConsumed,
+					Budget:    budget,
+					Consumed:  budget - c.execCtx.fuel,
+					Remaining: c.execCtx.fuel,
+				})
+			}
 			// Report fuel consumption to the FuelController even on error/trap.
 			if fuelCtrl != nil && initialFuel > 0 {
-				consumed := initialFuel - c.execCtx.fuel
+				consumed := currentFuelBudget(initialFuel, fuelAdded) - c.execCtx.fuel
 				if consumed > 0 {
 					fuelCtrl.Consumed(consumed)
 				}
@@ -371,9 +411,19 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 	for {
 		switch ec := c.execCtx.exitCode; ec & wazevoapi.ExitCodeMask {
 		case wazevoapi.ExitCodeOK:
+			if initialFuel > 0 {
+				budget := currentFuelBudget(initialFuel, fuelAdded)
+				notifyFuelObserver(ctx, fuelObserverCtx, fuelObserver, experimental.FuelObservation{
+					Module:    m,
+					Event:     experimental.FuelEventConsumed,
+					Budget:    budget,
+					Consumed:  budget - c.execCtx.fuel,
+					Remaining: c.execCtx.fuel,
+				})
+			}
 			// Report fuel consumption to the FuelController if active.
 			if fuelCtrl != nil && initialFuel > 0 {
-				consumed := initialFuel - c.execCtx.fuel
+				consumed := currentFuelBudget(initialFuel, fuelAdded) - c.execCtx.fuel
 				if consumed > 0 {
 					fuelCtrl.Consumed(consumed)
 				}
@@ -670,6 +720,35 @@ func notifyTrapObserver(ctx context.Context, mod api.Module, err error) {
 		Cause:  cause,
 		Err:    err,
 	})
+}
+
+func notifyFuelObserver(ctx, fallbackCtx context.Context, observer experimental.FuelObserver, observation experimental.FuelObservation) {
+	observer, observeCtx := resolveFuelObserver(ctx, fallbackCtx, observer)
+	if observer == nil {
+		return
+	}
+	observer.ObserveFuel(observeCtx, observation)
+}
+
+func resolveFuelObserver(ctx, fallbackCtx context.Context, fallback experimental.FuelObserver) (experimental.FuelObserver, context.Context) {
+	if observer := experimental.GetFuelObserver(ctx); observer != nil {
+		return observer, ctx
+	}
+	if fallback != nil {
+		return fallback, fallbackCtx
+	}
+	return nil, nil
+}
+
+func selectFuelObserver(ctx context.Context, fallback experimental.FuelObserver) experimental.FuelObserver {
+	if observer := experimental.GetFuelObserver(ctx); observer != nil {
+		return observer
+	}
+	return fallback
+}
+
+func currentFuelBudget(initialFuel, fuelAdded int64) int64 {
+	return initialFuel + fuelAdded
 }
 
 func notifyYieldObserver(ctx, fallbackCtx context.Context, observer experimental.YieldObserver, mod api.Module, event experimental.YieldEvent, yieldCount uint64, expectedHostResults int, clock experimental.TimeProvider, yieldedAtNanos int64) {
@@ -1015,8 +1094,11 @@ type compilerResumer struct {
 	paramResultStack []uint64
 
 	// Fuel state to preserve across yield/resume.
-	fuelCtrl    experimental.FuelController
-	initialFuel int64
+	fuelCtrl        experimental.FuelController
+	initialFuel     int64
+	fuelAdded       int64
+	fuelObserver    experimental.FuelObserver
+	fuelObserverCtx context.Context
 
 	lifecycle yieldstate.Lifecycle
 
@@ -1070,8 +1152,17 @@ func (r *compilerResumer) Resume(ctx context.Context, hostResults []uint64) (res
 	// Restore fuel state.
 	fuelCtrl := r.fuelCtrl
 	initialFuel := r.initialFuel
+	fuelAdded := r.fuelAdded
+	fuelObserver := selectFuelObserver(ctx, r.fuelObserver)
+	fuelObserverCtx := r.fuelObserverCtx
+	if fuelObserverCtx == nil {
+		fuelObserverCtx = ctx
+	}
 	if initialFuel > 0 {
-		ctx = context.WithValue(ctx, expctxkeys.FuelAccessorKey{}, &expctxkeys.FuelAccessor{Ptr: &c.execCtx.fuel})
+		ctx = context.WithValue(ctx, expctxkeys.FuelAccessorKey{}, &expctxkeys.FuelAccessor{Ptr: &c.execCtx.fuel, Module: r.module, Added: &fuelAdded})
+		if experimental.GetFuelObserver(ctx) == nil && fuelObserver != nil {
+			ctx = context.WithValue(ctx, expctxkeys.FuelObserverKey{}, fuelObserver)
+		}
 	}
 
 	// Preserve yield and snapshot enablement in the resumed context.
@@ -1108,6 +1199,9 @@ func (r *compilerResumer) Resume(ctx context.Context, hostResults []uint64) (res
 				paramResultStack:    r.paramResultStack,
 				fuelCtrl:            fuelCtrl,
 				initialFuel:         initialFuel,
+				fuelAdded:           fuelAdded,
+				fuelObserver:        fuelObserver,
+				fuelObserverCtx:     ctx,
 				expectedHostResults: c.currentHostFunctionResultCount(),
 				yieldCount:          r.yieldCount + 1,
 				yieldObserver:       selectYieldObserver(ctx, r.yieldObserver),
@@ -1145,8 +1239,22 @@ func (r *compilerResumer) Resume(ctx context.Context, hostResults []uint64) (res
 			}
 		}
 
+		if err != nil && initialFuel > 0 {
+			event := experimental.FuelEventConsumed
+			if errors.Is(err, wasmruntime.ErrRuntimeFuelExhausted) {
+				event = experimental.FuelEventExhausted
+			}
+			budget := currentFuelBudget(initialFuel, fuelAdded)
+			notifyFuelObserver(ctx, fuelObserverCtx, fuelObserver, experimental.FuelObservation{
+				Module:    m,
+				Event:     event,
+				Budget:    budget,
+				Consumed:  budget - c.execCtx.fuel,
+				Remaining: c.execCtx.fuel,
+			})
+		}
 		if err != nil && fuelCtrl != nil && initialFuel > 0 {
-			consumed := initialFuel - c.execCtx.fuel
+			consumed := currentFuelBudget(initialFuel, fuelAdded) - c.execCtx.fuel
 			if consumed > 0 {
 				fuelCtrl.Consumed(consumed)
 			}
@@ -1165,8 +1273,18 @@ func (r *compilerResumer) Resume(ctx context.Context, hostResults []uint64) (res
 	for {
 		switch ec := c.execCtx.exitCode; ec & wazevoapi.ExitCodeMask {
 		case wazevoapi.ExitCodeOK:
+			if initialFuel > 0 {
+				budget := currentFuelBudget(initialFuel, fuelAdded)
+				notifyFuelObserver(ctx, fuelObserverCtx, fuelObserver, experimental.FuelObservation{
+					Module:    m,
+					Event:     experimental.FuelEventConsumed,
+					Budget:    budget,
+					Consumed:  budget - c.execCtx.fuel,
+					Remaining: c.execCtx.fuel,
+				})
+			}
 			if fuelCtrl != nil && initialFuel > 0 {
-				consumed := initialFuel - c.execCtx.fuel
+				consumed := currentFuelBudget(initialFuel, fuelAdded) - c.execCtx.fuel
 				if consumed > 0 {
 					fuelCtrl.Consumed(consumed)
 				}

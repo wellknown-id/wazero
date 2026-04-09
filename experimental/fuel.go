@@ -3,8 +3,10 @@ package experimental
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync/atomic"
 
+	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/internal/expctxkeys"
 )
 
@@ -40,6 +42,45 @@ type FuelController interface {
 	Consumed(amount int64)
 }
 
+// FuelEvent identifies a fuel lifecycle transition.
+type FuelEvent string
+
+const (
+	FuelEventBudgeted  FuelEvent = "budgeted"
+	FuelEventConsumed  FuelEvent = "consumed"
+	FuelEventRecharged FuelEvent = "recharged"
+	FuelEventExhausted FuelEvent = "exhausted"
+)
+
+// FuelObservation describes an opt-in fuel lifecycle event.
+//
+// Budget reports the per-call budget chosen for this execution when known.
+// Consumed and Remaining report the execution state at the time of observation.
+// Delta is used by FuelEventRecharged and may be negative when AddFuel debits.
+type FuelObservation struct {
+	Module    api.Module
+	Event     FuelEvent
+	Budget    int64
+	Consumed  int64
+	Remaining int64
+	Delta     int64
+}
+
+// FuelObserver receives opt-in notifications for fuel lifecycle events.
+type FuelObserver interface {
+	ObserveFuel(ctx context.Context, observation FuelObservation)
+}
+
+// FuelObserverFunc adapts a function into a FuelObserver.
+type FuelObserverFunc func(context.Context, FuelObservation)
+
+// ObserveFuel implements FuelObserver.
+func (f FuelObserverFunc) ObserveFuel(ctx context.Context, observation FuelObservation) {
+	if f != nil {
+		f(ctx, observation)
+	}
+}
+
 // WithFuelController returns a derived context with the given FuelController.
 //
 // If the context already has a FuelController, the new one takes precedence
@@ -52,11 +93,37 @@ func WithFuelController(ctx context.Context, fc FuelController) context.Context 
 	return ctx
 }
 
+// WithFuelObserver returns a derived context with the given FuelObserver.
+//
+// If observer is nil, including a typed-nil FuelObserver value, ctx is returned
+// unchanged.
+func WithFuelObserver(ctx context.Context, observer FuelObserver) context.Context {
+	if isNilFuelObserver(observer) {
+		return ctx
+	}
+	return context.WithValue(ctx, expctxkeys.FuelObserverKey{}, observer)
+}
+
 // GetFuelController returns the FuelController from the context, or nil
 // if none is set.
 func GetFuelController(ctx context.Context) FuelController {
+	if ctx == nil {
+		return nil
+	}
 	fc, _ := ctx.Value(expctxkeys.FuelControllerKey{}).(FuelController)
 	return fc
+}
+
+// GetFuelObserver returns the FuelObserver from ctx, or nil if none is set.
+func GetFuelObserver(ctx context.Context) FuelObserver {
+	if ctx == nil {
+		return nil
+	}
+	observer, _ := ctx.Value(expctxkeys.FuelObserverKey{}).(FuelObserver)
+	if isNilFuelObserver(observer) {
+		return nil
+	}
+	return observer
 }
 
 // ErrNoFuelAccessor is returned by AddFuel and RemainingFuel when the
@@ -90,6 +157,17 @@ func AddFuel(ctx context.Context, amount int64) error {
 		return ErrNoFuelAccessor
 	}
 	*accessor.Ptr += amount
+	if accessor.Added != nil {
+		*accessor.Added += amount
+	}
+	if observer := GetFuelObserver(ctx); observer != nil && amount != 0 {
+		observer.ObserveFuel(ctx, FuelObservation{
+			Module:    accessor.Module,
+			Event:     FuelEventRecharged,
+			Remaining: *accessor.Ptr,
+			Delta:     amount,
+		})
+	}
 	return nil
 }
 
@@ -210,4 +288,17 @@ func (a *AggregatingFuelController) Consumed(amount int64) {
 // this scope).
 func (a *AggregatingFuelController) TotalConsumed() int64 {
 	return a.consumed.Load()
+}
+
+func isNilFuelObserver(observer FuelObserver) bool {
+	if observer == nil {
+		return true
+	}
+	v := reflect.ValueOf(observer)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
 }

@@ -185,6 +185,8 @@ type RuntimeConfig interface {
 	//
 	// This can be overridden per-call by setting an experimental.FuelController
 	// on the context passed to api.Function.Call. See experimental.WithFuelController.
+	// Fuel lifecycle hooks can be attached per-call with
+	// experimental.WithFuelObserver.
 	//
 	// Note: fuel metering is currently supported only by the compiler (wazevo)
 	// engine. The interpreter ignores this setting, including when

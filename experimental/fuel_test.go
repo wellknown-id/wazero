@@ -2,10 +2,30 @@ package experimental
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/tetratelabs/wazero/internal/expctxkeys"
 )
+
+type recordingFuelObserver struct {
+	mu           sync.Mutex
+	observations []FuelObservation
+}
+
+func (r *recordingFuelObserver) ObserveFuel(_ context.Context, observation FuelObservation) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.observations = append(r.observations, observation)
+}
+
+func (r *recordingFuelObserver) snapshot() []FuelObservation {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]FuelObservation, len(r.observations))
+	copy(out, r.observations)
+	return out
+}
 
 func TestSimpleFuelController_Budget(t *testing.T) {
 	ctrl := NewSimpleFuelController(42)
@@ -147,6 +167,23 @@ func TestWithFuelController_Override(t *testing.T) {
 	}
 }
 
+func TestWithFuelObserver_NilDoesNothing(t *testing.T) {
+	ctx := context.Background()
+	var observer FuelObserver = FuelObserverFunc(nil)
+	if got := WithFuelObserver(ctx, observer); got != ctx {
+		t.Fatal("WithFuelObserver(ctx, nil) should return the same context")
+	}
+}
+
+func TestWithFuelObserver_RoundTrip(t *testing.T) {
+	ctx := context.Background()
+	observer := FuelObserverFunc(func(context.Context, FuelObservation) {})
+	ctx = WithFuelObserver(ctx, observer)
+	if got := GetFuelObserver(ctx); got == nil {
+		t.Fatal("GetFuelObserver should return non-nil")
+	}
+}
+
 func TestAddFuel_NoAccessor(t *testing.T) {
 	ctx := context.Background()
 	err := AddFuel(ctx, 100)
@@ -218,5 +255,40 @@ func TestAddFuel_Negative(t *testing.T) {
 	}
 	if fuel != -100 {
 		t.Fatalf("after over-debit: fuel = %d, want -100", fuel)
+	}
+}
+
+func TestAddFuel_ObservesRecharge(t *testing.T) {
+	var (
+		fuel  int64 = 1000
+		added int64
+	)
+	observer := &recordingFuelObserver{}
+	ctx := WithFuelObserver(context.Background(), observer)
+	ctx = context.WithValue(ctx, expctxkeys.FuelAccessorKey{}, &expctxkeys.FuelAccessor{
+		Ptr:   &fuel,
+		Added: &added,
+	})
+
+	if err := AddFuel(ctx, 500); err != nil {
+		t.Fatalf("AddFuel: %v", err)
+	}
+
+	if added != 500 {
+		t.Fatalf("tracked added = %d, want 500", added)
+	}
+	observations := observer.snapshot()
+	if len(observations) != 1 {
+		t.Fatalf("observation count = %d, want 1", len(observations))
+	}
+	observation := observations[0]
+	if observation.Event != FuelEventRecharged {
+		t.Fatalf("event = %s, want %s", observation.Event, FuelEventRecharged)
+	}
+	if observation.Delta != 500 {
+		t.Fatalf("delta = %d, want 500", observation.Delta)
+	}
+	if observation.Remaining != 1500 {
+		t.Fatalf("remaining = %d, want 1500", observation.Remaining)
 	}
 }
