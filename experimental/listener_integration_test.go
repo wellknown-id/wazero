@@ -2450,6 +2450,119 @@ func TestFunctionListener_ResumeYieldPolicyObserverDeniedOrdering(t *testing.T) 
 	}
 }
 
+func TestFunctionListener_ResumeMultiYieldPolicyObserverDeniedOrdering(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
+
+			ctx := context.Background()
+			recorder := &orderedEventRecorder{}
+			leftEvents := &recordingFunctionListener{}
+			rightEvents := &recordingFunctionListener{}
+			observerLeft := &recordingYieldPolicyObserver{}
+			observerRight := &recordingYieldPolicyObserver{}
+			instantiateCtx := experimental.WithFunctionListenerFactory(ctx, experimental.MultiFunctionListenerFactory(
+				newFunctionListenerFactory(&namedOrderedRecordingFunctionListener{
+					name:     "listener left",
+					recorder: recorder,
+					events:   leftEvents,
+				}),
+				newFunctionListenerFactory(&namedOrderedRecordingFunctionListener{
+					name:     "listener right",
+					recorder: recorder,
+					events:   rightEvents,
+				}),
+			))
+
+			rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg)
+			defer rt.Close(ctx)
+
+			_, err := rt.NewHostModuleBuilder("example").
+				NewFunctionBuilder().
+				WithGoModuleFunction(&yieldingHostFunc{t: t}, nil, []api.ValueType{api.ValueTypeI32}).
+				Export("async_work").
+				Instantiate(instantiateCtx)
+			require.NoError(t, err)
+
+			mod, err := rt.InstantiateWithConfig(instantiateCtx, yieldWasm, wazero.NewModuleConfig().WithName("guest"))
+			require.NoError(t, err)
+
+			_, err = mod.ExportedFunction("run_twice").Call(experimental.WithYielder(ctx))
+			yieldErr := requireYieldError(t, err)
+
+			_, err = yieldErr.Resumer().Resume(
+				experimental.WithYieldPolicyObserver(
+					experimental.WithYieldPolicy(
+						experimental.WithYielder(ctx),
+						experimental.YieldPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+							require.NotNil(t, caller)
+							require.Equal(t, mod.Name(), caller.Name())
+							require.Equal(t, "example.async_work", hostFunction.DebugName())
+							return false
+						}),
+					),
+					experimental.MultiYieldPolicyObserver(
+						experimental.YieldPolicyObserverFunc(func(ctx context.Context, observation experimental.YieldPolicyObservation) {
+							observerLeft.ObserveYieldPolicy(ctx, observation)
+							recorder.add("yield policy left %s %s", observation.Event, observation.HostFunction.DebugName())
+						}),
+						experimental.YieldPolicyObserverFunc(func(ctx context.Context, observation experimental.YieldPolicyObservation) {
+							observerRight.ObserveYieldPolicy(ctx, observation)
+							recorder.add("yield policy right %s %s", observation.Event, observation.HostFunction.DebugName())
+						}),
+					),
+				),
+				[]uint64{1},
+			)
+			require.ErrorIs(t, err, wasmruntime.ErrRuntimePolicyDenied)
+
+			cause, ok := experimental.TrapCauseOf(err)
+			require.True(t, ok)
+			require.Equal(t, experimental.TrapCausePolicyDenied, cause)
+
+			wantEvents := []expectedListenerEvent{
+				{phase: "before", function: "run_twice"},
+				{phase: "before", function: "async_work"},
+				{phase: "after", function: "async_work"},
+				{phase: "before", function: "async_work"},
+				{phase: "abort", function: "async_work", errIs: wasmruntime.ErrRuntimePolicyDenied},
+				{phase: "abort", function: "run_twice", errIs: wasmruntime.ErrRuntimePolicyDenied},
+			}
+			for _, events := range [][]listenerEvent{leftEvents.snapshot(), rightEvents.snapshot()} {
+				assertListenerEvents(t, events, wantEvents)
+				assertAbortTrapCauseClassification(t, events, experimental.TrapCausePolicyDenied, true)
+				assertBeforeCompletionStackPairing(t, events)
+			}
+
+			for _, observations := range [][]experimental.YieldPolicyObservation{observerLeft.snapshot(), observerRight.snapshot()} {
+				require.Equal(t, 1, len(observations))
+				require.Equal(t, experimental.YieldPolicyEventDenied, observations[0].Event)
+				require.Equal(t, mod.Name(), observations[0].Module.Name())
+				require.Equal(t, "example.async_work", observations[0].HostFunction.DebugName())
+			}
+
+			assertOrderedEvents(t, recorder.snapshot(), []string{
+				"listener left before run_twice",
+				"listener right before run_twice",
+				"listener left before async_work",
+				"listener right before async_work",
+				"listener left after async_work",
+				"listener right after async_work",
+				"listener left before async_work",
+				"listener right before async_work",
+				"yield policy left denied example.async_work",
+				"yield policy right denied example.async_work",
+				"listener left abort async_work (policy_denied)",
+				"listener right abort async_work (policy_denied)",
+				"listener left abort run_twice (policy_denied)",
+				"listener right abort run_twice (policy_denied)",
+			})
+		})
+	}
+}
+
 func TestFunctionListener_FuelObserverOrdering(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
