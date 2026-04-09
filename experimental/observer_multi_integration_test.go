@@ -271,6 +271,63 @@ func TestMultiYieldObserver_YieldResumeLifecycle(t *testing.T) {
 	}
 }
 
+func TestMultiYieldObserver_YieldResumeOrdering(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			provider := newObservingTimeProvider()
+			mod, rt, ctx := setupYieldTest(t, ec.cfg.WithTimeProvider(provider))
+			defer rt.Close(ctx)
+
+			left := &recordingYieldObserver{}
+			right := &recordingYieldObserver{}
+			var order []string
+			callCtx := experimental.WithYieldObserver(
+				experimental.WithYielder(ctx),
+				experimental.MultiYieldObserver(
+					experimental.YieldObserverFunc(func(ctx context.Context, observation experimental.YieldObservation) {
+						left.ObserveYield(ctx, observation)
+						order = append(order, "left "+string(observation.Event))
+					}),
+					experimental.YieldObserverFunc(func(ctx context.Context, observation experimental.YieldObservation) {
+						right.ObserveYield(ctx, observation)
+						order = append(order, "right "+string(observation.Event))
+					}),
+				),
+			)
+
+			_, err := mod.ExportedFunction("run").Call(callCtx)
+			resumer := requireYieldError(t, err).Resumer()
+
+			results, err := resumer.Resume(callCtx, []uint64{42})
+			require.NoError(t, err)
+			require.Equal(t, []uint64{142}, results)
+
+			want := []yieldObservationSnapshot{
+				{
+					Event:               experimental.YieldEventYielded,
+					YieldCount:          1,
+					ExpectedHostResults: 1,
+					SuspendedNanos:      0,
+				},
+				{
+					Event:               experimental.YieldEventResumed,
+					YieldCount:          1,
+					ExpectedHostResults: 1,
+					SuspendedNanos:      1_000_000,
+				},
+			}
+			require.Equal(t, want, snapshotYieldObservations(left.snapshot()))
+			require.Equal(t, want, snapshotYieldObservations(right.snapshot()))
+			require.Equal(t, []string{
+				"left yielded",
+				"right yielded",
+				"left resumed",
+				"right resumed",
+			}, order)
+		})
+	}
+}
+
 func TestMultiYieldObserverWithMultiYieldPolicyObserver_YieldResumeLifecycle(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
