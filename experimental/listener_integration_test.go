@@ -4580,6 +4580,153 @@ func TestFunctionListener_MultiFuelObserverWithMultiTrapObserver_YieldResumeLife
 	}
 }
 
+func TestFunctionListener_MultiFuelObserverWithMultiYieldPolicyObserver_YieldResumeLifecycle(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
+
+			ctx := context.Background()
+			recorder := &orderedEventRecorder{}
+			leftEvents := &recordingFunctionListener{}
+			rightEvents := &recordingFunctionListener{}
+			instantiateCtx := experimental.WithFunctionListenerFactory(ctx, experimental.MultiFunctionListenerFactory(
+				newFunctionListenerFactory(&namedOrderedRecordingFunctionListener{
+					name:     "listener left",
+					recorder: recorder,
+					events:   leftEvents,
+				}),
+				newFunctionListenerFactory(&namedOrderedRecordingFunctionListener{
+					name:     "listener right",
+					recorder: recorder,
+					events:   rightEvents,
+				}),
+			))
+
+			rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg)
+			defer rt.Close(ctx)
+
+			_, err := rt.NewHostModuleBuilder("example").
+				NewFunctionBuilder().
+				WithGoModuleFunction(&yieldingHostFunc{t: t}, nil, []api.ValueType{api.ValueTypeI32}).
+				Export("async_work").
+				Instantiate(instantiateCtx)
+			require.NoError(t, err)
+
+			mod, err := rt.InstantiateWithConfig(instantiateCtx, yieldWasm, wazero.NewModuleConfig().WithName("guest"))
+			require.NoError(t, err)
+
+			fuelLeft := &namedOrderedRecordingFuelObserver{
+				name:         "fuel left",
+				recorder:     recorder,
+				observations: &recordingFuelObserver{},
+			}
+			fuelRight := &namedOrderedRecordingFuelObserver{
+				name:         "fuel right",
+				recorder:     recorder,
+				observations: &recordingFuelObserver{},
+			}
+			policyLeft := &recordingYieldPolicyObserver{}
+			policyRight := &recordingYieldPolicyObserver{}
+			ctrl := experimental.NewSimpleFuelController(20)
+			callCtx := experimental.WithYieldObserver(
+				experimental.WithYieldPolicyObserver(
+					experimental.WithYieldPolicy(
+						experimental.WithFuelObserver(
+							experimental.WithFuelController(
+								experimental.WithYielder(ctx),
+								ctrl,
+							),
+							experimental.MultiFuelObserver(fuelLeft, fuelRight),
+						),
+						experimental.YieldPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+							require.Equal(t, mod.Name(), caller.Name())
+							require.Equal(t, "example.async_work", hostFunction.DebugName())
+							return true
+						}),
+					),
+					experimental.MultiYieldPolicyObserver(
+						experimental.YieldPolicyObserverFunc(func(ctx context.Context, observation experimental.YieldPolicyObservation) {
+							policyLeft.ObserveYieldPolicy(ctx, observation)
+							recorder.add("yield policy left %s %s", observation.Event, observation.HostFunction.DebugName())
+						}),
+						experimental.YieldPolicyObserverFunc(func(ctx context.Context, observation experimental.YieldPolicyObservation) {
+							policyRight.ObserveYieldPolicy(ctx, observation)
+							recorder.add("yield policy right %s %s", observation.Event, observation.HostFunction.DebugName())
+						}),
+					),
+				),
+				experimental.YieldObserverFunc(func(_ context.Context, observation experimental.YieldObservation) {
+					recorder.add("yield %s #%d", observation.Event, observation.YieldCount)
+				}),
+			)
+
+			_, err = mod.ExportedFunction("run").Call(callCtx)
+			yieldErr := requireYieldError(t, err)
+
+			results, err := yieldErr.Resumer().Resume(callCtx, []uint64{42})
+			require.NoError(t, err)
+			require.Equal(t, []uint64{142}, results)
+
+			wantEvents := []expectedListenerEvent{
+				{phase: "before", function: "run"},
+				{phase: "before", function: "async_work"},
+				{phase: "after", function: "async_work"},
+				{phase: "after", function: "run"},
+			}
+			for _, events := range [][]listenerEvent{leftEvents.snapshot(), rightEvents.snapshot()} {
+				assertListenerEvents(t, events, wantEvents)
+				assertBeforeCompletionPairing(t, events)
+				assertBeforeCompletionStackPairing(t, events)
+			}
+
+			wantFuel := []fuelObservationSnapshot{
+				{
+					Event:     experimental.FuelEventBudgeted,
+					Budget:    20,
+					Remaining: 20,
+				},
+				{
+					Event:     experimental.FuelEventConsumed,
+					Budget:    20,
+					Consumed:  ctrl.TotalConsumed(),
+					Remaining: 20 - ctrl.TotalConsumed(),
+				},
+			}
+			for _, observer := range []*namedOrderedRecordingFuelObserver{fuelLeft, fuelRight} {
+				require.Equal(t, wantFuel, snapshotFuelObservations(observer.observations.snapshot()))
+			}
+
+			for _, observations := range [][]experimental.YieldPolicyObservation{policyLeft.snapshot(), policyRight.snapshot()} {
+				require.Equal(t, 1, len(observations))
+				require.Equal(t, experimental.YieldPolicyEventAllowed, observations[0].Event)
+				require.Equal(t, mod.Name(), observations[0].Module.Name())
+				require.Equal(t, "example.async_work", observations[0].HostFunction.DebugName())
+			}
+
+			assertOrderedEvents(t, recorder.snapshot(), []string{
+				"fuel left budgeted",
+				"fuel right budgeted",
+				"listener left before run",
+				"listener right before run",
+				"listener left before async_work",
+				"listener right before async_work",
+				"yield policy left allowed example.async_work",
+				"yield policy right allowed example.async_work",
+				"yield yielded #1",
+				"yield resumed #1",
+				"listener left after async_work",
+				"listener right after async_work",
+				"listener left after run",
+				"listener right after run",
+				"fuel left consumed",
+				"fuel right consumed",
+			})
+		})
+	}
+}
+
 func TestFunctionListener_FuelObserverAcrossYieldReyield(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
