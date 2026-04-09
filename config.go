@@ -159,17 +159,19 @@ type RuntimeConfig interface {
 	WithCloseOnContextDone(bool) RuntimeConfig
 
 	// WithSecureMode enables security-hardened execution for untrusted workloads.
-	// When enabled on supported platforms (Linux amd64/arm64, Windows amd64),
-	// the runtime uses mmap-backed linear memory with guard pages and hardware
-	// fault trapping for out-of-bounds memory access, so that a tenant memory
-	// fault terminates the offending module instance without crashing the host.
+	// When enabled, wazero prefers guard-page-backed linear memory on unix and
+	// windows targets. On the compiler's Linux amd64/arm64 secure-mode path,
+	// out-of-bounds guest memory faults are converted into Wasm traps instead of
+	// relying on the normal software bounds-check path.
 	//
-	// On unsupported platforms, the runtime falls back to software-only bounds
-	// checks and continues operating with reduced isolation guarantees.
+	// On other targets, secure mode falls back to software bounds checks for
+	// ordinary execution. On platforms without guard-page support, execution
+	// remains fully software-checked with reduced isolation guarantees.
 	//
 	// Default: false (upstream-compatible behaviour).
 	//
-	// See THREAT_MODEL.md for the full security property matrix.
+	// See SUPPORT_MATRIX.md for the runtime-mode/platform support matrix and
+	// THREAT_MODEL.md for the security model.
 	WithSecureMode(bool) RuntimeConfig
 
 	// WithFuel sets the default fuel budget for each Wasm function call.
@@ -184,7 +186,10 @@ type RuntimeConfig interface {
 	// on the context passed to api.Function.Call. See experimental.WithFuelController.
 	//
 	// Note: fuel metering is currently supported only by the compiler (wazevo)
-	// engine. The interpreter ignores this setting.
+	// engine. The interpreter ignores this setting, including when
+	// NewRuntimeConfig() auto-falls back to the interpreter.
+	//
+	// See SUPPORT_MATRIX.md for the current support and fallback matrix.
 	WithFuel(fuel int64) RuntimeConfig
 }
 

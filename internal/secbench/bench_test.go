@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/tetratelabs/wazero"
@@ -13,6 +14,8 @@ import (
 	"github.com/tetratelabs/wazero/internal/secmem"
 	"github.com/tetratelabs/wazero/internal/wasm"
 )
+
+const trapOverheadExpected = "out of bounds memory access"
 
 func repoRoot() string {
 	_, f, _, _ := runtime.Caller(0)
@@ -91,6 +94,51 @@ func BenchmarkExecutionBaseline(b *testing.B) {
 					b.Fatal(err)
 				}
 				_ = results
+			}
+		})
+	}
+}
+
+// BenchmarkTrapOverhead measures the steady-state cost of trapping on an
+// out-of-bounds memory access.
+func BenchmarkTrapOverhead(b *testing.B) {
+	oobTrapWasm := loadTestWasm(b, "oob_load.wasm")
+
+	for _, mode := range []struct {
+		name   string
+		secure bool
+	}{
+		{"standard", false},
+		{"secure", true},
+	} {
+		b.Run(mode.name, func(b *testing.B) {
+			ctx := context.Background()
+			config := wazero.NewRuntimeConfig().WithSecureMode(mode.secure)
+			r := wazero.NewRuntimeWithConfig(ctx, config)
+			defer r.Close(ctx)
+
+			mod, err := r.InstantiateWithConfig(ctx, oobTrapWasm, wazero.NewModuleConfig())
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			oob := mod.ExportedFunction("oob")
+			if oob == nil {
+				b.Fatal("oob not exported")
+			}
+
+			if _, err = oob.Call(ctx); err == nil {
+				b.Fatal("expected out-of-bounds trap")
+			} else if got := err.Error(); !strings.Contains(got, trapOverheadExpected) {
+				b.Fatalf("unexpected trap: %v", err)
+			}
+
+			b.ResetTimer()
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if _, err = oob.Call(ctx); err == nil {
+					b.Fatal("expected out-of-bounds trap")
+				}
 			}
 		})
 	}

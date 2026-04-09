@@ -10,8 +10,10 @@ use razero_secmem::GuardPageAllocator;
 
 const FAC_WASM: &[u8] = include_bytes!("../../testdata/fac.wasm");
 const MEM_GROW_WASM: &[u8] = include_bytes!("../../testdata/mem_grow.wasm");
+const OOB_LOAD_WASM: &[u8] = include_bytes!("../../testdata/oob_load.wasm");
 const MEMORY_PAGE_SIZE: usize = 65_536;
 const FAC_BENCH_ARG: u64 = 20;
+const OOB_TRAP_TEXT: &str = "out of bounds memory access";
 
 static FAC_EXECUTION_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
@@ -82,6 +84,39 @@ fn benchmark_execution_baseline(c: &mut Criterion) {
             b.iter(|| {
                 let results = fac.call(&[FAC_BENCH_ARG]).expect("fac-ssa should execute");
                 black_box(results);
+            });
+        });
+
+        module.close(&ctx).expect("module close should succeed");
+        runtime.close(&ctx).expect("runtime close should succeed");
+    }
+
+    group.finish();
+}
+
+fn benchmark_trap_overhead(c: &mut Criterion) {
+    let mut group = c.benchmark_group("secbench/trap_overhead");
+
+    for (name, secure_mode) in [("standard", false), ("secure", true)] {
+        let ctx = Context::default();
+        let runtime = Runtime::with_config(runtime_config().with_secure_mode(secure_mode));
+        let module = runtime
+            .instantiate_binary(OOB_LOAD_WASM, ModuleConfig::new())
+            .expect("oob module should instantiate");
+        let oob = module
+            .exported_function("oob")
+            .expect("oob export should exist");
+
+        let err = oob.call(&[]).expect_err("oob should trap");
+        assert!(
+            err.to_string().contains(OOB_TRAP_TEXT),
+            "unexpected trap: {err}"
+        );
+
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let err = oob.call(&[]).expect_err("oob should trap");
+                black_box(err);
             });
         });
 
@@ -265,6 +300,7 @@ fn main() {
     let mut criterion = Criterion::default().configure_from_args();
     benchmark_compile_time(&mut criterion);
     benchmark_execution_baseline(&mut criterion);
+    benchmark_trap_overhead(&mut criterion);
     benchmark_memory_allocate(&mut criterion);
     benchmark_memory_grow(&mut criterion);
     benchmark_guard_page_allocator_grow(&mut criterion);

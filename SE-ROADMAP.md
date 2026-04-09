@@ -35,7 +35,7 @@ Establish the baseline needed to evaluate all later work.
 - [95%:dedf9a6c] Document the threat model for untrusted tenant code, host functions, and shared infrastructure.
 - [80%:dedf9a6c] Define supported and unsupported security properties for each runtime mode and platform.
 - [85%:dedf9a6c] Identify the wazero subsystems that will change first: memory management, compiler backends, and trap handling.
-- [90%:dedf9a6c] Define new error and trap categories for memory faults, fuel exhaustion, policy denials, and async yield/resume transitions.
+- [95%:bbe2d375] Define new error and trap categories for memory faults, fuel exhaustion, policy denials, and async yield/resume transitions.
 - [80%:dedf9a6c] Add benchmark and regression baselines for compile time, execution time, memory growth, and trap overhead.
 
 ### 2. Hardware-assisted memory sandboxing
@@ -100,7 +100,7 @@ Harden the runtime by remaining completely unopinionated about system functional
 
 Turn prototypes into an experimental runtime that can be evaluated seriously.
 
-- [45%:dedf9a6c] Add targeted tests for memory fault recovery, fuel exhaustion, async resumption, and policy enforcement.
+- [50%:bbe2d375] Add targeted tests for memory fault recovery, fuel exhaustion, async resumption, and policy enforcement.
 - [10%:dedf9a6c] Expand fuzzing and negative testing around host interfaces and trap paths.
 - [70%:dedf9a6c] Document platform limitations, performance tradeoffs, and security assumptions.
 - [25%:dedf9a6c] Add observability hooks for trap causes, fuel usage, yield counts, and policy denials.

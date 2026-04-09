@@ -42,7 +42,7 @@ The wazero `Store`, `Engine`, compilation caches, and type registries are shared
 └──────────────────────────────────────────────┘
 ```
 
-**Boundary 1 — Module ↔ Linear Memory**: Each module instance has its own linear memory. In standard mode, bounds are checked in software. In secure mode on supported platforms, OS virtual memory protections (guard pages) enforce bounds at the hardware level.
+**Boundary 1 — Module ↔ Linear Memory**: Each module instance has its own linear memory. In standard mode, bounds are checked in software. In secure mode, wazero prefers guard-page-backed linear memory on `unix` / `windows` targets, and the compiler's Linux `amd64` / `arm64` secure-mode path can enforce bounds via hardware faults instead of the normal checked path.
 
 **Boundary 2 — Module ↔ Host Functions**: Host function calls cross from compiled/interpreted Wasm into Go code. Arguments are passed via a value stack. The module cannot influence which host functions are called except via its declared imports.
 
@@ -58,7 +58,7 @@ The wazero `Store`, `Engine`, compilation caches, and type registries are shared
 
 **Mitigation (standard mode)**: Software bounds checks on every memory access (both interpreter and compiler paths). An out-of-bounds access returns `false` from `MemoryInstance.hasSize()` or triggers `ErrRuntimeOutOfBoundsMemoryAccess`.
 
-**Mitigation (secure mode, supported platforms)**: Linear memory is backed by a large mmap reservation with a 4 GiB guard region of `PROT_NONE` pages. Any out-of-bounds access triggers a hardware fault (SIGSEGV on Linux, EXCEPTION_IN_PAGE_ERROR on Windows) which Go's `runtime.SetPanicOnFault` converts into a recoverable panic, translated to a Wasm trap. The 4 GiB guard region ensures that any 32-bit offset from within the linear memory base address that exceeds the committed region hits a guard page — no software bounds check is needed for basic load/store instructions.
+**Mitigation (secure mode)**: On `unix` / `windows` targets, linear memory can be backed by a large reservation with a 4 GiB guard region. On the compiler's Linux `amd64` / `arm64` secure-mode path, out-of-bounds accesses are converted into Wasm traps by the custom signal-handler fault path, so basic load/store instructions do not need the normal software bounds checks. On other targets, secure mode falls back to the checked execution path. See [SUPPORT_MATRIX.md](SUPPORT_MATRIX.md) for the exact runtime-mode and platform matrix.
 
 ### T2 — Resource exhaustion (CPU)
 
@@ -72,7 +72,7 @@ The wazero `Store`, `Engine`, compilation caches, and type registries are shared
 
 **Attack**: A Wasm module calls `memory.grow` repeatedly to exhaust host process virtual memory or physical RAM.
 
-**Mitigation**: `WithMemoryLimitPages` caps the maximum pages per memory instance. In secure mode, the entire max reservation is virtual (mmap with `PROT_NONE`), so uncommitted pages consume no physical RAM. Growing memory only commits additional pages via `mprotect`.
+**Mitigation**: `WithMemoryLimitPages` caps the maximum pages per memory instance. When secure mode is using guard-page-backed linear memory, the entire max reservation is virtual, so uncommitted pages consume no physical RAM. Growing memory only commits additional pages via `mprotect` / `VirtualAlloc`.
 
 ### T4 — WASI filesystem escape
 
@@ -112,17 +112,21 @@ The wazero `Store`, `Engine`, compilation caches, and type registries are shared
 
 ## Security property matrix
 
-| Property                                | Linux (amd64/arm64) | MacOS (amd64/arm64) | Windows (amd64) | Other / Interpreter        |
-| --------------------------------------- | ------------------- | ------------------- | --------------- | -------------------------- |
-| Software bounds checks                  | ✅                  | ✅                  | ✅              | ✅                         |
-| Hardware memory isolation (guard pages) | ✅ secure mode      | ✅ secure mode      | ✅ secure mode  | ❌ software fallback       |
-| Context-based termination               | ✅                  | ✅                  | ✅              | ✅                         |
-| Deterministic fuel metering             | ✅ secure mode      | ✅ secure mode      | ✅ secure mode  | ❌ interpreter unsupported |
-| WASI default-deny filesystem            | ❌ Phase 4          | ❌ Phase 4          | ❌ Phase 4      | ❌ Phase 4                 |
-| WASI network egress policy              | ❌ Phase 4          | ❌ Phase 4          | ❌ Phase 4      | ❌ Phase 4                 |
-| Clock coarsening                        | ❌ Phase 4          | ❌ Phase 4          | ❌ Phase 4      | ❌ Phase 4                 |
-| Async yield/resume                      | ❌ Phase 3          | ❌ Phase 3          | ❌ Phase 3      | ❌ Phase 3                 |
-| Indirect call type checks               | ✅                  | ✅                  | ✅              | ✅                         |
+For the operational support, fallback, and validation status by runtime mode and
+platform, see [SUPPORT_MATRIX.md](SUPPORT_MATRIX.md).
+
+| Property | Linux/amd64 compiler | Linux/arm64 compiler | Other compiler-supported targets | Interpreter / non-compiler |
+| --------------------------------------- | -------------------- | -------------------- | -------------------------------- | -------------------------- |
+| Software bounds checks (standard mode)  | ✅                   | ✅                   | ✅                               | ✅                         |
+| Guard-page-backed linear memory         | ✅ secure mode       | ✅ secure mode       | ✅ secure mode on `unix` / `windows` | ✅ secure mode on `unix` / `windows` |
+| Hardware fault to Wasm OOB trap path    | ✅                   | ✅ code path; native validation pending | ❌ software-checked path   | ❌ software-checked path   |
+| Context-based termination               | ✅                   | ✅                   | ✅                               | ✅                         |
+| Deterministic fuel metering             | ✅                   | ✅                   | ✅                               | ❌ interpreter unsupported |
+| WASI default-deny filesystem            | ❌ Phase 4           | ❌ Phase 4           | ❌ Phase 4                       | ❌ Phase 4                 |
+| WASI network egress policy              | ❌ Phase 4           | ❌ Phase 4           | ❌ Phase 4                       | ❌ Phase 4                 |
+| Clock coarsening                        | ❌ Phase 4           | ❌ Phase 4           | ❌ Phase 4                       | ❌ Phase 4                 |
+| Async yield/resume                      | ❌ Phase 3           | ❌ Phase 3           | ❌ Phase 3                       | ❌ Phase 3                 |
+| Indirect call type checks               | ✅                   | ✅                   | ✅                               | ✅                         |
 
 ## Assumptions
 

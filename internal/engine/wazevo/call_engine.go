@@ -408,6 +408,10 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case wazevoapi.ExitCodeCallGoFunction:
 			index := wazevoapi.GoFunctionIndexFromExitCode(ec)
+			if !c.allowHostCall(ctx, c.callerModuleInstance(), index) {
+				c.execCtx.exitCode = wazevoapi.ExitCodePolicyDenied
+				continue
+			}
 			f := hostModuleGoFuncFromOpaque[api.GoFunction](index, c.execCtx.goFunctionCallCalleeModuleContextOpaque)
 			func() {
 				if yieldEnabled {
@@ -423,11 +427,15 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case wazevoapi.ExitCodeCallGoFunctionWithListener:
 			index := wazevoapi.GoFunctionIndexFromExitCode(ec)
+			callerModule := c.callerModuleInstance()
+			if !c.allowHostCall(ctx, callerModule, index) {
+				c.execCtx.exitCode = wazevoapi.ExitCodePolicyDenied
+				continue
+			}
 			f := hostModuleGoFuncFromOpaque[api.GoFunction](index, c.execCtx.goFunctionCallCalleeModuleContextOpaque)
 			listeners := hostModuleListenersSliceFromOpaque(c.execCtx.goFunctionCallCalleeModuleContextOpaque)
 			s := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
 			// Call Listener.Before.
-			callerModule := c.callerModuleInstance()
 			listener := listeners[index]
 			hostModule := hostModuleFromOpaque(c.execCtx.goFunctionCallCalleeModuleContextOpaque)
 			def := hostModule.FunctionDefinition(wasm.Index(index))
@@ -449,8 +457,12 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case wazevoapi.ExitCodeCallGoModuleFunction:
 			index := wazevoapi.GoFunctionIndexFromExitCode(ec)
-			f := hostModuleGoFuncFromOpaque[api.GoModuleFunction](index, c.execCtx.goFunctionCallCalleeModuleContextOpaque)
 			mod := c.callerModuleInstance()
+			if !c.allowHostCall(ctx, mod, index) {
+				c.execCtx.exitCode = wazevoapi.ExitCodePolicyDenied
+				continue
+			}
+			f := hostModuleGoFuncFromOpaque[api.GoModuleFunction](index, c.execCtx.goFunctionCallCalleeModuleContextOpaque)
 			func() {
 				if yieldEnabled {
 					defer yieldRecoverFn(c)
@@ -465,11 +477,15 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case wazevoapi.ExitCodeCallGoModuleFunctionWithListener:
 			index := wazevoapi.GoFunctionIndexFromExitCode(ec)
+			callerModule := c.callerModuleInstance()
+			if !c.allowHostCall(ctx, callerModule, index) {
+				c.execCtx.exitCode = wazevoapi.ExitCodePolicyDenied
+				continue
+			}
 			f := hostModuleGoFuncFromOpaque[api.GoModuleFunction](index, c.execCtx.goFunctionCallCalleeModuleContextOpaque)
 			listeners := hostModuleListenersSliceFromOpaque(c.execCtx.goFunctionCallCalleeModuleContextOpaque)
 			s := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
 			// Call Listener.Before.
-			callerModule := c.callerModuleInstance()
 			listener := listeners[index]
 			hostModule := hostModuleFromOpaque(c.execCtx.goFunctionCallCalleeModuleContextOpaque)
 			def := hostModule.FunctionDefinition(wasm.Index(index))
@@ -612,6 +628,16 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 
 func (c *callEngine) callerModuleInstance() *wasm.ModuleInstance {
 	return moduleInstanceFromOpaquePtr(c.execCtx.callerModuleContextPtr)
+}
+
+func (c *callEngine) allowHostCall(ctx context.Context, caller api.Module, index int) bool {
+	policy := experimental.GetHostCallPolicy(ctx)
+	if policy == nil {
+		return true
+	}
+	hostModule := hostModuleFromOpaque(c.execCtx.goFunctionCallCalleeModuleContextOpaque)
+	def := hostModule.FunctionDefinition(wasm.Index(index))
+	return policy.AllowHostCall(ctx, caller, def)
 }
 
 const callStackCeiling = uintptr(50000000) // in uint64 (8 bytes) == 400000000 bytes in total == 400mb.
@@ -1009,6 +1035,10 @@ func (r *compilerResumer) Resume(ctx context.Context, hostResults []uint64) (res
 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr, newsp, newfp)
 		case wazevoapi.ExitCodeCallGoFunction:
 			index := wazevoapi.GoFunctionIndexFromExitCode(ec)
+			if !c.allowHostCall(ctx, c.callerModuleInstance(), index) {
+				c.execCtx.exitCode = wazevoapi.ExitCodePolicyDenied
+				continue
+			}
 			f := hostModuleGoFuncFromOpaque[api.GoFunction](index, c.execCtx.goFunctionCallCalleeModuleContextOpaque)
 			func() {
 				if yieldEnabled {
@@ -1023,8 +1053,12 @@ func (r *compilerResumer) Resume(ctx context.Context, hostResults []uint64) (res
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case wazevoapi.ExitCodeCallGoModuleFunction:
 			index := wazevoapi.GoFunctionIndexFromExitCode(ec)
-			f := hostModuleGoFuncFromOpaque[api.GoModuleFunction](index, c.execCtx.goFunctionCallCalleeModuleContextOpaque)
 			mod := c.callerModuleInstance()
+			if !c.allowHostCall(ctx, mod, index) {
+				c.execCtx.exitCode = wazevoapi.ExitCodePolicyDenied
+				continue
+			}
+			f := hostModuleGoFuncFromOpaque[api.GoModuleFunction](index, c.execCtx.goFunctionCallCalleeModuleContextOpaque)
 			func() {
 				if yieldEnabled {
 					defer yieldRecoverFn(c)
@@ -1054,6 +1088,8 @@ func (r *compilerResumer) Resume(ctx context.Context, hostResults []uint64) (res
 			panic(wasmruntime.ErrRuntimeInvalidConversionToInteger)
 		case wazevoapi.ExitCodeFuelExhausted:
 			panic(wasmruntime.ErrRuntimeFuelExhausted)
+		case wazevoapi.ExitCodePolicyDenied:
+			panic(wasmruntime.ErrRuntimePolicyDenied)
 		default:
 			panic("BUG")
 		}

@@ -40,7 +40,8 @@ var (
 	// and the Engine terminated execution deterministically.
 	ErrRuntimeFuelExhausted = New("fuel exhausted")
 	// ErrRuntimePolicyDenied indicates that a host-side policy check rejected an
-	// operation requested by the Wasm module (e.g. filesystem access, network egress).
+	// operation requested by the Wasm module, including explicit denial of an
+	// imported host function call.
 	ErrRuntimePolicyDenied = New("policy denied")
 	// ErrRuntimeMemoryFault indicates that an out-of-bounds memory access was caught
 	// by hardware memory protection (guard pages) rather than software bounds checks.

@@ -2,44 +2,22 @@ package wazero_test
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/internal/testing/binaryencoding"
 	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasm"
 	"github.com/tetratelabs/wazero/internal/wasmruntime"
 )
 
-func TestSecureMode_HardwareFaultToTrap(t *testing.T) {
-	// This test verifies that hardware faults (SIGSEGV) are correctly caught
-	// and converted into Wasm out-of-bounds traps when secureMode is enabled.
+func TestSecureMode_OutOfBoundsTrap(t *testing.T) {
+	// This test verifies that the shared out-of-bounds fixture traps in both
+	// secure and standard mode. Platform-specific hardware-fault validation is
+	// covered separately by the support/validation docs.
 	ctx := context.Background()
 
-	// A simple module that performs an out-of-bounds load.
-	// (module
-	//   (memory 1)
-	//   (func (export "oob") (result i32)
-	//     i32.const 100000 ;; 100KB, exceeds 1 page (64KB)
-	//     i32.load
-	//   )
-	// )
-	m := &wasm.Module{
-		MemorySection:   &wasm.Memory{Min: 1, Max: 1},
-		TypeSection:     []wasm.FunctionType{{Results: []wasm.ValueType{wasm.ValueTypeI32}}},
-		FunctionSection: []wasm.Index{0},
-		CodeSection: []wasm.Code{
-			{
-				Body: []byte{
-					wasm.OpcodeI32Const, 0xa0, 0x8d, 0x06, // 100000 in LEB128
-					wasm.OpcodeI32Load, 0x02, 0x00, // align=2, offset=0
-					wasm.OpcodeEnd,
-				},
-			},
-		},
-		ExportSection: []wasm.Export{{Name: "oob", Type: wasm.ExternTypeFunc, Index: 0}},
-	}
-	bin := binaryencoding.EncodeModule(m)
+	bin, err := os.ReadFile("testdata/oob_load.wasm")
+	require.NoError(t, err)
 
 	t.Run("secureMode=true", func(t *testing.T) {
 		r := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithSecureMode(true))

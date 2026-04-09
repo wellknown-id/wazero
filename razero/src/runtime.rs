@@ -2059,16 +2059,11 @@ mod tests {
 
     #[test]
     fn secure_mode_uses_guarded_guest_memory_and_preserves_oob_traps() {
-        let module = [
-            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01,
-            0x7f, 0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x07, 0x01, 0x03,
-            b'o', b'o', b'b', 0x00, 0x00, 0x0a, 0x0b, 0x01, 0x09, 0x00, 0x41, 0xa0, 0x8d, 0x06,
-            0x28, 0x02, 0x00, 0x0b,
-        ];
+        let module = include_bytes!("../../testdata/oob_load.wasm");
 
         for secure_mode in [false, true] {
             let runtime = Runtime::with_config(RuntimeConfig::new().with_secure_mode(secure_mode));
-            let compiled = runtime.compile(&module).unwrap();
+            let compiled = runtime.compile(module).unwrap();
             let instance = runtime.instantiate(&compiled, ModuleConfig::new()).unwrap();
 
             if secure_mode {

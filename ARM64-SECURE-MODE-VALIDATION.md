@@ -2,6 +2,10 @@
 
 This document defines how to validate Linux/arm64 secure-mode memory fault handling when most development happens on non-arm64 hosts.
 
+For the broader Workstream 1 support, fallback, and validation matrix, see
+[SUPPORT_MATRIX.md](SUPPORT_MATRIX.md). This document is the Linux/arm64
+deep-dive for the remaining secure-mode validation gap.
+
 ## Why QEMU is not enough alone
 
 QEMU (especially TCG) is useful for rapid iteration, but this feature depends on Linux signal ABI behavior that can differ from emulation:

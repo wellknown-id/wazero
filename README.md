@@ -54,6 +54,10 @@ on supported platforms:
 | Interpreter | `wazero.NewRuntimeConfigInterpreter()` |  ✅   |  ✅   |   ✅   |
 |  Compiler   |  `wazero.NewRuntimeConfigCompiler()`   |  ✅   |  ✅   |   ❌   |
 
+For the se-wazero Workstream 1 support story (secure mode, fuel metering,
+validation status, and runtime fallback behavior), see
+[SUPPORT_MATRIX.md](SUPPORT_MATRIX.md).
+
 ## Support Policy
 
 The below support policy focuses on compatibility concerns of those embedding
