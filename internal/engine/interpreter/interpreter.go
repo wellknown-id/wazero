@@ -111,6 +111,8 @@ type moduleEngine struct {
 	// The index is module instance-scoped.
 	functions []function
 
+	moduleInstance *wasm.ModuleInstance
+
 	// parentEngine holds *engine from which this module engine is created from.
 	parentEngine *engine
 }
@@ -360,8 +362,19 @@ type interpreterResumer struct {
 
 // Resume implements experimental.Resumer.
 func (r *interpreterResumer) Resume(ctx context.Context, hostResults []uint64) (results []uint64, err error) {
+	if ctx == nil {
+		return nil, errors.New("cannot resume: context is nil")
+	}
 	if r.cancelled.Load() {
 		return nil, errors.New("cannot resume: resumer has been cancelled")
+	}
+	if err := r.moduleInstance.FailIfClosed(); err != nil {
+		if r.cancelled.CompareAndSwap(false, true) {
+			r.stack = nil
+			r.frames = nil
+			r.ce.yieldState.Store(yieldStateIdle)
+		}
+		return nil, err
 	}
 	if len(hostResults) != r.expectedHostResults {
 		return nil, fmt.Errorf("cannot resume: expected %d host results, but got %d", r.expectedHostResults, len(hostResults))
@@ -618,8 +631,9 @@ func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listene
 // NewModuleEngine implements the same method as documented on wasm.Engine.
 func (e *engine) NewModuleEngine(module *wasm.Module, instance *wasm.ModuleInstance) (wasm.ModuleEngine, error) {
 	me := &moduleEngine{
-		parentEngine: e,
-		functions:    make([]function, len(module.FunctionSection)+int(module.ImportFunctionCount)),
+		parentEngine:   e,
+		moduleInstance: instance,
+		functions:      make([]function, len(module.FunctionSection)+int(module.ImportFunctionCount)),
 	}
 
 	codes, ok := e.getCompiledFunctions(module, false)
@@ -705,6 +719,7 @@ func (e *engine) setLabelAddress(op *uint64, label label, labelAddressResolution
 func (e *moduleEngine) ResolveImportedFunction(index, descFunc, indexInImportedModule wasm.Index, importedModuleEngine wasm.ModuleEngine) {
 	imported := importedModuleEngine.(*moduleEngine)
 	e.functions[index] = imported.functions[indexInImportedModule]
+	e.functions[index].moduleInstance = e.moduleInstance
 }
 
 // ResolveImportedMemory implements wasm.ModuleEngine.

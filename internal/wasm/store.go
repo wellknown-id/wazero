@@ -395,7 +395,13 @@ func (s *Store) instantiate(
 
 func (m *ModuleInstance) resolveImports(ctx context.Context, module *Module) (err error) {
 	// Check if ctx contains an ImportResolver.
-	resolveImport, _ := ctx.Value(expctxkeys.ImportResolverKey{}).(experimental.ImportResolver)
+	resolverCfg := experimental.GetImportResolverConfig(ctx)
+	var resolveImport experimental.ImportResolver
+	failClosed := false
+	if resolverCfg != nil {
+		resolveImport = resolverCfg.Resolver
+		failClosed = resolverCfg.FailClosed
+	}
 
 	for moduleName, imports := range module.ImportPerModule {
 		var importedModule *ModuleInstance
@@ -405,6 +411,9 @@ func (m *ModuleInstance) resolveImports(ctx context.Context, module *Module) (er
 			}
 		}
 		if importedModule == nil {
+			if failClosed {
+				return fmt.Errorf("module[%s] unresolved by import resolver", moduleName)
+			}
 			importedModule, err = m.s.module(moduleName)
 			if err != nil {
 				return err

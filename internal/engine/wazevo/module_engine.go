@@ -159,6 +159,20 @@ func (m *moduleEngine) NewFunction(index wasm.Index) api.Function {
 	localIndex := index
 	if importedFnCount := m.module.Source.ImportFunctionCount; index < importedFnCount {
 		imported := &m.importedFunctions[index]
+		if imported.me.module.Source.IsHostModule {
+			localIndex := imported.indexInModule
+			source := imported.me.module.Source
+			def := source.FunctionDefinition(localIndex)
+			goF := source.CodeSection[localIndex].GoFunc
+			switch typed := goF.(type) {
+			case api.GoFunction:
+				return &hostFunction{def: def, lookedUpModule: m.module, g: goFunctionAsGoModuleFunction(typed), enforcePolicy: true}
+			case api.GoModuleFunction:
+				return &hostFunction{def: def, lookedUpModule: m.module, g: typed, enforcePolicy: true}
+			default:
+				panic(fmt.Sprintf("unexpected GoFunc type: %T", goF))
+			}
+		}
 		return imported.me.NewFunction(imported.indexInModule)
 	} else {
 		localIndex -= importedFnCount
@@ -352,6 +366,7 @@ type hostFunction struct {
 	def            *wasm.FunctionDefinition
 	lookedUpModule *wasm.ModuleInstance
 	g              api.GoModuleFunction
+	enforcePolicy  bool
 }
 
 // goFunctionAsGoModuleFunction converts api.GoFunction to api.GoModuleFunction which ignores the api.Module argument.
@@ -384,9 +399,18 @@ func (f *hostFunction) CallWithStack(ctx context.Context, stack []uint64) (err e
 			builder := wasmdebug.NewErrorBuilder()
 			err = builder.FromRecovered(r)
 		}
+		if f.enforcePolicy && err != nil {
+			notifyTrapObserver(ctx, f.lookedUpModule, err)
+		}
 	}()
 	if f.lookedUpModule != nil && experimental.GetTimeProvider(ctx) == nil && f.lookedUpModule.TimeProvider != nil {
 		ctx = experimental.WithTimeProvider(ctx, f.lookedUpModule.TimeProvider)
+	}
+	if f.enforcePolicy {
+		if policy := experimental.GetHostCallPolicy(ctx); policy != nil && !policy.AllowHostCall(ctx, f.lookedUpModule, f.def) {
+			err = wasmruntime.ErrRuntimePolicyDenied
+			return err
+		}
 	}
 	f.g.Call(ctx, f.lookedUpModule, stack)
 	return nil

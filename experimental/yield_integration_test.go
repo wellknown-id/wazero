@@ -174,6 +174,42 @@ func TestYield_ResumeRejectsWrongHostResultCount(t *testing.T) {
 	}
 }
 
+func TestYield_ResumeRejectsNilContext(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			mod, rt, ctx := setupYieldTest(t, ec.cfg)
+			defer rt.Close(ctx)
+
+			_, err := mod.ExportedFunction("run").Call(experimental.WithYielder(ctx))
+			resumer := requireYieldError(t, err).Resumer()
+
+			_, err = resumer.Resume(nil, []uint64{42})
+			require.EqualError(t, err, "cannot resume: context is nil")
+
+			results, err := resumer.Resume(experimental.WithYielder(ctx), []uint64{42})
+			require.NoError(t, err)
+			require.Equal(t, []uint64{142}, results)
+		})
+	}
+}
+
+func TestYield_ResumeRejectsClosedModule(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			mod, rt, ctx := setupYieldTest(t, ec.cfg)
+			defer rt.Close(ctx)
+
+			_, err := mod.ExportedFunction("run").Call(experimental.WithYielder(ctx))
+			resumer := requireYieldError(t, err).Resumer()
+
+			require.NoError(t, mod.Close(ctx))
+
+			_, err = resumer.Resume(experimental.WithYielder(ctx), []uint64{42})
+			require.ErrorIs(t, err, api.NewExitError(0))
+		})
+	}
+}
+
 func TestYield_ReyieldUsesFreshResumer(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {

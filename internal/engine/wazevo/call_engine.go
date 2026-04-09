@@ -933,8 +933,19 @@ type compilerResumer struct {
 
 // Resume implements experimental.Resumer for the compiler engine.
 func (r *compilerResumer) Resume(ctx context.Context, hostResults []uint64) (results []uint64, err error) {
+	if ctx == nil {
+		return nil, errors.New("cannot resume: context is nil")
+	}
 	if r.cancelled.Load() {
 		return nil, errors.New("cannot resume: resumer has been cancelled")
+	}
+	if err := r.module.FailIfClosed(); err != nil {
+		if r.cancelled.CompareAndSwap(false, true) {
+			r.stack = nil
+			r.paramResultStack = nil
+			r.ce.yieldState.Store(compilerYieldStateIdle)
+		}
+		return nil, err
 	}
 	if len(hostResults) != r.expectedHostResults {
 		return nil, fmt.Errorf("cannot resume: expected %d host results, but got %d", r.expectedHostResults, len(hostResults))

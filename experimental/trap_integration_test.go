@@ -37,6 +37,12 @@ func (r *recordingTrapObserver) single(t *testing.T) experimental.TrapObservatio
 	return r.observations[0]
 }
 
+func (r *recordingTrapObserver) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.observations)
+}
+
 func trapObserverTestModuleBinary() []byte {
 	return binaryencoding.EncodeModule(&wasm.Module{
 		TypeSection:     []wasm.FunctionType{{}},
@@ -157,4 +163,83 @@ func TestTrapObserver_MemoryFault(t *testing.T) {
 	require.Equal(t, experimental.TrapCauseMemoryFault, observation.Cause)
 	require.True(t, errors.Is(observation.Err, wasmruntime.ErrRuntimeMemoryFault))
 	require.Equal(t, "secure-guest", observation.Module.Name())
+}
+
+func TestTrapObserver_PolicyDeniedOnStartFunction(t *testing.T) {
+	start := wasm.Index(0)
+	moduleBinary := binaryencoding.EncodeModule(&wasm.Module{
+		TypeSection:   []wasm.FunctionType{{}},
+		ImportSection: []wasm.Import{{Module: "env", Name: "check", Type: wasm.ExternTypeFunc, DescFunc: 0}},
+		StartSection:  &start,
+	})
+
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
+
+			ctx := context.Background()
+			rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg)
+			defer rt.Close(ctx)
+
+			_, err := rt.NewHostModuleBuilder("env").
+				NewFunctionBuilder().
+				WithFunc(func() {}).
+				Export("check").
+				Instantiate(ctx)
+			require.NoError(t, err)
+
+			observer := &recordingTrapObserver{}
+			_, err = rt.InstantiateWithConfig(
+				experimental.WithTrapObserver(
+					experimental.WithHostCallPolicy(ctx, experimental.HostCallPolicyFunc(
+						func(context.Context, api.Module, api.FunctionDefinition) bool { return false },
+					)),
+					observer,
+				),
+				moduleBinary,
+				wazero.NewModuleConfig().WithName("start-guest"),
+			)
+			require.Error(t, err)
+			require.True(t, errors.Is(err, wasmruntime.ErrRuntimePolicyDenied), "expected ErrRuntimePolicyDenied, got %v", err)
+
+			observation := observer.single(t)
+			require.Equal(t, experimental.TrapCausePolicyDenied, observation.Cause)
+			require.True(t, errors.Is(observation.Err, wasmruntime.ErrRuntimePolicyDenied))
+			require.Equal(t, "start-guest", observation.Module.Name())
+		})
+	}
+}
+
+func TestTrapObserver_IgnoresHostPanics(t *testing.T) {
+	moduleBinary := trapObserverTestModuleBinary()
+
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
+
+			ctx := context.Background()
+			rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg)
+			defer rt.Close(ctx)
+
+			_, err := rt.NewHostModuleBuilder("env").
+				NewFunctionBuilder().
+				WithFunc(func() { panic("boom") }).
+				Export("check").
+				Instantiate(ctx)
+			require.NoError(t, err)
+
+			mod, err := rt.InstantiateWithConfig(ctx, moduleBinary, wazero.NewModuleConfig().WithName("guest"))
+			require.NoError(t, err)
+
+			observer := &recordingTrapObserver{}
+			_, err = mod.ExportedFunction("run").Call(experimental.WithTrapObserver(ctx, observer))
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "boom")
+			require.Zero(t, observer.count())
+		})
+	}
 }

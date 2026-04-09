@@ -193,3 +193,48 @@ func TestHostCallPolicy_SelectivelyAllowsImportedHostFunction(t *testing.T) {
 		})
 	}
 }
+
+func TestHostCallPolicy_DeniesImportedStartFunction(t *testing.T) {
+	start := wasm.Index(0)
+	moduleBinary := binaryencoding.EncodeModule(&wasm.Module{
+		TypeSection:   []wasm.FunctionType{{}},
+		ImportSection: []wasm.Import{{Module: "env", Name: "check", Type: wasm.ExternTypeFunc, DescFunc: 0}},
+		StartSection:  &start,
+	})
+
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
+
+			ctx := context.Background()
+			rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg)
+			defer rt.Close(ctx)
+
+			hostCalled := false
+			_, err := rt.NewHostModuleBuilder("env").
+				NewFunctionBuilder().
+				WithFunc(func() { hostCalled = true }).
+				Export("check").
+				Instantiate(ctx)
+			require.NoError(t, err)
+
+			_, err = rt.InstantiateWithConfig(
+				experimental.WithHostCallPolicy(ctx, experimental.HostCallPolicyFunc(
+					func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+						require.Equal(t, "start-guest", caller.Name())
+						require.Equal(t, "env.check", hostFunction.DebugName())
+						return false
+					},
+				)),
+				moduleBinary,
+				wazero.NewModuleConfig().WithName("start-guest"),
+			)
+			require.Error(t, err)
+			require.False(t, hostCalled)
+			require.True(t, errors.Is(err, wasmruntime.ErrRuntimePolicyDenied), "expected ErrRuntimePolicyDenied, got %v", err)
+			require.Contains(t, err.Error(), "start")
+		})
+	}
+}

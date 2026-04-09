@@ -58,13 +58,15 @@ type Resumer interface {
 	//
 	// ctx governs the resumed execution, allowing the embedder to set
 	// new deadlines, fuel controllers, or other context values.
+	// It must not be nil.
 	//
 	// Returns the final Wasm function results and nil error on success.
 	// Returns (nil, *YieldError) if the execution yields again, in which
 	// case a new Resumer is available via the returned error.
 	//
-	// Returns an error if called after Cancel or with the wrong number of
-	// hostResults. Panics if called concurrently or more than once.
+	// Returns an error if called with a nil context, after Cancel, after the
+	// suspended module has been closed, or with the wrong number of hostResults.
+	// Panics if called concurrently or more than once.
 	Resume(ctx context.Context, hostResults []uint64) ([]uint64, error)
 
 	// Cancel releases the captured execution state without resuming.
