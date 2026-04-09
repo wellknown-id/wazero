@@ -626,6 +626,167 @@ func TestFunctionListener_MultiFunctionListenerFactoryWithMultiTrapObserverAbort
 	}
 }
 
+func TestFunctionListener_MultiFunctionListenerFactoryWithMultiTrapObserverAbortTrapPaths(t *testing.T) {
+	testCases := []struct {
+		name         string
+		cfg          func() wazero.RuntimeConfig
+		supported    func() bool
+		moduleBinary func(t *testing.T) []byte
+		exportName   string
+		wantErr      error
+		wantCause    experimental.TrapCause
+	}{
+		{
+			name:         "interpreter/integer-divide-by-zero",
+			cfg:          wazero.NewRuntimeConfigInterpreter,
+			supported:    func() bool { return true },
+			moduleBinary: func(t *testing.T) []byte { return trapRuntimeIntegerDivideByZeroBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeIntegerDivideByZero,
+			wantCause:    experimental.TrapCauseIntegerDivideByZero,
+		},
+		{
+			name:         "compiler/integer-divide-by-zero",
+			cfg:          wazero.NewRuntimeConfigCompiler,
+			supported:    platform.CompilerSupported,
+			moduleBinary: func(t *testing.T) []byte { return trapRuntimeIntegerDivideByZeroBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeIntegerDivideByZero,
+			wantCause:    experimental.TrapCauseIntegerDivideByZero,
+		},
+		{
+			name:         "interpreter/integer-overflow",
+			cfg:          wazero.NewRuntimeConfigInterpreter,
+			supported:    func() bool { return true },
+			moduleBinary: func(t *testing.T) []byte { return trapRuntimeIntegerOverflowBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeIntegerOverflow,
+			wantCause:    experimental.TrapCauseIntegerOverflow,
+		},
+		{
+			name:         "compiler/integer-overflow",
+			cfg:          wazero.NewRuntimeConfigCompiler,
+			supported:    platform.CompilerSupported,
+			moduleBinary: func(t *testing.T) []byte { return trapRuntimeIntegerOverflowBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeIntegerOverflow,
+			wantCause:    experimental.TrapCauseIntegerOverflow,
+		},
+		{
+			name:         "interpreter/invalid-conversion-to-integer",
+			cfg:          wazero.NewRuntimeConfigInterpreter,
+			supported:    func() bool { return true },
+			moduleBinary: func(t *testing.T) []byte { return trapRuntimeInvalidConversionToIntegerBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeInvalidConversionToInteger,
+			wantCause:    experimental.TrapCauseInvalidConversionToInteger,
+		},
+		{
+			name:         "compiler/invalid-conversion-to-integer",
+			cfg:          wazero.NewRuntimeConfigCompiler,
+			supported:    platform.CompilerSupported,
+			moduleBinary: func(t *testing.T) []byte { return trapRuntimeInvalidConversionToIntegerBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeInvalidConversionToInteger,
+			wantCause:    experimental.TrapCauseInvalidConversionToInteger,
+		},
+		{
+			name:         "interpreter/out-of-bounds-memory-access",
+			cfg:          wazero.NewRuntimeConfigInterpreter,
+			supported:    func() bool { return true },
+			moduleBinary: func(t *testing.T) []byte { return trapRuntimeOutOfBoundsLoadBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess,
+			wantCause:    experimental.TrapCauseOutOfBoundsMemoryAccess,
+		},
+		{
+			name:         "compiler/out-of-bounds-memory-access",
+			cfg:          wazero.NewRuntimeConfigCompiler,
+			supported:    platform.CompilerSupported,
+			moduleBinary: func(t *testing.T) []byte { return trapRuntimeOutOfBoundsLoadBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess,
+			wantCause:    experimental.TrapCauseOutOfBoundsMemoryAccess,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !tc.supported() {
+				t.Skip("engine is not supported on this host")
+			}
+
+			ctx := context.Background()
+			recorder := &orderedEventRecorder{}
+			leftEvents := &recordingFunctionListener{}
+			rightEvents := &recordingFunctionListener{}
+			instantiateCtx := experimental.WithFunctionListenerFactory(ctx, experimental.MultiFunctionListenerFactory(
+				newFunctionListenerFactory(&namedOrderedRecordingFunctionListener{
+					name:     "listener left",
+					recorder: recorder,
+					events:   leftEvents,
+				}),
+				newFunctionListenerFactory(&namedOrderedRecordingFunctionListener{
+					name:     "listener right",
+					recorder: recorder,
+					events:   rightEvents,
+				}),
+			))
+
+			rt := wazero.NewRuntimeWithConfig(ctx, tc.cfg())
+			defer rt.Close(ctx)
+
+			mod, err := rt.InstantiateWithConfig(instantiateCtx, tc.moduleBinary(t), wazero.NewModuleConfig().WithName("guest"))
+			require.NoError(t, err)
+
+			trapLeft := &recordingTrapObserver{}
+			trapRight := &recordingTrapObserver{}
+			callCtx := experimental.WithTrapObserver(
+				ctx,
+				experimental.MultiTrapObserver(
+					experimental.TrapObserverFunc(func(ctx context.Context, observation experimental.TrapObservation) {
+						trapLeft.ObserveTrap(ctx, observation)
+						recorder.add("trap left %s", observation.Cause)
+					}),
+					experimental.TrapObserverFunc(func(ctx context.Context, observation experimental.TrapObservation) {
+						trapRight.ObserveTrap(ctx, observation)
+						recorder.add("trap right %s", observation.Cause)
+					}),
+				),
+			)
+
+			_, err = mod.ExportedFunction(tc.exportName).Call(callCtx)
+			require.ErrorIs(t, err, tc.wantErr)
+
+			wantEvents := []expectedListenerEvent{
+				{phase: "before", function: tc.exportName},
+				{phase: "abort", function: tc.exportName, errIs: tc.wantErr},
+			}
+
+			for _, events := range [][]listenerEvent{leftEvents.snapshot(), rightEvents.snapshot()} {
+				assertListenerEvents(t, events, wantEvents)
+				assertAbortTrapCauseClassification(t, events, tc.wantCause, true)
+				assertBeforeCompletionPairing(t, events)
+				assertBeforeCompletionStackPairing(t, events)
+			}
+
+			requireEquivalentTrapObservation(t, trapObservationSnapshot{
+				Cause:      tc.wantCause,
+				ModuleName: "guest",
+			}, tc.wantErr, trapLeft, trapRight)
+
+			assertOrderedEvents(t, recorder.snapshot(), []string{
+				fmt.Sprintf("listener left before %s", tc.exportName),
+				fmt.Sprintf("listener right before %s", tc.exportName),
+				fmt.Sprintf("listener left abort %s (%s)", tc.exportName, tc.wantCause),
+				fmt.Sprintf("listener right abort %s (%s)", tc.exportName, tc.wantCause),
+				fmt.Sprintf("trap left %s", tc.wantCause),
+				fmt.Sprintf("trap right %s", tc.wantCause),
+			})
+		})
+	}
+}
+
 func TestFunctionListener_AbortTrapPaths(t *testing.T) {
 	testCases := []struct {
 		name                        string
