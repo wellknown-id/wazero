@@ -170,8 +170,7 @@ func (m *moduleEngine) NewFunction(index wasm.Index) api.Function {
 		goF := source.CodeSection[localIndex].GoFunc
 		switch typed := goF.(type) {
 		case api.GoFunction:
-			// GoFunction doesn't need looked up module.
-			return &hostFunction{def: def, g: goFunctionAsGoModuleFunction(typed)}
+			return &hostFunction{def: def, lookedUpModule: m.module, g: goFunctionAsGoModuleFunction(typed)}
 		case api.GoModuleFunction:
 			return &hostFunction{def: def, lookedUpModule: m.module, g: typed}
 		default:
@@ -386,6 +385,9 @@ func (f *hostFunction) CallWithStack(ctx context.Context, stack []uint64) (err e
 			err = builder.FromRecovered(r)
 		}
 	}()
+	if f.lookedUpModule != nil && experimental.GetTimeProvider(ctx) == nil && f.lookedUpModule.TimeProvider != nil {
+		ctx = experimental.WithTimeProvider(ctx, f.lookedUpModule.TimeProvider)
+	}
 	f.g.Call(ctx, f.lookedUpModule, stack)
 	return nil
 }

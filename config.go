@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/tetratelabs/wazero/api"
+	"github.com/tetratelabs/wazero/experimental"
 	"github.com/tetratelabs/wazero/internal/filecache"
 	"github.com/tetratelabs/wazero/internal/internalapi"
 	"github.com/tetratelabs/wazero/internal/wasm"
@@ -191,6 +192,17 @@ type RuntimeConfig interface {
 	//
 	// See SUPPORT_MATRIX.md for the current support and fallback matrix.
 	WithFuel(fuel int64) RuntimeConfig
+
+	// WithTimeProvider sets the default host-visible time provider for modules
+	// instantiated by this runtime.
+	//
+	// The configured provider is surfaced to host functions through
+	// experimental.GetTimeProvider(ctx). A provider attached directly to the
+	// call context with experimental.WithTimeProvider takes precedence.
+	//
+	// A nil provider disables the runtime default and preserves current
+	// behavior unless a call context provides one explicitly.
+	WithTimeProvider(experimental.TimeProvider) RuntimeConfig
 }
 
 // NewRuntimeConfig returns a RuntimeConfig using the compiler if it is supported in this environment,
@@ -215,6 +227,7 @@ type runtimeConfig struct {
 	ensureTermination     bool
 	secureMode            bool
 	fuel                  int64
+	timeProvider          experimental.TimeProvider
 }
 
 // engineLessConfig helps avoid copy/pasting the wrong defaults.
@@ -343,6 +356,13 @@ func (c *runtimeConfig) WithFuel(fuel int64) RuntimeConfig {
 		fuel = 0
 	}
 	ret.fuel = fuel
+	return ret
+}
+
+// WithTimeProvider implements RuntimeConfig.WithTimeProvider.
+func (c *runtimeConfig) WithTimeProvider(provider experimental.TimeProvider) RuntimeConfig {
+	ret := c.clone()
+	ret.timeProvider = provider
 	return ret
 }
 

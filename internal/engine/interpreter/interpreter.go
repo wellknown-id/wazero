@@ -353,12 +353,21 @@ type interpreterResumer struct {
 
 	// cancelled tracks whether Cancel has been called.
 	cancelled atomic.Bool
+	used      atomic.Bool
+
+	expectedHostResults int
 }
 
 // Resume implements experimental.Resumer.
 func (r *interpreterResumer) Resume(ctx context.Context, hostResults []uint64) (results []uint64, err error) {
 	if r.cancelled.Load() {
 		return nil, errors.New("cannot resume: resumer has been cancelled")
+	}
+	if len(hostResults) != r.expectedHostResults {
+		return nil, fmt.Errorf("cannot resume: expected %d host results, but got %d", r.expectedHostResults, len(hostResults))
+	}
+	if !r.used.CompareAndSwap(false, true) {
+		panic("BUG: Resume called more than once on interpreterResumer")
 	}
 
 	// Ensure only one goroutine can resume at a time.
@@ -424,11 +433,12 @@ func (r *interpreterResumer) Resume(ctx context.Context, hostResults []uint64) (
 			if ys, ok := v.(*yieldSignal); ok && ys.ce == ce {
 				// Another yield! Capture state again.
 				newResumer := &interpreterResumer{
-					stack:          slices.Clone(ce.stack),
-					frames:         slices.Clone(ce.frames),
-					f:              r.f,
-					moduleInstance: m,
-					ce:             ce,
+					stack:               slices.Clone(ce.stack),
+					frames:              slices.Clone(ce.frames),
+					f:                   r.f,
+					moduleInstance:      m,
+					ce:                  ce,
+					expectedHostResults: r.expectedHostResults,
 				}
 				ce.stack, ce.frames = ce.stack[:0], ce.frames[:0]
 				ce.yieldState.Store(yieldStateSuspended)
@@ -438,6 +448,8 @@ func (r *interpreterResumer) Resume(ctx context.Context, hostResults []uint64) (
 			}
 			err = ce.recoverOnCall(ctx, m, v)
 		}
+
+		notifyTrapObserver(ctx, m, err)
 
 		ce.yieldState.Store(yieldStateIdle)
 	}()
@@ -465,6 +477,9 @@ func (r *interpreterResumer) Resume(ctx context.Context, hostResults []uint64) (
 
 // Cancel implements experimental.Resumer.
 func (r *interpreterResumer) Cancel() {
+	if r.used.Load() {
+		return
+	}
 	if r.cancelled.CompareAndSwap(false, true) {
 		r.stack = nil
 		r.frames = nil
@@ -759,6 +774,9 @@ func (ce *callEngine) CallWithStack(ctx context.Context, stack []uint64) error {
 
 func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []uint64, err error) {
 	m := ce.f.moduleInstance
+	if experimental.GetTimeProvider(ctx) == nil && m.TimeProvider != nil {
+		ctx = experimental.WithTimeProvider(ctx, m.TimeProvider)
+	}
 	if ce.f.parent.ensureTermination {
 		select {
 		case <-ctx.Done():
@@ -793,11 +811,12 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 				// Cooperative yield: capture execution state and return
 				// a YieldError to the embedder.
 				resumer := &interpreterResumer{
-					stack:          slices.Clone(ce.stack),
-					frames:         slices.Clone(ce.frames),
-					f:              ce.f,
-					moduleInstance: m,
-					ce:             ce,
+					stack:               slices.Clone(ce.stack),
+					frames:              slices.Clone(ce.frames),
+					f:                   ce.f,
+					moduleInstance:      m,
+					ce:                  ce,
+					expectedHostResults: ce.frames[len(ce.frames)-1].f.funcType.ResultNumInUint64,
 				}
 				// Clear the call engine state so it isn't accidentally reused.
 				ce.stack, ce.frames = ce.stack[:0], ce.frames[:0]
@@ -808,6 +827,8 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 
 			err = ce.recoverOnCall(ctx, m, v)
 		}
+
+		notifyTrapObserver(ctx, m, err)
 	}()
 
 	ce.pushValues(params)
@@ -879,6 +900,25 @@ func (ce *callEngine) recoverOnCall(ctx context.Context, m *wasm.ModuleInstance,
 	// Allows the reuse of CallEngine.
 	ce.stack, ce.frames = ce.stack[:0], ce.frames[:0]
 	return
+}
+
+func notifyTrapObserver(ctx context.Context, mod api.Module, err error) {
+	if err == nil {
+		return
+	}
+	observer := experimental.GetTrapObserver(ctx)
+	if observer == nil {
+		return
+	}
+	cause, ok := experimental.TrapCauseOf(err)
+	if !ok {
+		return
+	}
+	observer.ObserveTrap(ctx, experimental.TrapObservation{
+		Module: mod,
+		Cause:  cause,
+		Err:    err,
+	})
 }
 
 func (ce *callEngine) callFunction(ctx context.Context, m *wasm.ModuleInstance, f *function) {

@@ -35,7 +35,7 @@ func TestModuleInstance_LookupFunction(t *testing.T) {
 	t.Run("host", func(t *testing.T) {
 		gf, ok := m.LookupFunction(nil, 0, 0).(*lookedUpGoFunction)
 		require.True(t, ok)
-		require.Nil(t, gf.lookedUpModule) // GoFunction doesn't need looked up module.
+		require.Equal(t, m, gf.lookedUpModule)
 		require.Equal(t, &hostModule.FunctionDefinitionSection[0], gf.def)
 		err := gf.CallWithStack(context.Background(), nil)
 		require.NoError(t, err)

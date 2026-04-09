@@ -187,6 +187,7 @@ func NewRuntimeWithConfig(ctx context.Context, rConfig RuntimeConfig) Runtime {
 		ensureTermination:     config.ensureTermination,
 		secureMode:            config.secureMode,
 		fuel:                  config.fuel,
+		timeProvider:          config.timeProvider,
 	}
 }
 
@@ -211,6 +212,7 @@ type runtime struct {
 	ensureTermination bool
 	secureMode        bool
 	fuel              int64
+	timeProvider      experimentalapi.TimeProvider
 }
 
 // Module implements Runtime.Module.
@@ -343,6 +345,9 @@ func (r *runtime) InstantiateModule(
 
 	if closeNotifier, ok := ctx.Value(expctxkeys.CloseNotifierKey{}).(experimentalapi.CloseNotifier); ok {
 		mod.(*wasm.ModuleInstance).CloseNotifier = closeNotifier
+	}
+	if r.timeProvider != nil {
+		mod.(*wasm.ModuleInstance).TimeProvider = r.timeProvider
 	}
 
 	// Attach the code closer so that anything afterward closes the compiled

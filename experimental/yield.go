@@ -54,6 +54,7 @@ type Yielder interface {
 type Resumer interface {
 	// Resume continues the suspended execution. hostResults are the
 	// return values that the yielding host function would have produced.
+	// len(hostResults) must exactly match that host function's result arity.
 	//
 	// ctx governs the resumed execution, allowing the embedder to set
 	// new deadlines, fuel controllers, or other context values.
@@ -62,13 +63,15 @@ type Resumer interface {
 	// Returns (nil, *YieldError) if the execution yields again, in which
 	// case a new Resumer is available via the returned error.
 	//
-	// Panics if called after Cancel, or if called concurrently.
+	// Returns an error if called after Cancel or with the wrong number of
+	// hostResults. Panics if called concurrently or more than once.
 	Resume(ctx context.Context, hostResults []uint64) ([]uint64, error)
 
 	// Cancel releases the captured execution state without resuming.
 	// After Cancel, the Resumer must not be used.
 	//
 	// Cancel is safe to call multiple times (subsequent calls are no-ops).
+	// If Resume has already started, Cancel is also a no-op.
 	Cancel()
 }
 

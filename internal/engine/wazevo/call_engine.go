@@ -207,6 +207,11 @@ func (c *callEngine) CallWithStack(ctx context.Context, paramResultStack []uint6
 
 // CallWithStack implements api.Function.
 func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint64) (err error) {
+	p := c.parent
+	m := p.module
+	if experimental.GetTimeProvider(ctx) == nil && m.TimeProvider != nil {
+		ctx = experimental.WithTimeProvider(ctx, m.TimeProvider)
+	}
 	snapshotEnabled := ctx.Value(expctxkeys.EnableSnapshotterKey{}) != nil
 	if snapshotEnabled {
 		ctx = context.WithValue(ctx, expctxkeys.SnapshotterKey{}, c)
@@ -224,9 +229,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		}()
 	}
 
-	p := c.parent
 	ensureTermination := p.parent.ensureTermination
-	m := p.module
 	if ensureTermination {
 		select {
 		case <-ctx.Done():
@@ -279,17 +282,18 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			adjustClonedStack(oldSp, oldTop, newSP, newFP, newTop)
 
 			resumer := &compilerResumer{
-				sp:               newSP,
-				fp:               newFP,
-				top:              newTop,
-				savedRegisters:   c.execCtx.savedRegisters,
-				returnAddress:    returnAddress,
-				stack:            newStack,
-				ce:               c,
-				module:           m,
-				paramResultStack: paramResultStack,
-				fuelCtrl:         fuelCtrl,
-				initialFuel:      initialFuel,
+				sp:                  newSP,
+				fp:                  newFP,
+				top:                 newTop,
+				savedRegisters:      c.execCtx.savedRegisters,
+				returnAddress:       returnAddress,
+				stack:               newStack,
+				ce:                  c,
+				module:              m,
+				paramResultStack:    paramResultStack,
+				fuelCtrl:            fuelCtrl,
+				initialFuel:         initialFuel,
+				expectedHostResults: c.currentHostFunctionResultCount(),
 			}
 			c.yieldState.Store(compilerYieldStateSuspended)
 			err = experimental.NewYieldError(resumer)
@@ -335,6 +339,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		}
 
 		if err != nil {
+			notifyTrapObserver(ctx, m, err)
 			// Report fuel consumption to the FuelController even on error/trap.
 			if fuelCtrl != nil && initialFuel > 0 {
 				consumed := initialFuel - c.execCtx.fuel
@@ -634,6 +639,25 @@ func runtimeTrapFromExitCode(exitCode wazevoapi.ExitCode) (*wasmruntime.Error, b
 	}
 }
 
+func notifyTrapObserver(ctx context.Context, mod api.Module, err error) {
+	if err == nil {
+		return
+	}
+	observer := experimental.GetTrapObserver(ctx)
+	if observer == nil {
+		return
+	}
+	cause, ok := experimental.TrapCauseOf(err)
+	if !ok {
+		return
+	}
+	observer.ObserveTrap(ctx, experimental.TrapObservation{
+		Module: mod,
+		Cause:  cause,
+		Err:    err,
+	})
+}
+
 func (c *callEngine) callerModuleInstance() *wasm.ModuleInstance {
 	return moduleInstanceFromOpaquePtr(c.execCtx.callerModuleContextPtr)
 }
@@ -854,6 +878,13 @@ func yieldRecoverFn(c *callEngine) {
 	}
 }
 
+func (c *callEngine) currentHostFunctionResultCount() int {
+	hostModule := hostModuleFromOpaque(c.execCtx.goFunctionCallCalleeModuleContextOpaque)
+	index := wasm.Index(wazevoapi.GoFunctionIndexFromExitCode(c.execCtx.exitCode))
+	typeIndex := hostModule.FunctionSection[index]
+	return hostModule.TypeSection[typeIndex].ResultNumInUint64
+}
+
 // --- Async Yield/Resume for compiler engine ---
 
 // compilerYieldSignal is the panic sentinel for async yield in the compiler engine.
@@ -895,12 +926,21 @@ type compilerResumer struct {
 	initialFuel int64
 
 	cancelled atomic.Bool
+	used      atomic.Bool
+
+	expectedHostResults int
 }
 
 // Resume implements experimental.Resumer for the compiler engine.
 func (r *compilerResumer) Resume(ctx context.Context, hostResults []uint64) (results []uint64, err error) {
 	if r.cancelled.Load() {
 		return nil, errors.New("cannot resume: resumer has been cancelled")
+	}
+	if len(hostResults) != r.expectedHostResults {
+		return nil, fmt.Errorf("cannot resume: expected %d host results, but got %d", r.expectedHostResults, len(hostResults))
+	}
+	if !r.used.CompareAndSwap(false, true) {
+		panic("BUG: Resume called more than once on compilerResumer")
 	}
 
 	c := r.ce
@@ -955,17 +995,18 @@ func (r *compilerResumer) Resume(ctx context.Context, hostResults []uint64) (res
 			adjustClonedStack(oldSp, oldTop, newSP, newFP, newTop)
 
 			newResumer := &compilerResumer{
-				sp:               newSP,
-				fp:               newFP,
-				top:              newTop,
-				savedRegisters:   c.execCtx.savedRegisters,
-				returnAddress:    retAddr,
-				stack:            newStack,
-				ce:               c,
-				module:           m,
-				paramResultStack: r.paramResultStack,
-				fuelCtrl:         fuelCtrl,
-				initialFuel:      initialFuel,
+				sp:                  newSP,
+				fp:                  newFP,
+				top:                 newTop,
+				savedRegisters:      c.execCtx.savedRegisters,
+				returnAddress:       retAddr,
+				stack:               newStack,
+				ce:                  c,
+				module:              m,
+				paramResultStack:    r.paramResultStack,
+				fuelCtrl:            fuelCtrl,
+				initialFuel:         initialFuel,
+				expectedHostResults: r.expectedHostResults,
 			}
 			c.yieldState.Store(compilerYieldStateSuspended)
 			err = experimental.NewYieldError(newResumer)
@@ -1002,6 +1043,7 @@ func (r *compilerResumer) Resume(ctx context.Context, hostResults []uint64) (res
 				fuelCtrl.Consumed(consumed)
 			}
 		}
+		notifyTrapObserver(ctx, m, err)
 		c.execCtx.exitCode = wazevoapi.ExitCodeOK
 		c.yieldState.Store(compilerYieldStateIdle)
 	}()
@@ -1089,6 +1131,9 @@ func (r *compilerResumer) Resume(ctx context.Context, hostResults []uint64) (res
 
 // Cancel implements experimental.Resumer.
 func (r *compilerResumer) Cancel() {
+	if r.used.Load() {
+		return
+	}
 	if r.cancelled.CompareAndSwap(false, true) {
 		r.stack = nil
 		r.ce.yieldState.Store(compilerYieldStateIdle)

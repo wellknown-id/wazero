@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -45,13 +46,17 @@ func (f *yieldingHostFunc) Call(ctx context.Context, mod api.Module, stack []uin
 }
 
 func setupYieldTest(t *testing.T, cfg wazero.RuntimeConfig) (api.Module, wazero.Runtime, context.Context) {
+	return setupYieldTestWithHost(t, cfg, &yieldingHostFunc{t: t})
+}
+
+func setupYieldTestWithHost(t *testing.T, cfg wazero.RuntimeConfig, host api.GoModuleFunction) (api.Module, wazero.Runtime, context.Context) {
 	t.Helper()
 	ctx := context.Background()
 	rt := wazero.NewRuntimeWithConfig(ctx, cfg)
 
 	_, err := rt.NewHostModuleBuilder("example").
 		NewFunctionBuilder().
-		WithGoModuleFunction(&yieldingHostFunc{t: t},
+		WithGoModuleFunction(host,
 			nil,                                // no params
 			[]api.ValueType{api.ValueTypeI32}). // 1 i32 result
 		Export("async_work").
@@ -64,6 +69,14 @@ func setupYieldTest(t *testing.T, cfg wazero.RuntimeConfig) (api.Module, wazero.
 	return mod, rt, ctx
 }
 
+func requireYieldError(t *testing.T, err error) *experimental.YieldError {
+	t.Helper()
+	var yieldErr *experimental.YieldError
+	require.True(t, errors.As(err, &yieldErr), "expected YieldError, got: %v", err)
+	require.NotNil(t, yieldErr.Resumer())
+	return yieldErr
+}
+
 func TestYield_BasicYieldAndResume(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
@@ -73,11 +86,8 @@ func TestYield_BasicYieldAndResume(t *testing.T) {
 			yieldCtx := experimental.WithYielder(ctx)
 			_, err := mod.ExportedFunction("run").Call(yieldCtx)
 
-			var yieldErr *experimental.YieldError
-			require.True(t, errors.As(err, &yieldErr), "expected YieldError, got: %v", err)
-
+			yieldErr := requireYieldError(t, err)
 			resumer := yieldErr.Resumer()
-			require.NotNil(t, resumer)
 
 			results, err := resumer.Resume(experimental.WithYielder(ctx), []uint64{42})
 			require.NoError(t, err)
@@ -95,8 +105,7 @@ func TestYield_ResumeFromDifferentGoroutine(t *testing.T) {
 			yieldCtx := experimental.WithYielder(ctx)
 			_, err := mod.ExportedFunction("run").Call(yieldCtx)
 
-			var yieldErr *experimental.YieldError
-			require.True(t, errors.As(err, &yieldErr))
+			yieldErr := requireYieldError(t, err)
 
 			var wg sync.WaitGroup
 			var results []uint64
@@ -123,9 +132,7 @@ func TestYield_Cancel(t *testing.T) {
 			yieldCtx := experimental.WithYielder(ctx)
 			_, err := mod.ExportedFunction("run").Call(yieldCtx)
 
-			var yieldErr *experimental.YieldError
-			require.True(t, errors.As(err, &yieldErr))
-
+			yieldErr := requireYieldError(t, err)
 			resumer := yieldErr.Resumer()
 
 			resumer.Cancel()
@@ -134,6 +141,62 @@ func TestYield_Cancel(t *testing.T) {
 			_, err = resumer.Resume(experimental.WithYielder(ctx), []uint64{42})
 			require.Error(t, err)
 			require.Contains(t, err.Error(), "cancelled")
+		})
+	}
+}
+
+func TestYield_ResumeRejectsWrongHostResultCount(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			for _, tc := range []struct {
+				name        string
+				hostResults []uint64
+			}{
+				{name: "too few", hostResults: nil},
+				{name: "too many", hostResults: []uint64{1, 2}},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					mod, rt, ctx := setupYieldTest(t, ec.cfg)
+					defer rt.Close(ctx)
+
+					_, err := mod.ExportedFunction("run").Call(experimental.WithYielder(ctx))
+					resumer := requireYieldError(t, err).Resumer()
+
+					_, err = resumer.Resume(experimental.WithYielder(ctx), tc.hostResults)
+					require.EqualError(t, err, fmt.Sprintf("cannot resume: expected 1 host results, but got %d", len(tc.hostResults)))
+
+					results, err := resumer.Resume(experimental.WithYielder(ctx), []uint64{42})
+					require.NoError(t, err)
+					require.Equal(t, []uint64{142}, results)
+				})
+			}
+		})
+	}
+}
+
+func TestYield_ReyieldUsesFreshResumer(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			mod, rt, ctx := setupYieldTest(t, ec.cfg)
+			defer rt.Close(ctx)
+
+			_, err := mod.ExportedFunction("run_twice").Call(experimental.WithYielder(ctx))
+			firstResumer := requireYieldError(t, err).Resumer()
+
+			_, err = firstResumer.Resume(experimental.WithYielder(ctx), []uint64{40})
+			secondYield := requireYieldError(t, err)
+
+			firstResumer.Cancel() // spent resumers must not interfere with the new suspended execution
+
+			results, err := secondYield.Resumer().Resume(experimental.WithYielder(ctx), []uint64{2})
+			require.NoError(t, err)
+			require.Equal(t, []uint64{42}, results)
+
+			panicErr := require.CapturePanic(func() {
+				_, _ = firstResumer.Resume(experimental.WithYielder(ctx), []uint64{1})
+			})
+			require.Error(t, panicErr)
+			require.Contains(t, panicErr.Error(), "Resume called more than once")
 		})
 	}
 }

@@ -113,6 +113,9 @@ type (
 
 		// CloseNotifier is an experimental hook called once on close.
 		CloseNotifier experimental.CloseNotifier
+
+		// TimeProvider is the module-scoped default for host-visible time.
+		TimeProvider experimental.TimeProvider
 	}
 
 	// DataInstance holds bytes corresponding to the data segment in a module.
