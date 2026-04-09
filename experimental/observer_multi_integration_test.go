@@ -633,6 +633,70 @@ func TestMultiFuelObserverWithMultiTrapObserver_YieldResumeLifecycle(t *testing.
 	}
 }
 
+func TestMultiFuelObserverWithMultiYieldPolicyObserver_YieldResumeLifecycle(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			ctx := context.Background()
+			provider := newObservingTimeProvider()
+			mod, rt, _ := setupYieldTest(t, ec.cfg.WithTimeProvider(provider))
+			defer rt.Close(ctx)
+
+			fuelLeft := &recordingFuelObserver{}
+			fuelRight := &recordingFuelObserver{}
+			policyLeft := &recordingYieldPolicyObserver{}
+			policyRight := &recordingYieldPolicyObserver{}
+			ctrl := experimental.NewSimpleFuelController(20)
+			callCtx := experimental.WithYieldPolicyObserver(
+				experimental.WithYieldPolicy(
+					experimental.WithFuelObserver(
+						experimental.WithFuelController(
+							experimental.WithYielder(ctx),
+							ctrl,
+						),
+						experimental.MultiFuelObserver(fuelLeft, fuelRight),
+					),
+					experimental.YieldPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+						require.Equal(t, mod.Name(), caller.Name())
+						require.Equal(t, "example.async_work", hostFunction.DebugName())
+						return true
+					}),
+				),
+				experimental.MultiYieldPolicyObserver(policyLeft, policyRight),
+			)
+
+			_, err := mod.ExportedFunction("run").Call(callCtx)
+			resumer := requireYieldError(t, err).Resumer()
+
+			results, err := resumer.Resume(callCtx, []uint64{42})
+			require.NoError(t, err)
+			require.Equal(t, []uint64{142}, results)
+
+			wantFuel := []fuelObservationSnapshot{
+				{
+					Event:     experimental.FuelEventBudgeted,
+					Budget:    20,
+					Remaining: 20,
+				},
+				{
+					Event:     experimental.FuelEventConsumed,
+					Budget:    20,
+					Consumed:  ctrl.TotalConsumed(),
+					Remaining: 20 - ctrl.TotalConsumed(),
+				},
+			}
+			require.Equal(t, wantFuel, snapshotFuelObservations(fuelLeft.snapshot()))
+			require.Equal(t, wantFuel, snapshotFuelObservations(fuelRight.snapshot()))
+
+			for _, observations := range [][]experimental.YieldPolicyObservation{policyLeft.snapshot(), policyRight.snapshot()} {
+				require.Equal(t, 1, len(observations))
+				require.Equal(t, experimental.YieldPolicyEventAllowed, observations[0].Event)
+				require.Equal(t, mod.Name(), observations[0].Module.Name())
+				require.Equal(t, "example.async_work", observations[0].HostFunction.DebugName())
+			}
+		})
+	}
+}
+
 func TestMultiYieldObserver_ReyieldUsesResumedObserver(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
