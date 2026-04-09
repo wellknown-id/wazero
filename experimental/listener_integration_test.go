@@ -1672,6 +1672,148 @@ func TestFunctionListener_MultiTrapObserver_MemoryFault(t *testing.T) {
 	})
 }
 
+func TestFunctionListener_MultiTrapObserver_ArithmeticTraps(t *testing.T) {
+	testCases := []struct {
+		name         string
+		cfg          func() wazero.RuntimeConfig
+		supported    func() bool
+		moduleBinary func() []byte
+		wantErr      error
+		wantCause    experimental.TrapCause
+	}{
+		{
+			name:         "interpreter/unreachable",
+			cfg:          wazero.NewRuntimeConfigInterpreter,
+			supported:    func() bool { return true },
+			moduleBinary: trapRuntimeUnreachableBinary,
+			wantErr:      wasmruntime.ErrRuntimeUnreachable,
+			wantCause:    experimental.TrapCauseUnreachable,
+		},
+		{
+			name:         "compiler/unreachable",
+			cfg:          wazero.NewRuntimeConfigCompiler,
+			supported:    platform.CompilerSupported,
+			moduleBinary: trapRuntimeUnreachableBinary,
+			wantErr:      wasmruntime.ErrRuntimeUnreachable,
+			wantCause:    experimental.TrapCauseUnreachable,
+		},
+		{
+			name:         "interpreter/integer-divide-by-zero",
+			cfg:          wazero.NewRuntimeConfigInterpreter,
+			supported:    func() bool { return true },
+			moduleBinary: trapRuntimeIntegerDivideByZeroBinary,
+			wantErr:      wasmruntime.ErrRuntimeIntegerDivideByZero,
+			wantCause:    experimental.TrapCauseIntegerDivideByZero,
+		},
+		{
+			name:         "compiler/integer-divide-by-zero",
+			cfg:          wazero.NewRuntimeConfigCompiler,
+			supported:    platform.CompilerSupported,
+			moduleBinary: trapRuntimeIntegerDivideByZeroBinary,
+			wantErr:      wasmruntime.ErrRuntimeIntegerDivideByZero,
+			wantCause:    experimental.TrapCauseIntegerDivideByZero,
+		},
+		{
+			name:         "interpreter/integer-overflow",
+			cfg:          wazero.NewRuntimeConfigInterpreter,
+			supported:    func() bool { return true },
+			moduleBinary: trapRuntimeIntegerOverflowBinary,
+			wantErr:      wasmruntime.ErrRuntimeIntegerOverflow,
+			wantCause:    experimental.TrapCauseIntegerOverflow,
+		},
+		{
+			name:         "compiler/integer-overflow",
+			cfg:          wazero.NewRuntimeConfigCompiler,
+			supported:    platform.CompilerSupported,
+			moduleBinary: trapRuntimeIntegerOverflowBinary,
+			wantErr:      wasmruntime.ErrRuntimeIntegerOverflow,
+			wantCause:    experimental.TrapCauseIntegerOverflow,
+		},
+		{
+			name:         "interpreter/invalid-conversion-to-integer",
+			cfg:          wazero.NewRuntimeConfigInterpreter,
+			supported:    func() bool { return true },
+			moduleBinary: trapRuntimeInvalidConversionToIntegerBinary,
+			wantErr:      wasmruntime.ErrRuntimeInvalidConversionToInteger,
+			wantCause:    experimental.TrapCauseInvalidConversionToInteger,
+		},
+		{
+			name:         "compiler/invalid-conversion-to-integer",
+			cfg:          wazero.NewRuntimeConfigCompiler,
+			supported:    platform.CompilerSupported,
+			moduleBinary: trapRuntimeInvalidConversionToIntegerBinary,
+			wantErr:      wasmruntime.ErrRuntimeInvalidConversionToInteger,
+			wantCause:    experimental.TrapCauseInvalidConversionToInteger,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !tc.supported() {
+				t.Skip("engine is not supported on this host")
+			}
+
+			ctx := context.Background()
+			recorder := &orderedEventRecorder{}
+			listenerEvents := &recordingFunctionListener{}
+			instantiateCtx := experimental.WithFunctionListenerFactory(ctx, newFunctionListenerFactory(&orderedRecordingFunctionListener{
+				recorder: recorder,
+				events:   listenerEvents,
+			}))
+
+			rt := wazero.NewRuntimeWithConfig(ctx, tc.cfg())
+			defer rt.Close(ctx)
+
+			mod, err := rt.InstantiateWithConfig(instantiateCtx, tc.moduleBinary(), wazero.NewModuleConfig().WithName("guest"))
+			require.NoError(t, err)
+
+			trapLeft := &recordingTrapObserver{}
+			trapRight := &recordingTrapObserver{}
+			_, err = mod.ExportedFunction("run").Call(
+				experimental.WithTrapObserver(
+					ctx,
+					experimental.MultiTrapObserver(
+						experimental.TrapObserverFunc(func(ctx context.Context, observation experimental.TrapObservation) {
+							trapLeft.ObserveTrap(ctx, observation)
+							recorder.add("trap left %s", observation.Cause)
+						}),
+						experimental.TrapObserverFunc(func(ctx context.Context, observation experimental.TrapObservation) {
+							trapRight.ObserveTrap(ctx, observation)
+							recorder.add("trap right %s", observation.Cause)
+						}),
+					),
+				),
+			)
+			require.ErrorIs(t, err, tc.wantErr)
+
+			cause, ok := experimental.TrapCauseOf(err)
+			require.True(t, ok)
+			require.Equal(t, tc.wantCause, cause)
+
+			events := listenerEvents.snapshot()
+			assertListenerEvents(t, events, []expectedListenerEvent{
+				{phase: "before", function: "run"},
+				{phase: "abort", function: "run", errIs: tc.wantErr},
+			})
+			assertAbortTrapCauseClassification(t, events, tc.wantCause, true)
+			assertBeforeCompletionPairing(t, events)
+			assertBeforeCompletionStackPairing(t, events)
+
+			requireEquivalentTrapObservation(t, trapObservationSnapshot{
+				Cause:      tc.wantCause,
+				ModuleName: mod.Name(),
+			}, tc.wantErr, trapLeft, trapRight)
+
+			assertOrderedEvents(t, recorder.snapshot(), []string{
+				"listener before run",
+				fmt.Sprintf("listener abort run (%s)", tc.wantCause),
+				fmt.Sprintf("trap left %s", tc.wantCause),
+				fmt.Sprintf("trap right %s", tc.wantCause),
+			})
+		})
+	}
+}
+
 func TestFunctionListener_PolicyObserverOrdering(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
