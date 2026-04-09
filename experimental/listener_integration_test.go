@@ -1595,6 +1595,83 @@ func TestFunctionListener_MultiTrapObserver_FuelExhausted(t *testing.T) {
 	})
 }
 
+func TestFunctionListener_MultiTrapObserver_MemoryFault(t *testing.T) {
+	if !supportsGuardedMemoryFaultTrap() {
+		t.Skip("memory fault trap path is only expected on supported compiler targets")
+	}
+
+	ctx := context.Background()
+	recorder := &orderedEventRecorder{}
+	leftEvents := &recordingFunctionListener{}
+	rightEvents := &recordingFunctionListener{}
+	instantiateCtx := experimental.WithFunctionListenerFactory(ctx, experimental.MultiFunctionListenerFactory(
+		newFunctionListenerFactory(&namedOrderedRecordingFunctionListener{
+			name:     "listener left",
+			recorder: recorder,
+			events:   leftEvents,
+		}),
+		newFunctionListenerFactory(&namedOrderedRecordingFunctionListener{
+			name:     "listener right",
+			recorder: recorder,
+			events:   rightEvents,
+		}),
+	))
+
+	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfigCompiler().WithSecureMode(true))
+	defer rt.Close(ctx)
+
+	mod, err := rt.InstantiateWithConfig(instantiateCtx, trapRuntimeMemoryFaultFixture(t), wazero.NewModuleConfig().WithName("secure-guest"))
+	require.NoError(t, err)
+
+	trapLeft := &recordingTrapObserver{}
+	trapRight := &recordingTrapObserver{}
+	_, err = mod.ExportedFunction("oob").Call(
+		experimental.WithTrapObserver(
+			ctx,
+			experimental.MultiTrapObserver(
+				experimental.TrapObserverFunc(func(ctx context.Context, observation experimental.TrapObservation) {
+					trapLeft.ObserveTrap(ctx, observation)
+					recorder.add("trap left %s", observation.Cause)
+				}),
+				experimental.TrapObserverFunc(func(ctx context.Context, observation experimental.TrapObservation) {
+					trapRight.ObserveTrap(ctx, observation)
+					recorder.add("trap right %s", observation.Cause)
+				}),
+			),
+		),
+	)
+	require.ErrorIs(t, err, wasmruntime.ErrRuntimeMemoryFault)
+
+	cause, ok := experimental.TrapCauseOf(err)
+	require.True(t, ok)
+	require.Equal(t, experimental.TrapCauseMemoryFault, cause)
+
+	wantEvents := []expectedListenerEvent{
+		{phase: "before", function: "oob"},
+		{phase: "abort", function: "oob", errIs: wasmruntime.ErrRuntimeMemoryFault},
+	}
+	for _, events := range [][]listenerEvent{leftEvents.snapshot(), rightEvents.snapshot()} {
+		assertListenerEvents(t, events, wantEvents)
+		assertAbortTrapCauseClassification(t, events, experimental.TrapCauseMemoryFault, true)
+		assertBeforeCompletionPairing(t, events)
+		assertBeforeCompletionStackPairing(t, events)
+	}
+
+	requireEquivalentTrapObservation(t, trapObservationSnapshot{
+		Cause:      experimental.TrapCauseMemoryFault,
+		ModuleName: mod.Name(),
+	}, wasmruntime.ErrRuntimeMemoryFault, trapLeft, trapRight)
+
+	assertOrderedEvents(t, recorder.snapshot(), []string{
+		"listener left before oob",
+		"listener right before oob",
+		"listener left abort oob (memory_fault)",
+		"listener right abort oob (memory_fault)",
+		"trap left memory_fault",
+		"trap right memory_fault",
+	})
+}
+
 func TestFunctionListener_PolicyObserverOrdering(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
