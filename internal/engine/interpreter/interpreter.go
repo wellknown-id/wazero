@@ -944,6 +944,22 @@ func notifyTrapObserver(ctx context.Context, mod api.Module, err error) {
 	})
 }
 
+func notifyHostCallPolicyObserver(ctx context.Context, mod api.Module, hostFunction api.FunctionDefinition, allowed bool) {
+	observer := experimental.GetHostCallPolicyObserver(ctx)
+	if observer == nil {
+		return
+	}
+	event := experimental.HostCallPolicyEventDenied
+	if allowed {
+		event = experimental.HostCallPolicyEventAllowed
+	}
+	observer.ObserveHostCallPolicy(ctx, experimental.HostCallPolicyObservation{
+		Module:       mod,
+		HostFunction: hostFunction,
+		Event:        event,
+	})
+}
+
 func notifyYieldObserver(ctx, fallbackCtx context.Context, observer experimental.YieldObserver, mod api.Module, event experimental.YieldEvent, yieldCount uint64, expectedHostResults int, clock experimental.TimeProvider, yieldedAtNanos int64) {
 	observer, observeCtx := resolveYieldObserver(ctx, fallbackCtx, observer)
 	if observer == nil {
@@ -1006,8 +1022,13 @@ func (ce *callEngine) callFunction(ctx context.Context, m *wasm.ModuleInstance, 
 
 func (ce *callEngine) callGoFunc(ctx context.Context, m *wasm.ModuleInstance, f *function, stack []uint64) {
 	ctx = wasm.ApplyCallContextDefaults(ctx, m)
-	if policy := experimental.GetHostCallPolicy(ctx); policy != nil && !policy.AllowHostCall(ctx, m, f.definition()) {
-		panic(wasmruntime.ErrRuntimePolicyDenied)
+	if policy := experimental.GetHostCallPolicy(ctx); policy != nil {
+		def := f.definition()
+		allowed := policy.AllowHostCall(ctx, m, def)
+		notifyHostCallPolicyObserver(ctx, m, def, allowed)
+		if !allowed {
+			panic(wasmruntime.ErrRuntimePolicyDenied)
+		}
 	}
 
 	typ := f.funcType

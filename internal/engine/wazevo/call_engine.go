@@ -722,6 +722,22 @@ func notifyTrapObserver(ctx context.Context, mod api.Module, err error) {
 	})
 }
 
+func notifyHostCallPolicyObserver(ctx context.Context, mod api.Module, hostFunction api.FunctionDefinition, allowed bool) {
+	observer := experimental.GetHostCallPolicyObserver(ctx)
+	if observer == nil {
+		return
+	}
+	event := experimental.HostCallPolicyEventDenied
+	if allowed {
+		event = experimental.HostCallPolicyEventAllowed
+	}
+	observer.ObserveHostCallPolicy(ctx, experimental.HostCallPolicyObservation{
+		Module:       mod,
+		HostFunction: hostFunction,
+		Event:        event,
+	})
+}
+
 func notifyFuelObserver(ctx, fallbackCtx context.Context, observer experimental.FuelObserver, observation experimental.FuelObservation) {
 	observer, observeCtx := resolveFuelObserver(ctx, fallbackCtx, observer)
 	if observer == nil {
@@ -811,7 +827,9 @@ func (c *callEngine) allowHostCall(ctx context.Context, caller api.Module, index
 		return true
 	}
 	def := c.hostFunctionDefinition(index)
-	return policy.AllowHostCall(ctx, caller, def)
+	allowed := policy.AllowHostCall(ctx, caller, def)
+	notifyHostCallPolicyObserver(ctx, caller, def, allowed)
+	return allowed
 }
 
 func (c *callEngine) hostFunctionDefinition(index int) api.FunctionDefinition {

@@ -13,6 +13,11 @@ func (*stubHostCallPolicy) AllowHostCall(context.Context, api.Module, api.Functi
 	return false
 }
 
+type stubHostCallPolicyObserver struct{}
+
+func (*stubHostCallPolicyObserver) ObserveHostCallPolicy(context.Context, HostCallPolicyObservation) {
+}
+
 type stubYieldPolicy struct{}
 
 func (*stubYieldPolicy) AllowYield(context.Context, api.Module, api.FunctionDefinition) bool {
@@ -76,6 +81,51 @@ func TestHostCallPolicyFunc_NilAllows(t *testing.T) {
 	var policy HostCallPolicyFunc
 	if !policy.AllowHostCall(context.Background(), nil, nil) {
 		t.Fatal("nil HostCallPolicyFunc should behave as absent and allow the call")
+	}
+}
+
+func TestWithHostCallPolicyObserver_NilDoesNothing(t *testing.T) {
+	ctx := context.Background()
+	if result := WithHostCallPolicyObserver(ctx, nil); result != ctx {
+		t.Fatal("WithHostCallPolicyObserver(ctx, nil) should return the same context")
+	}
+}
+
+func TestGetHostCallPolicyObserver_NotSet(t *testing.T) {
+	if got := GetHostCallPolicyObserver(context.Background()); got != nil {
+		t.Fatal("GetHostCallPolicyObserver on empty context should return nil")
+	}
+}
+
+func TestGetHostCallPolicyObserver_NilContext(t *testing.T) {
+	if got := GetHostCallPolicyObserver(nil); got != nil {
+		t.Fatal("GetHostCallPolicyObserver(nil) should return nil")
+	}
+}
+
+func TestWithHostCallPolicyObserver_TypedNilDoesNothing(t *testing.T) {
+	ctx := context.Background()
+
+	var funcObserver HostCallPolicyObserverFunc
+	if result := WithHostCallPolicyObserver(ctx, funcObserver); result != ctx {
+		t.Fatal("WithHostCallPolicyObserver should ignore typed-nil HostCallPolicyObserverFunc values")
+	}
+
+	var ptrObserver *stubHostCallPolicyObserver
+	if result := WithHostCallPolicyObserver(ctx, ptrObserver); result != ctx {
+		t.Fatal("WithHostCallPolicyObserver should ignore typed-nil HostCallPolicyObserver values")
+	}
+}
+
+func TestWithHostCallPolicyObserver_RoundTrip(t *testing.T) {
+	observer := HostCallPolicyObserverFunc(func(context.Context, HostCallPolicyObservation) {})
+
+	got := GetHostCallPolicyObserver(WithHostCallPolicyObserver(context.Background(), observer))
+	if got == nil {
+		t.Fatal("GetHostCallPolicyObserver should return non-nil")
+	}
+	if _, ok := got.(HostCallPolicyObserverFunc); !ok {
+		t.Fatal("GetHostCallPolicyObserver should return the registered observer type")
 	}
 }
 

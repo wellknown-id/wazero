@@ -405,9 +405,13 @@ func (f *hostFunction) CallWithStack(ctx context.Context, stack []uint64) (err e
 	}()
 	ctx = wasm.ApplyCallContextDefaults(ctx, f.lookedUpModule)
 	if f.enforcePolicy {
-		if policy := experimental.GetHostCallPolicy(ctx); policy != nil && !policy.AllowHostCall(ctx, f.lookedUpModule, f.def) {
-			err = wasmruntime.ErrRuntimePolicyDenied
-			return err
+		if policy := experimental.GetHostCallPolicy(ctx); policy != nil {
+			allowed := policy.AllowHostCall(ctx, f.lookedUpModule, f.def)
+			notifyHostCallPolicyObserver(ctx, f.lookedUpModule, f.def, allowed)
+			if !allowed {
+				err = wasmruntime.ErrRuntimePolicyDenied
+				return err
+			}
 		}
 	}
 	f.g.Call(ctx, f.lookedUpModule, stack)

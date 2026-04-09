@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"sync"
 	"testing"
 
 	"github.com/tetratelabs/wazero"
@@ -15,6 +16,25 @@ import (
 	"github.com/tetratelabs/wazero/internal/wasm"
 	"github.com/tetratelabs/wazero/internal/wasmruntime"
 )
+
+type recordingHostCallPolicyObserver struct {
+	mu           sync.Mutex
+	observations []experimental.HostCallPolicyObservation
+}
+
+func (r *recordingHostCallPolicyObserver) ObserveHostCallPolicy(_ context.Context, observation experimental.HostCallPolicyObservation) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.observations = append(r.observations, observation)
+}
+
+func (r *recordingHostCallPolicyObserver) snapshot() []experimental.HostCallPolicyObservation {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]experimental.HostCallPolicyObservation, len(r.observations))
+	copy(out, r.observations)
+	return out
+}
 
 func TestHostCallPolicy_DeniesImportedHostFunction(t *testing.T) {
 	moduleBinary := binaryencoding.EncodeModule(&wasm.Module{
@@ -194,6 +214,76 @@ func TestHostCallPolicy_SelectivelyAllowsImportedHostFunction(t *testing.T) {
 	}
 }
 
+func TestHostCallPolicyObserver_ReportsAllowAndDeny(t *testing.T) {
+	moduleBinary := binaryencoding.EncodeModule(&wasm.Module{
+		TypeSection: []wasm.FunctionType{{}},
+		ImportSection: []wasm.Import{
+			{Module: "env", Name: "allow", Type: wasm.ExternTypeFunc, DescFunc: 0},
+			{Module: "env", Name: "deny", Type: wasm.ExternTypeFunc, DescFunc: 0},
+		},
+		FunctionSection: []wasm.Index{0},
+		CodeSection: []wasm.Code{{Body: []byte{
+			wasm.OpcodeCall, 0,
+			wasm.OpcodeCall, 1,
+			wasm.OpcodeEnd,
+		}}},
+		ExportSection: []wasm.Export{{Type: api.ExternTypeFunc, Name: "run", Index: 2}},
+	})
+
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
+
+			ctx := context.Background()
+			rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg)
+			defer rt.Close(ctx)
+
+			allowedCalled := false
+			deniedCalled := false
+			_, err := rt.NewHostModuleBuilder("env").
+				NewFunctionBuilder().
+				WithFunc(func() { allowedCalled = true }).
+				Export("allow").
+				NewFunctionBuilder().
+				WithFunc(func() { deniedCalled = true }).
+				Export("deny").
+				Instantiate(ctx)
+			require.NoError(t, err)
+
+			mod, err := rt.InstantiateWithConfig(ctx, moduleBinary, wazero.NewModuleConfig().WithName("guest"))
+			require.NoError(t, err)
+
+			observer := &recordingHostCallPolicyObserver{}
+			callCtx := experimental.WithHostCallPolicyObserver(
+				experimental.WithHostCallPolicy(ctx, experimental.HostCallPolicyFunc(
+					func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+						require.Equal(t, "guest", caller.Name())
+						return slices.Contains(hostFunction.ExportNames(), "allow")
+					},
+				)),
+				observer,
+			)
+
+			_, err = mod.ExportedFunction("run").Call(callCtx)
+			require.Error(t, err)
+			require.True(t, errors.Is(err, wasmruntime.ErrRuntimePolicyDenied), "expected ErrRuntimePolicyDenied, got %v", err)
+			require.True(t, allowedCalled)
+			require.False(t, deniedCalled)
+
+			observations := observer.snapshot()
+			require.Equal(t, 2, len(observations))
+			require.Equal(t, experimental.HostCallPolicyEventAllowed, observations[0].Event)
+			require.Equal(t, "guest", observations[0].Module.Name())
+			require.Equal(t, "env.allow", observations[0].HostFunction.DebugName())
+			require.Equal(t, experimental.HostCallPolicyEventDenied, observations[1].Event)
+			require.Equal(t, "guest", observations[1].Module.Name())
+			require.Equal(t, "env.deny", observations[1].HostFunction.DebugName())
+		})
+	}
+}
+
 func TestHostCallPolicy_DeniesImportedStartFunction(t *testing.T) {
 	start := wasm.Index(0)
 	moduleBinary := binaryencoding.EncodeModule(&wasm.Module{
@@ -235,6 +325,57 @@ func TestHostCallPolicy_DeniesImportedStartFunction(t *testing.T) {
 			require.False(t, hostCalled)
 			require.True(t, errors.Is(err, wasmruntime.ErrRuntimePolicyDenied), "expected ErrRuntimePolicyDenied, got %v", err)
 			require.Contains(t, err.Error(), "start")
+		})
+	}
+}
+
+func TestHostCallPolicyObserver_RuntimeDefaultDenialOnStartFunction(t *testing.T) {
+	start := wasm.Index(0)
+	moduleBinary := binaryencoding.EncodeModule(&wasm.Module{
+		TypeSection:   []wasm.FunctionType{{}},
+		ImportSection: []wasm.Import{{Module: "env", Name: "check", Type: wasm.ExternTypeFunc, DescFunc: 0}},
+		StartSection:  &start,
+	})
+
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
+
+			ctx := context.Background()
+			rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg.WithHostCallPolicy(experimental.HostCallPolicyFunc(
+				func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+					require.Equal(t, "start-guest", caller.Name())
+					require.Equal(t, "env.check", hostFunction.DebugName())
+					return false
+				},
+			)))
+			defer rt.Close(ctx)
+
+			hostCalled := false
+			_, err := rt.NewHostModuleBuilder("env").
+				NewFunctionBuilder().
+				WithFunc(func() { hostCalled = true }).
+				Export("check").
+				Instantiate(ctx)
+			require.NoError(t, err)
+
+			observer := &recordingHostCallPolicyObserver{}
+			_, err = rt.InstantiateWithConfig(
+				experimental.WithHostCallPolicyObserver(ctx, observer),
+				moduleBinary,
+				wazero.NewModuleConfig().WithName("start-guest"),
+			)
+			require.Error(t, err)
+			require.True(t, errors.Is(err, wasmruntime.ErrRuntimePolicyDenied), "expected ErrRuntimePolicyDenied, got %v", err)
+			require.False(t, hostCalled)
+
+			observations := observer.snapshot()
+			require.Equal(t, 1, len(observations))
+			require.Equal(t, experimental.HostCallPolicyEventDenied, observations[0].Event)
+			require.Equal(t, "start-guest", observations[0].Module.Name())
+			require.Equal(t, "env.check", observations[0].HostFunction.DebugName())
 		})
 	}
 }
