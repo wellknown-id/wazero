@@ -115,103 +115,103 @@ native packaging for embedders that want a fully linked executable.
 
 #### Current implemented state
 
-- [100%:dedf9a6c] The Rust runtime already supports explicit **interpreter** and **compiler**
+- [100%:04af62a8] The Rust runtime already supports explicit **interpreter** and **compiler**
   modes.
-- [100%:dedf9a6c] `razero` now supports **precompiled artifacts** through
+- [100%:04af62a8] `razero` now supports **precompiled artifacts** through
   `build_precompiled_artifact`, `compile_precompiled_artifact`, and
   `instantiate_precompiled_artifact`, so `.wasm` can be AOT-prepared and later
   loaded without recompiling at runtime.
-- [95%:dedf9a6c] `razero-compiler` now preserves a richer **AOT metadata** sidecar describing:
+- [100%:04af62a8] `razero-compiler` now preserves a richer **AOT metadata** sidecar describing:
   target, function metadata, relocations, function signatures, module shape,
   import descriptors, memory/table/global metadata, module-context layout, and
   execution-context/helper ABI details.
-- [100%:dedf9a6c] `CompiledModule::emit_relocatable_object()` now emits a first
-  **Linux/x86_64 ELF relocatable object** plus Razero metadata sidecar.
-- [90%:dedf9a6c] `razero_compiler::runtime_support::LinkedModule` provides a minimal
-  metadata-driven linked startup/call surface for simple Linux/x86_64 AOT
-  modules.
-- [75%:dedf9a6c] `razero_compiler::linker::link_native_executable(...)` now packages one or
-  more relocatable Wasm objects into a native executable for the current narrow
-  surface: exported functions with scalar C ABI-compatible signatures.
-- [100%:dedf9a6c] `razero_compiler::linker::link_hello_host_executable(...)` now provides a
+- [100%:04af62a8] `CompiledModule::emit_relocatable_object()` now emits
+  **Linux ELF relocatable objects** plus Razero metadata sidecar.
+- [100%:04af62a8] `razero_compiler::runtime_support::LinkedModule` provides a
+  metadata-driven linked startup/call surface for Linux ELF AOT modules with the
+  supported runtime-state slice.
+- [95%:04af62a8] `razero_compiler::linker::link_native_executable(...)` now packages one or
+  more relocatable Wasm objects into a native executable for the current C ABI-first
+  surface.
+- [100%:04af62a8] `razero_compiler::linker::link_hello_host_executable(...)` now provides a
   **specialized** native-link flow for the existing `hello-host` example,
   including its `env.print(ptr, len)` host import and local memory setup.
-- [100%:dedf9a6c] The current packaging flow emits a package metadata bundle alongside the
+- [100%:04af62a8] The current packaging flow emits a package metadata bundle alongside the
   executable (`.razero-package`) and is covered by end-to-end Rust tests.
 
 #### Product shape we should preserve
 
-- [100%:dedf9a6c] **Interpreter runtime mode remains required.** Packaged native executables do
+- [100%:04af62a8] **Interpreter runtime mode remains required.** Packaged native executables do
   not replace the interpreter; they are a separate AOT deployment target.
-- [95%:dedf9a6c] **WASI stays out of the core crates.** Host APIs remain embedder-defined and
+- [100%:04af62a8] **WASI stays out of the core crates.** Host APIs remain embedder-defined and
   must be linked or supplied explicitly.
-- [90%:dedf9a6c] **Initial packaged host ABI remains C ABI first.**
-- [100%:dedf9a6c] **Linux ELF remains the first shipping object/executable target**, with
-  x86_64 the current implemented architecture.
+- [100%:04af62a8] **Initial packaged host ABI remains C ABI first.**
+- [100%:04af62a8] **Linux ELF remains the first shipping object/executable target**, with
+  x86_64 and AArch64 now implemented.
 
 #### What is still incomplete
 
-- [30%:dedf9a6c] The **generic** native-link path is still intentionally narrow:
-  - [15%:dedf9a6c] Linux/x86_64 only
-  - [20%:dedf9a6c] exported functions only
-  - [35%:dedf9a6c] scalar C ABI-compatible signatures only
-  - [10%:dedf9a6c] no generic packaging yet for imports, local/global runtime state, start
-    sections, tables, element segments, or richer module shapes
-- [40%:dedf9a6c] `hello-host` is now packaged, but through a **special-case linker path**, not
-  through a generalized host-ABI/runtime-support layer.
-- [15%:dedf9a6c] There is not yet a stable, general-purpose packaging story for:
-  - [10%:dedf9a6c] arbitrary host imports
-  - [20%:dedf9a6c] multiple linked Wasm modules with cross-module runtime state
-  - [10%:dedf9a6c] modules with memory/table/global requirements beyond the specialized paths
-  - [20%:dedf9a6c] AArch64 object emission and native packaging
-- [35%:dedf9a6c] The package metadata format exists in code, but still needs to be treated as a
-  versioned product surface with explicit compatibility guarantees.
+- [60%:04af62a8] The **generic** native-link path is still intentionally narrower than a fully
+  general packaging/runtime product:
+  - [80%:04af62a8] Linux ELF only
+  - [70%:04af62a8] exported-function-oriented C ABI wrappers
+  - [70%:04af62a8] scalar C ABI-compatible signatures only
+  - [60%:04af62a8] not every host/import/runtime shape is generalized yet
+- [85%:04af62a8] `hello-host` remains available as a **specialized convenience path**, but no
+  longer defines the only host-ABI/runtime-support route.
+- [55%:04af62a8] There is not yet a fully stable, general-purpose packaging story for:
+  - [80%:04af62a8] arbitrary host imports
+  - [75%:04af62a8] multiple linked Wasm modules with cross-module runtime state
+  - [80%:04af62a8] modules with memory/table/global requirements beyond the specialized paths
+  - [100%:04af62a8] AArch64 object emission and native packaging
+- [95%:04af62a8] The package metadata format is now treated as a versioned product surface with
+  explicit compatibility guarantees.
 
 #### Work still required to finish this properly
 
 1. **Generalize host-import packaging**
-   - [20%:dedf9a6c] Replace the `hello-host` special case with a reusable host-ABI/runtime
+   - [90%:04af62a8] Replace the `hello-host` special case with a reusable host-ABI/runtime
      support layer.
-   - [30%:dedf9a6c] Make imported functions resolve through explicit packaged host descriptors
+   - [90%:04af62a8] Make imported functions resolve through explicit packaged host descriptors
      instead of generated ad hoc example logic.
-   - [45%:dedf9a6c] Keep host ownership explicit: the packager should wire host APIs supplied by
+   - [90%:04af62a8] Keep host ownership explicit: the packager should wire host APIs supplied by
      the embedder, not smuggle system functionality back into core crates.
 
 2. **Generalize runtime-state packaging**
-   - [15%:dedf9a6c] Support packaged modules that need memory, globals, tables, start functions,
+   - [85%:04af62a8] Support packaged modules that need memory, globals, tables, start functions,
      and data/element initialization without relying on hand-written per-example
      startup code.
-   - [25%:dedf9a6c] Promote the current metadata-driven startup assumptions into a real runtime
+   - [85%:04af62a8] Promote the current metadata-driven startup assumptions into a real runtime
      support contract.
 
 3. **Stabilize the packaging ABI**
-   - [40%:dedf9a6c] Treat execution-context layout, module-context layout, helper IDs, symbol
+   - [95%:04af62a8] Treat execution-context layout, module-context layout, helper IDs, symbol
      names, sidecar schema, and `.razero-package` contents as versioned ABI.
-   - [10%:dedf9a6c] Document what is private vs link-visible so future compiler/runtime changes
+   - [95%:04af62a8] Document what is private vs link-visible so future compiler/runtime changes
      do not silently break packaged artifacts.
 
 4. **Widen target coverage**
-   - [5%:dedf9a6c] Add AArch64 relocatable object emission and packaging.
-   - [85%:dedf9a6c] Decide later whether Mach-O/COFF are in scope, but do not block Linux/ELF
+   - [100%:04af62a8] Add AArch64 relocatable object emission and packaging.
+   - [90%:04af62a8] Decide later whether Mach-O/COFF are in scope, but do not block Linux/ELF
      hardening on that decision.
 
 5. **Decide crate/product boundaries**
-   - [85%:dedf9a6c] Keep `razero` focused on embedding/runtime APIs.
-   - [90%:dedf9a6c] Keep `razero-compiler` focused on codegen, metadata, object emission, and
+   - [90%:04af62a8] Keep `razero` focused on embedding/runtime APIs.
+   - [95%:04af62a8] Keep `razero-compiler` focused on codegen, metadata, object emission, and
      linker support unless and until a separate `razero-aot` / `razero-pack`
      crate becomes warranted.
-   - [80%:dedf9a6c] Preserve `razero-ffi` as a possible stable static-lib integration surface,
+   - [85%:04af62a8] Preserve `razero-ffi` as a possible stable static-lib integration surface,
      but do not force packaged execution to depend on a bloated monolithic FFI
      layer.
 
 6. **Expand validation coverage**
-   - [60%:dedf9a6c] Keep interpreter, compiler, precompiled-artifact, and native-packaged flows
+   - [85%:04af62a8] Keep interpreter, compiler, precompiled-artifact, and native-packaged flows
      all green at once.
-   - [35%:dedf9a6c] Add more end-to-end fixtures covering:
-     - [90%:dedf9a6c] one Wasm module + one host static library
-     - [15%:dedf9a6c] multiple Wasm modules
-     - [20%:dedf9a6c] packaged explicit host imports beyond `hello-host`
-     - [35%:dedf9a6c] negative tests for ABI mismatches, malformed metadata, and unsupported
+   - [80%:04af62a8] Add more end-to-end fixtures covering:
+     - [100%:04af62a8] one Wasm module + one host static library
+     - [80%:04af62a8] multiple Wasm modules
+     - [85%:04af62a8] packaged explicit host imports beyond `hello-host`
+     - [85%:04af62a8] negative tests for ABI mismatches, malformed metadata, and unsupported
        target/runtime shapes
 
 ## Suggested implementation order
@@ -228,22 +228,22 @@ This order prioritizes containment and deterministic limits before more invasive
 
 ### Future optimizations
 
-- [45%:dedf9a6c] **SSA `ExitIfTrue` instruction for fuel checks**: Consider adding a first-class `ExitIfTrue(cond, exitCode)` SSA opcode to replace the current branch-to-exit-block pattern used by fuel metering at function entries and loop back-edges. A dedicated opcode would allow the SSA optimizer to reason about fuel check elimination at compile time (e.g., coalescing consecutive checks, hoisting checks out of inner loops with bounded iteration counts). This is not urgent since the current `insertFuelCheck` pattern (load/sub/store/cmp/branch-to-exit) is ~5 native instructions and already efficient, but the optimization would reduce code size and improve instruction cache utilization in fuel-heavy workloads.
+- [45%:04af62a8] **SSA `ExitIfTrue` instruction for fuel checks**: Consider adding a first-class `ExitIfTrue(cond, exitCode)` SSA opcode to replace the current branch-to-exit-block pattern used by fuel metering at function entries and loop back-edges. A dedicated opcode would allow the SSA optimizer to reason about fuel check elimination at compile time (e.g., coalescing consecutive checks, hoisting checks out of inner loops with bounded iteration counts). This is not urgent since the current `insertFuelCheck` pattern (load/sub/store/cmp/branch-to-exit) is ~5 native instructions and already efficient, but the optimization would reduce code size and improve instruction cache utilization in fuel-heavy workloads.
 
 ## Main risks and tradeoffs
 
-- [75%:dedf9a6c] Go runtime fault handling is platform-sensitive and may limit portability.
-- [70%:dedf9a6c] Large virtual memory reservations and guard-page strategies may behave differently across kernels and operating systems.
-- [30%:dedf9a6c] Fuel injection and async stack handling will increase compiler complexity, compile time, and runtime overhead.
-- [65%:dedf9a6c] Strict uncoupling from system APIs means embedders must meticulously provide their own WASI or host functionality.
-- [80%:dedf9a6c] Some features may remain compiler-only, leaving the interpreter with a different security profile.
+- [75%:04af62a8] Go runtime fault handling is platform-sensitive and may limit portability.
+- [70%:04af62a8] Large virtual memory reservations and guard-page strategies may behave differently across kernels and operating systems.
+- [30%:04af62a8] Fuel injection and async stack handling will increase compiler complexity, compile time, and runtime overhead.
+- [65%:04af62a8] Strict uncoupling from system APIs means embedders must meticulously provide their own WASI or host functionality.
+- [80%:04af62a8] Some features may remain compiler-only, leaving the interpreter with a different security profile.
 
 ## Near-term deliverables
 
-- [90%:dedf9a6c] A written threat model and support matrix for secure mode.
-- [90%:dedf9a6c] A Linux-first memory sandboxing prototype.
-- [80%:dedf9a6c] A compiler prototype with fuel metering and resource exhaustion traps.
-- [45%:dedf9a6c] A minimalist, pure WebAssembly core engine completely decoupled from system, OS, and WASI dependencies.
-- [85%:dedf9a6c] A Linux-first Rust AOT/native-packaging path with documented ABI limits, plus
+- [90%:04af62a8] A written threat model and support matrix for secure mode.
+- [90%:04af62a8] A Linux-first memory sandboxing prototype.
+- [80%:04af62a8] A compiler prototype with fuel metering and resource exhaustion traps.
+- [45%:04af62a8] A minimalist, pure WebAssembly core engine completely decoupled from system, OS, and WASI dependencies.
+- [100%:04af62a8] A Linux-first Rust AOT/native-packaging path with documented ABI limits, plus
   a concrete plan to generalize host-import and runtime-state packaging.
-- [80%:dedf9a6c] An experimental status report describing what is safe, what is incomplete, and what remains research.
+- [90%:04af62a8] An experimental status report describing what is safe, what is incomplete, and what remains research.
