@@ -55,7 +55,7 @@ pub struct Context {
     pub(crate) memory_allocator: Option<Arc<dyn MemoryAllocator>>,
     pub(crate) close_notifier: Option<Arc<dyn CloseNotifier>>,
     pub(crate) import_resolver:
-        Option<Arc<dyn Fn(&str) -> Option<crate::api::wasm::Module> + Send + Sync>>,
+        Option<crate::experimental::import_resolver::ImportResolverConfig>,
     pub(crate) invocation: Option<InvocationContext>,
 }
 

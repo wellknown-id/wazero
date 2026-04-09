@@ -864,7 +864,7 @@ fn resolve_imports_with_context(
     _store: &Arc<Mutex<RuntimeStore>>,
     module: &WasmModule,
 ) -> Result<()> {
-    let Some(resolver) = ctx.import_resolver.as_ref() else {
+    let Some(cfg) = ctx.import_resolver.as_ref() else {
         return Ok(());
     };
 
@@ -874,8 +874,17 @@ fn resolve_imports_with_context(
         .map(|import| import.module.as_str())
         .collect::<std::collections::BTreeSet<_>>()
     {
-        if let Some(module) = resolver(import_name) {
+        if let Some(acl) = cfg.acl.as_ref() {
+            acl.check_import(import_name)?;
+        }
+        if let Some(module) = cfg.resolver.as_ref().and_then(|resolver| resolver(import_name)) {
             module.register_import_alias(import_name)?;
+            continue;
+        }
+        if cfg.fail_closed {
+            return Err(RuntimeError::new(format!(
+                "module[{import_name}] unresolved by import resolver"
+            )));
         }
     }
 
@@ -2476,6 +2485,207 @@ mod tests {
             assert!(!guest.is_closed());
             assert_eq!(1, call_count.load(Ordering::SeqCst));
         }
+    }
+
+    #[test]
+    fn import_resolver_acl_allows_store_fallback_by_exact_name() {
+        let runtime = Runtime::new();
+        let store_count = Arc::new(AtomicU32::new(0));
+        runtime
+            .new_host_module_builder("env")
+            .new_function_builder()
+            .with_func(
+                {
+                    let store_count = store_count.clone();
+                    move |_ctx, _module, _params| {
+                        store_count.fetch_add(1, Ordering::SeqCst);
+                        Ok(Vec::new())
+                    }
+                },
+                &[],
+                &[],
+            )
+            .with_name("start")
+            .export("start")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let ctx = crate::experimental::with_import_resolver_acl(
+            &Context::default(),
+            crate::experimental::ImportACL::new().allow_modules(["env"]),
+        );
+        let compiled_guest = runtime
+            .compile(&[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
+                0x00, 0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r',
+                b't', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u',
+                b'n', 0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+            ])
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_with_context(&ctx, &compiled_guest, ModuleConfig::new())
+            .unwrap();
+        guest.exported_function("run").unwrap().call(&[]).unwrap();
+
+        assert_eq!(1, store_count.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn import_resolver_acl_denies_store_import_by_exact_name() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("env")
+            .new_function_builder()
+            .with_callback(|_ctx, _module, _params| Ok(Vec::new()), &[], &[])
+            .export("start")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let ctx = crate::experimental::with_import_resolver_acl(
+            &Context::default(),
+            crate::experimental::ImportACL::new().deny_modules(["env"]),
+        );
+        let compiled_guest = runtime
+            .compile(&[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
+                0x00, 0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r',
+                b't', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u',
+                b'n', 0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+            ])
+            .unwrap();
+
+        let err = runtime
+            .instantiate_with_context(&ctx, &compiled_guest, ModuleConfig::new())
+            .err()
+            .expect("instantiation should fail");
+        assert!(err.to_string().contains("module[env] denied by import ACL"));
+    }
+
+    #[test]
+    fn import_resolver_acl_allowlist_blocks_unlisted_import() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("env")
+            .new_function_builder()
+            .with_callback(|_ctx, _module, _params| Ok(Vec::new()), &[], &[])
+            .export("start")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let ctx = crate::experimental::with_import_resolver_acl(
+            &Context::default(),
+            crate::experimental::ImportACL::new().allow_modules(["wasi_snapshot_preview1"]),
+        );
+        let compiled_guest = runtime
+            .compile(&[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
+                0x00, 0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r',
+                b't', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u',
+                b'n', 0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+            ])
+            .unwrap();
+
+        let err = runtime
+            .instantiate_with_context(&ctx, &compiled_guest, ModuleConfig::new())
+            .err()
+            .expect("instantiation should fail");
+        assert!(err
+            .to_string()
+            .contains("module[env] not allowed by import ACL"));
+    }
+
+    #[test]
+    fn import_resolver_config_fail_closed_blocks_store_fallback() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("env")
+            .new_function_builder()
+            .with_callback(|_ctx, _module, _params| Ok(Vec::new()), &[], &[])
+            .export("start")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let ctx = crate::experimental::with_import_resolver_config(
+            &Context::default(),
+            crate::experimental::ImportResolverConfig {
+                acl: Some(crate::experimental::ImportACL::new().allow_modules(["env"])),
+                fail_closed: true,
+                ..crate::experimental::ImportResolverConfig::default()
+            },
+        );
+        let compiled_guest = runtime
+            .compile(&[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
+                0x00, 0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r',
+                b't', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u',
+                b'n', 0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+            ])
+            .unwrap();
+
+        let err = runtime
+            .instantiate_with_context(&ctx, &compiled_guest, ModuleConfig::new())
+            .err()
+            .expect("instantiation should fail");
+        assert!(err
+            .to_string()
+            .contains("module[env] unresolved by import resolver"));
+    }
+
+    #[test]
+    fn import_resolver_config_resolver_links_anonymous_module_instances() {
+        let runtime = Runtime::new();
+        let resolved_count = Arc::new(AtomicU32::new(0));
+        let compiled_host = runtime
+            .new_host_module_builder("env0")
+            .new_function_builder()
+            .with_func(
+                {
+                    let resolved_count = resolved_count.clone();
+                    move |_ctx, _module, _params| {
+                        resolved_count.fetch_add(1, Ordering::SeqCst);
+                        Ok(Vec::new())
+                    }
+                },
+                &[],
+                &[],
+            )
+            .with_name("start")
+            .export("start")
+            .compile(&Context::default())
+            .unwrap();
+        let anonymous_import = runtime
+            .instantiate_with_context(
+                &Context::default(),
+                &compiled_host,
+                ModuleConfig::new().with_name(""),
+            )
+            .unwrap();
+
+        let ctx = crate::experimental::with_import_resolver_config(
+            &Context::default(),
+            crate::experimental::ImportResolverConfig {
+                resolver: Some(Arc::new(move |name| {
+                    (name == "env").then_some(anonymous_import.clone())
+                })),
+                ..crate::experimental::ImportResolverConfig::default()
+            },
+        );
+        let compiled_guest = runtime
+            .compile(&[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
+                0x00, 0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r',
+                b't', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u',
+                b'n', 0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+            ])
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_with_context(&ctx, &compiled_guest, ModuleConfig::new())
+            .unwrap();
+        guest.exported_function("run").unwrap().call(&[]).unwrap();
+
+        assert_eq!(1, resolved_count.load(Ordering::SeqCst));
     }
 
     #[test]

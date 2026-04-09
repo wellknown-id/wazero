@@ -31,16 +31,18 @@ pub use config::{CompiledModule, ModuleConfig, RuntimeConfig, RuntimeEngineKind}
 pub use ctx_keys::{CancelHandle, Context, ContextDoneError, ContextKey};
 pub use experimental::{
     add_fuel, benchmark_function_listener, get_close_notifier, get_compilation_workers,
-    get_fuel_controller, get_import_resolver, get_memory_allocator, get_snapshotter, get_yielder,
-    new_stack_iterator, remaining_fuel, with_close_notifier, with_compilation_workers,
-    with_fuel_controller, with_function_listener_factory, with_import_resolver,
+    get_fuel_controller, get_import_resolver, get_import_resolver_config, get_memory_allocator,
+    get_snapshotter, get_yielder, new_stack_iterator, remaining_fuel, with_close_notifier,
+    with_compilation_workers, with_fuel_controller, with_function_listener_factory,
+    with_import_resolver, with_import_resolver_acl, with_import_resolver_config,
     with_memory_allocator, with_snapshotter, with_yielder, AggregatingFuelController,
     CloseNotifier, CloseNotifyFn, DefaultMemoryAllocator, ErrYielded, FrameStackIterator,
     FuelController, FunctionListener, FunctionListenerFactory, FunctionListenerFactoryFn,
-    FunctionListenerFn, ImportResolver, InternalFunction, InternalModule, IntoCloseNotifier,
-    IntoFuelController, IntoMemoryAllocator, LinearMemory, MemoryAllocator, MemoryAllocatorFn,
-    MultiFunctionListenerFactory, ProgramCounter, Resumer, SimpleFuelController, Snapshot,
-    Snapshotter, StackFrame, StackIterator, Table, YieldError, Yielder,
+    FunctionListenerFn, ImportACL, ImportResolver, ImportResolverConfig, InternalFunction,
+    InternalModule, IntoCloseNotifier, IntoFuelController, IntoMemoryAllocator, LinearMemory,
+    MemoryAllocator, MemoryAllocatorFn, MultiFunctionListenerFactory, ProgramCounter, Resumer,
+    SimpleFuelController, Snapshot, Snapshotter, StackFrame, StackIterator, Table, YieldError,
+    Yielder,
     CORE_FEATURES_EXTENDED_CONST, CORE_FEATURES_TAIL_CALL, CORE_FEATURES_THREADS, ERR_YIELDED,
 };
 pub use filecache::FileCompilationCache;

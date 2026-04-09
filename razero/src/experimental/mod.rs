@@ -22,7 +22,11 @@ pub use fuel::{
     add_fuel, get_fuel_controller, remaining_fuel, with_fuel_controller, AggregatingFuelController,
     FuelController, IntoFuelController, SimpleFuelController,
 };
-pub use import_resolver::{get_import_resolver, with_import_resolver, ImportResolver};
+pub use import_resolver::{
+    get_import_resolver, get_import_resolver_config, with_import_resolver,
+    with_import_resolver_acl, with_import_resolver_config, ImportACL, ImportResolver,
+    ImportResolverConfig,
+};
 pub use listener::{
     benchmark_function_listener, new_stack_iterator, with_function_listener_factory,
     FrameStackIterator, FunctionListener, FunctionListenerFactory, FunctionListenerFactoryFn,

@@ -1,19 +1,169 @@
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use crate::{api::wasm::Module, ctx_keys::Context};
 
 pub type ImportResolver = dyn Fn(&str) -> Option<Module> + Send + Sync;
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ImportACL {
+    allow_modules: BTreeSet<String>,
+    allow_prefixes: Vec<String>,
+    deny_modules: BTreeSet<String>,
+    deny_prefixes: Vec<String>,
+}
+
+#[derive(Clone, Default)]
+pub struct ImportResolverConfig {
+    pub resolver: Option<Arc<ImportResolver>>,
+    pub acl: Option<ImportACL>,
+    pub fail_closed: bool,
+}
+
+impl ImportACL {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn allow_modules<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for name in names {
+            let name = name.into();
+            if !name.is_empty() {
+                self.allow_modules.insert(name);
+            }
+        }
+        self
+    }
+
+    pub fn allow_module_prefixes<I, S>(mut self, prefixes: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for prefix in prefixes {
+            let prefix = prefix.into();
+            if !prefix.is_empty() {
+                self.allow_prefixes.push(prefix);
+            }
+        }
+        self
+    }
+
+    pub fn deny_modules<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for name in names {
+            let name = name.into();
+            if !name.is_empty() {
+                self.deny_modules.insert(name);
+            }
+        }
+        self
+    }
+
+    pub fn deny_module_prefixes<I, S>(mut self, prefixes: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for prefix in prefixes {
+            let prefix = prefix.into();
+            if !prefix.is_empty() {
+                self.deny_prefixes.push(prefix);
+            }
+        }
+        self
+    }
+
+    pub fn check_import(&self, module_name: &str) -> crate::Result<()> {
+        if self.is_empty() {
+            return Ok(());
+        }
+        if self.matches_module(&self.deny_modules, &self.deny_prefixes, module_name) {
+            return Err(crate::RuntimeError::new(format!(
+                "module[{module_name}] denied by import ACL"
+            )));
+        }
+        if self.has_allow_rules()
+            && !self.matches_module(&self.allow_modules, &self.allow_prefixes, module_name)
+        {
+            return Err(crate::RuntimeError::new(format!(
+                "module[{module_name}] not allowed by import ACL"
+            )));
+        }
+        Ok(())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.allow_modules.is_empty()
+            && self.allow_prefixes.is_empty()
+            && self.deny_modules.is_empty()
+            && self.deny_prefixes.is_empty()
+    }
+
+    fn has_allow_rules(&self) -> bool {
+        !self.allow_modules.is_empty() || !self.allow_prefixes.is_empty()
+    }
+
+    fn matches_module(
+        &self,
+        exact: &BTreeSet<String>,
+        prefixes: &[String],
+        module_name: &str,
+    ) -> bool {
+        exact.contains(module_name) || prefixes.iter().any(|prefix| module_name.starts_with(prefix))
+    }
+}
+
+impl ImportResolverConfig {
+    fn is_empty(&self) -> bool {
+        self.resolver.is_none() && self.acl.as_ref().is_none_or(ImportACL::is_empty)
+    }
+}
 
 pub fn with_import_resolver(
     ctx: &Context,
     resolver: impl Fn(&str) -> Option<Module> + Send + Sync + 'static,
 ) -> Context {
     let mut cloned = ctx.clone();
-    cloned.import_resolver = Some(Arc::new(resolver));
+    let mut cfg = cloned.import_resolver.unwrap_or_default();
+    cfg.resolver = Some(Arc::new(resolver));
+    cloned.import_resolver = Some(cfg);
     cloned
 }
 
 pub fn get_import_resolver(ctx: &Context) -> Option<Arc<ImportResolver>> {
+    ctx.import_resolver
+        .as_ref()
+        .and_then(|cfg| cfg.resolver.clone())
+}
+
+pub fn with_import_resolver_acl(ctx: &Context, acl: ImportACL) -> Context {
+    if acl.is_empty() {
+        return ctx.clone();
+    }
+    let mut cloned = ctx.clone();
+    let mut cfg = cloned.import_resolver.unwrap_or_default();
+    cfg.acl = Some(acl);
+    cloned.import_resolver = Some(cfg);
+    cloned
+}
+
+pub fn with_import_resolver_config(ctx: &Context, cfg: ImportResolverConfig) -> Context {
+    if cfg.is_empty() {
+        return ctx.clone();
+    }
+    let mut cloned = ctx.clone();
+    cloned.import_resolver = Some(cfg);
+    cloned
+}
+
+pub fn get_import_resolver_config(ctx: &Context) -> Option<ImportResolverConfig> {
     ctx.import_resolver.clone()
 }
 
@@ -24,7 +174,10 @@ mod tests {
         Arc,
     };
 
-    use super::{get_import_resolver, with_import_resolver};
+    use super::{
+        get_import_resolver, get_import_resolver_config, with_import_resolver,
+        with_import_resolver_acl, ImportACL, ImportResolverConfig,
+    };
     use crate::{ctx_keys::Context, ModuleConfig, Runtime};
 
     #[test]
@@ -79,5 +232,34 @@ mod tests {
             .call(&[])
             .unwrap();
         assert_eq!(2, call_count.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn import_resolver_config_acl_only_round_trip() {
+        let acl = ImportACL::new().deny_modules(["env"]);
+        let ctx = super::with_import_resolver_config(
+            &Context::default(),
+            ImportResolverConfig {
+                acl: Some(acl.clone()),
+                ..ImportResolverConfig::default()
+            },
+        );
+
+        let cfg = get_import_resolver_config(&ctx).expect("config should be present");
+        assert_eq!(Some(acl), cfg.acl);
+        assert!(cfg.resolver.is_none());
+    }
+
+    #[test]
+    fn with_import_resolver_acl_preserves_existing_resolver() {
+        let ctx = with_import_resolver(&Context::default(), |_name| None);
+        let ctx = with_import_resolver_acl(&ctx, ImportACL::new().allow_modules(["env"]));
+
+        let cfg = get_import_resolver_config(&ctx).expect("config should be present");
+        assert!(cfg.resolver.is_some());
+        assert_eq!(
+            Some(ImportACL::new().allow_modules(["env"])),
+            cfg.acl,
+        );
     }
 }
