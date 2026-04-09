@@ -5,13 +5,52 @@ use std::sync::{
 
 use razero::{
     get_compilation_workers, get_import_resolver, with_compilation_workers, with_import_resolver,
-    Context, ModuleConfig, Runtime,
+    Context, ModuleConfig, Runtime, RuntimeConfig,
 };
+
+const SIMPLE_EXPORT_WASM: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, 0x03,
+    0x02, 0x01, 0x00, 0x07, 0x05, 0x01, 0x01, b'f', 0x00, 0x00, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x41,
+    0x2a, 0x0b,
+];
 
 #[test]
 fn compilation_workers_getter_clamps_zero_to_one() {
     let ctx = with_compilation_workers(&Context::default(), 0);
     assert_eq!(1, get_compilation_workers(&ctx));
+}
+
+#[test]
+fn compilation_workers_getter_clamps_negative_to_one() {
+    let ctx = with_compilation_workers(&Context::default(), -7);
+    assert_eq!(1, get_compilation_workers(&ctx));
+}
+
+#[test]
+fn compilation_workers_round_trip_positive_value() {
+    let ctx = with_compilation_workers(&Context::default(), 4);
+    assert_eq!(4, get_compilation_workers(&ctx));
+}
+
+#[test]
+fn compilation_workers_drive_context_aware_compile_paths() {
+    let runtime = Runtime::with_config(RuntimeConfig::new_interpreter());
+    let ctx = with_compilation_workers(&Context::default(), 4);
+    let compiled = runtime
+        .compile_with_context(&ctx, SIMPLE_EXPORT_WASM)
+        .unwrap();
+    let module = runtime
+        .instantiate_with_context(&ctx, &compiled, ModuleConfig::new())
+        .unwrap();
+
+    let results = module.exported_function("f").unwrap().call(&[]).unwrap();
+    assert_eq!(vec![42], results);
+}
+
+#[test]
+fn close_on_context_done_round_trips_in_runtime_config() {
+    let config = RuntimeConfig::new().with_close_on_context_done(true);
+    assert!(config.close_on_context_done());
 }
 
 #[test]

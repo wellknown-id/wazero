@@ -2,9 +2,10 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::engine::{
-    Engine as WasmEngine, EngineError, ModuleEngine as WasmModuleEngine, NullEngine,
+    CompileOptions, Engine as WasmEngine, EngineError, ModuleEngine as WasmModuleEngine, NullEngine,
 };
 use crate::module::{ExternType, FunctionType, ImportDesc, Module};
 use crate::module_instance::{
@@ -14,6 +15,8 @@ use crate::module_instance_lookup::LookupError;
 use crate::store_module_list::{ModuleInstanceId, StoreModuleList};
 
 pub const NAME_TO_MODULE_SHRINK_THRESHOLD: usize = 100;
+
+static NEXT_MODULE_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct Store<E = NullEngine> {
     pub module_list: StoreModuleList,
@@ -25,7 +28,6 @@ pub struct Store<E = NullEngine> {
     pub function_max_types: u32,
     pub modules: BTreeMap<ModuleInstanceId, ModuleInstance>,
     pub secure_memory: bool,
-    next_module_id: ModuleInstanceId,
     closed: bool,
 }
 
@@ -103,7 +105,6 @@ impl<E> Store<E> {
             function_max_types: MAXIMUM_FUNCTION_TYPES,
             modules: BTreeMap::new(),
             secure_memory: false,
-            next_module_id: 1,
             closed: false,
         }
     }
@@ -330,7 +331,7 @@ impl<E> Store<E> {
                     let actual_len = imported_module
                         .tables
                         .get(imported.index as usize)
-                        .map(|table| table.elements.len())
+                        .map(|table| table.len())
                         .unwrap_or_default() as u32;
                     if expected.min > actual_len {
                         return Err(StoreError::InvalidImport(format!(
@@ -380,10 +381,18 @@ impl<E> Store<E> {
                             import.name
                         ))
                     })?;
-                    let actual_pages = imported_module
-                        .memory_instance
+                    let snapshot = self
+                        .module_engine(imported_module.id)
+                        .and_then(|engine| engine.memory_snapshot());
+                    let actual_pages = snapshot
                         .as_ref()
-                        .map(|memory| (memory.bytes.len() / 65_536) as u32)
+                        .map(|(bytes, _, _)| (bytes.len() / 65_536) as u32)
+                        .or_else(|| {
+                            imported_module
+                                .memory_instance
+                                .as_ref()
+                                .map(|memory| (memory.bytes.len() / 65_536) as u32)
+                        })
                         .unwrap_or_default();
                     if expected.min > actual_pages {
                         return Err(StoreError::InvalidImport(format!(
@@ -405,8 +414,20 @@ impl<E> Store<E> {
                             actual_type.max
                         )));
                     }
-                    instance.memory_instance = imported_module.memory_instance.clone();
+                    let mut imported_memory = imported_module.memory_instance.clone();
+                    if let (Some(memory), Some((bytes, _, _))) =
+                        (imported_memory.as_mut(), snapshot)
+                    {
+                        let imported_pages = (bytes.len() / 65_536) as u32;
+                        let current_pages = memory.pages();
+                        if imported_pages > current_pages {
+                            let _ = memory.grow(imported_pages - current_pages);
+                        }
+                        let _ = memory.write(0, &bytes);
+                    }
+                    instance.memory_instance = imported_memory;
                     instance.memory_type = Some(actual_type);
+                    instance.imported_memory_module_id = Some(imported_module.id);
                 }
                 ImportDesc::Global(expected) => {
                     let actual_type = imported_module
@@ -482,8 +503,14 @@ impl<E> Store<E> {
         }
 
         instance.build_element_instances(&source.element_section)?;
-        if !source.data_section.is_empty() {
+        instance.validate_elements(&source.element_section)?;
+        if !source
+            .enabled_features
+            .contains(razero_features::CoreFeatures::REFERENCE_TYPES)
+        {
             instance.validate_data(&source.data_section)?;
+        }
+        if !source.data_section.is_empty() {
             instance.apply_data(&source.data_section)?;
         }
         instance.apply_elements(&source.element_section)?;
@@ -498,20 +525,52 @@ impl<E> Store<E> {
             module.set_store_links(links);
         }
     }
+
+    fn persist_imported_memory(&mut self, instance: &ModuleInstance) {
+        let (Some(imported_id), Some(memory)) = (
+            instance.imported_memory_module_id,
+            instance.memory_instance.as_ref(),
+        ) else {
+            return;
+        };
+        if let Some(imported_module) = self.modules.get_mut(&imported_id) {
+            imported_module.memory_instance = Some(memory.clone());
+        }
+        if let Some(engine) = self.module_engines.get(&imported_id) {
+            let _ = engine.overwrite_memory(
+                memory.bytes.as_ref(),
+                instance
+                    .memory_type
+                    .as_ref()
+                    .and_then(|memory_type| memory_type.is_max_encoded.then_some(memory_type.max)),
+                memory.shared,
+            );
+        }
+    }
 }
 
 impl<E: WasmEngine> Store<E> {
     pub fn instantiate(
         &mut self,
+        module: Module,
+        name: impl Into<String>,
+        type_ids: Option<Vec<FunctionTypeId>>,
+    ) -> Result<ModuleInstanceId, StoreError> {
+        self.instantiate_with_options(module, name, type_ids, CompileOptions::default())
+    }
+
+    pub fn instantiate_with_options(
+        &mut self,
         mut module: Module,
         name: impl Into<String>,
         type_ids: Option<Vec<FunctionTypeId>>,
+        options: CompileOptions,
     ) -> Result<ModuleInstanceId, StoreError> {
         if self.closed {
             return Err(StoreError::AlreadyClosed);
         }
 
-        self.engine.compile_module(&module)?;
+        self.engine.compile_module_with_options(&module, &options)?;
 
         let type_ids = match type_ids {
             Some(type_ids) => {
@@ -526,11 +585,13 @@ impl<E: WasmEngine> Store<E> {
             None => self.get_function_type_ids(&mut module.type_section)?,
         };
 
-        let id = self.next_module_id;
-        self.next_module_id += 1;
+        let id = NEXT_MODULE_INSTANCE_ID.fetch_add(1, Ordering::Relaxed);
 
         let mut instance = ModuleInstance::new(id, name, module, type_ids);
-        self.instantiate_module(&mut instance)?;
+        if let Err(err) = self.instantiate_module(&mut instance) {
+            self.persist_imported_memory(&instance);
+            return Err(err);
+        }
         let module_engine = self.instantiate_module_engine(&instance)?;
         let id = self.register_module(instance)?;
         self.module_engines.insert(id, module_engine);
@@ -753,9 +814,9 @@ mod tests {
 
         assert_eq!("demo", instance.name());
         assert_eq!(1, instance.functions.len());
-        assert_eq!(Some(0), instance.tables[0].elements[0]);
-        assert_eq!(Some(1), store.name_to_module.get("demo").copied());
-        assert_eq!(7, instance.globals[0].value);
+        assert_eq!(Some(0), instance.tables[0].get(0).flatten());
+        assert_eq!(Some(instance_id), store.name_to_module.get("demo").copied());
+        assert_eq!(7, instance.globals[0].value().0);
         assert_eq!(
             &[0xaa, 0xbb],
             &instance.memory_instance.as_ref().unwrap().bytes[1..3]
@@ -824,7 +885,7 @@ mod tests {
             ],
             ..Module::default()
         };
-        store.instantiate(host, "env", None).unwrap();
+        let host_id = store.instantiate(host, "env", None).unwrap();
 
         let consumer = Module {
             type_section: vec![FunctionType::default()],
@@ -853,12 +914,12 @@ mod tests {
         assert!(store.module_engine(consumer_id).is_some());
         assert_eq!(
             vec![
-                "compile:0:1",
-                "new-engine:1",
-                "compile:2:1",
-                "new-engine:2",
-                "resolve-func:0:0:0",
-                "resolve-memory",
+                "compile:0:1".to_string(),
+                format!("new-engine:{host_id}"),
+                "compile:2:1".to_string(),
+                format!("new-engine:{consumer_id}"),
+                "resolve-func:0:0:0".to_string(),
+                "resolve-memory".to_string(),
             ],
             *events.lock().unwrap()
         );

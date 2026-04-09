@@ -120,6 +120,11 @@ pub fn encode_cond_br(cond: Cond, offset: i64, bits64: bool) -> u32 {
     }
 }
 
+pub fn encode_fpu_move(rd: u32, rn: u32, bits: u8) -> u32 {
+    let q = u32::from(bits == 128);
+    (q << 30) | (0b1110101 << 21) | (rn << 16) | (0b000111 << 10) | (rn << 5) | rd
+}
+
 pub fn encode_load_or_store(
     kind_load: bool,
     bits: u8,
@@ -215,11 +220,11 @@ pub fn encode_instruction(instr: &Arm64Instr) -> Result<Vec<u32>, BackendError> 
             *bits,
             false,
         ),
-        Arm64Instr::FpuMove { .. } => {
-            return Err(BackendError::new(
-                "arm64 FPU move encoding is not implemented yet",
-            ));
-        }
+        Arm64Instr::FpuMove { rd, rn, bits } => encode_fpu_move(
+            encoding_reg_number(rd.real_reg()),
+            encoding_reg_number(rn.real_reg()),
+            *bits,
+        ),
         Arm64Instr::AluRRR {
             op,
             rd,
@@ -314,14 +319,14 @@ pub fn encode_instruction(instr: &Arm64Instr) -> Result<Vec<u32>, BackendError> 
 mod tests {
     use super::{
         encode_adr, encode_alu_rr_imm12, encode_alu_rrr, encode_cond_br, encode_cset,
-        encode_instruction, encode_movk, encode_movn, encode_movz, encode_unconditional_branch,
-        encode_unconditional_branch_reg, DUMMY_INSTRUCTION,
+        encode_fpu_move, encode_instruction, encode_movk, encode_movn, encode_movz,
+        encode_unconditional_branch, encode_unconditional_branch_reg, DUMMY_INSTRUCTION,
     };
     use crate::backend::isa::arm64::cond::{Cond, CondFlag};
     use crate::backend::isa::arm64::instr::{AluOp, Arm64Instr, LoadKind};
     use crate::backend::isa::arm64::lower_instr_operands::Imm12;
     use crate::backend::isa::arm64::lower_mem::AddressMode;
-    use crate::backend::isa::arm64::reg::{vreg_for_real_reg, TMP, X0, X1, X11};
+    use crate::backend::isa::arm64::reg::{vreg_for_real_reg, TMP, V0, V1, X0, X1, X11};
 
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -392,6 +397,27 @@ mod tests {
         })
         .unwrap();
         assert_eq!(word, vec![0xf940_0420]);
+    }
+
+    #[test]
+    fn fpu_move_encodings_match_go_patterns() {
+        assert_eq!(encode_fpu_move(0, 1, 64), 0x0ea1_1c20);
+        assert_eq!(encode_fpu_move(0, 1, 128), 0x4ea1_1c20);
+    }
+
+    #[test]
+    fn instruction_encoder_handles_fpu_move() {
+        let v0 = vreg_for_real_reg(V0);
+        let v1 = vreg_for_real_reg(V1);
+        assert_eq!(
+            encode_instruction(&Arm64Instr::FpuMove {
+                rd: v0,
+                rn: v1,
+                bits: 128
+            })
+            .unwrap(),
+            vec![0x4ea1_1c20]
+        );
     }
 
     #[test]

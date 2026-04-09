@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::panic::{self, AssertUnwindSafe};
 use std::ptr::NonNull;
-use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, TryLockError};
 
 use razero_wasm::engine::{
     Engine as WasmEngine, EngineError, FunctionHandle, FunctionTypeId,
@@ -16,7 +16,10 @@ use razero_wasm::module::{
     ModuleId, ValueType as WasmValueType,
 };
 use razero_wasm::module_instance::ModuleInstance;
-use razero_wasm::table::{Reference, TableInstance};
+use razero_wasm::store_module_list::ModuleInstanceId;
+use razero_wasm::table::{
+    decode_function_reference, encode_function_reference, Reference, TableInstance,
+};
 
 use crate::compiler::{
     CompileConfig, Compiler, FunctionType as InterpFunctionType, GlobalType as InterpGlobalType,
@@ -31,6 +34,31 @@ use crate::signature::Signature;
 thread_local! {
     static ACTIVE_CALLER_MODULES: RefCell<Vec<NonNull<RuntimeModule>>> = const { RefCell::new(Vec::new()) };
     static PENDING_SUSPENDED_INVOCATIONS: RefCell<Vec<Arc<dyn SuspendedInvocation>>> = const { RefCell::new(Vec::new()) };
+}
+
+static MODULE_RUNTIMES: LazyLock<Mutex<HashMap<ModuleInstanceId, Arc<ModuleRuntime>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+type GuestCallback = Arc<dyn Fn(&[u64]) -> Result<Vec<u64>, String> + Send + Sync>;
+type RegisteredGuestCallback = (Signature, GuestCallback);
+static GUEST_CALLBACKS: LazyLock<Mutex<HashMap<(ModuleInstanceId, u32), RegisteredGuestCallback>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub fn register_guest_callback(
+    module_id: ModuleInstanceId,
+    function_index: u32,
+    signature: Signature,
+    callback: GuestCallback,
+) {
+    lock_or_poison(&GUEST_CALLBACKS).insert((module_id, function_index), (signature, callback));
+}
+
+fn lookup_guest_callback(
+    module_id: ModuleInstanceId,
+    function_index: u32,
+) -> Option<RegisteredGuestCallback> {
+    lock_or_poison(&GUEST_CALLBACKS)
+        .get(&(module_id, function_index))
+        .cloned()
 }
 
 fn with_active_caller_module<T>(module: &mut RuntimeModule, f: impl FnOnce() -> T) -> T {
@@ -228,6 +256,13 @@ impl ModuleRuntime {
         lock_or_poison(&self.state).module().clone()
     }
 
+    fn refresh_ready_module(&self, module: RuntimeModule) {
+        let mut state = lock_or_poison(&self.state);
+        if matches!(*state, ModuleRuntimeState::Ready(_)) {
+            *state = ModuleRuntimeState::Ready(module);
+        }
+    }
+
     fn replace_function(&self, index: usize, function: Function) {
         if let Some(slot) = lock_or_poison(&self.state)
             .module_mut()
@@ -389,6 +424,10 @@ fn lock_or_poison<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     }
 }
 
+fn lookup_module_runtime(id: ModuleInstanceId) -> Option<Arc<ModuleRuntime>> {
+    lock_or_poison(&MODULE_RUNTIMES).get(&id).cloned()
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct InterpFunctionHandle {
     index: Index,
@@ -420,31 +459,139 @@ impl InterpModuleEngine {
         call_stack_ceiling: usize,
     ) -> Result<Self, EngineError> {
         let module = build_runtime_module(&parent, &instance)?;
+        let runtime = Arc::new(ModuleRuntime::new(module, call_stack_ceiling));
+        lock_or_poison(&MODULE_RUNTIMES).insert(instance.id, runtime.clone());
         Ok(Self {
             parent,
             instance,
-            runtime: Arc::new(ModuleRuntime::new(module, call_stack_ceiling)),
+            runtime,
         })
     }
 
     pub fn call(&self, function_index: Index, params: &[u64]) -> RuntimeResult<Vec<u64>> {
-        self.runtime.call(function_index as usize, params)
+        self.runtime.refresh_ready_module(self.snapshot());
+        let result = self.runtime.call(function_index as usize, params);
+        let runtime_snapshot = self.runtime.snapshot();
+        self.sync_instance_globals_from_runtime(&runtime_snapshot);
+        self.sync_instance_tables_from_runtime(&runtime_snapshot);
+        result
     }
 
     pub fn snapshot(&self) -> RuntimeModule {
-        self.runtime.snapshot()
+        let mut module = self.runtime.snapshot();
+        module.functions.truncate(self.instance.functions.len());
+        let mut wrappers = HashMap::<(ModuleInstanceId, u32), usize>::new();
+        for ((runtime_global, instance_global), global_type) in module
+            .globals
+            .iter_mut()
+            .zip(&self.instance.globals)
+            .zip(&self.instance.global_types)
+        {
+            let (lo, hi) = instance_global.value();
+            runtime_global.lo = if global_type.val_type == WasmValueType::FUNCREF && lo != 0 {
+                runtime_funcref_slot(lo, &self.instance, &mut module.functions, &mut wrappers)
+                    as u64
+                    + 1
+            } else {
+                lo
+            };
+            runtime_global.hi = hi;
+            runtime_global.is_vector = instance_global.ty.val_type == WasmValueType::V128;
+        }
+        module.tables = self
+            .instance
+            .tables
+            .iter()
+            .map(|table| self.refresh_table(table, &mut module.functions))
+            .collect();
+        module
+    }
+
+    fn sync_instance_globals_from_runtime(&self, module: &RuntimeModule) {
+        for ((runtime_global, instance_global), global_type) in module
+            .globals
+            .iter()
+            .zip(&self.instance.globals)
+            .zip(&self.instance.global_types)
+        {
+            let mut instance_global = instance_global.clone();
+            let lo = if global_type.val_type == WasmValueType::FUNCREF && runtime_global.lo != 0 {
+                store_funcref_reference(runtime_global.lo - 1, &self.instance, module)
+                    .unwrap_or_default()
+            } else {
+                runtime_global.lo
+            };
+            instance_global.set_value(lo, runtime_global.hi);
+        }
     }
 
     pub fn memory_size(&self) -> Option<u32> {
         let state = lock_or_poison(&self.runtime.state);
-        Some(state.module().memory.as_ref()?.bytes().len() as u32)
+        let len = state.module().memory.as_ref()?.bytes().len() as u32;
+        Some(len)
+    }
+
+    fn refresh_table(&self, table: &TableInstance, functions: &mut Vec<Function>) -> Table {
+        let mut wrappers = HashMap::<(ModuleInstanceId, u32), usize>::new();
+        let elements = table
+            .elements()
+            .into_iter()
+            .map(|reference| {
+                reference.and_then(|reference| match table.ty {
+                    razero_wasm::module::RefType::FUNCREF => Some(runtime_funcref_slot(
+                        reference,
+                        &self.instance,
+                        functions,
+                        &mut wrappers,
+                    ) as u64),
+                    razero_wasm::module::RefType::EXTERNREF => Some(reference),
+                    _ => Some(reference),
+                })
+            })
+            .collect();
+        Table::from_elements_typed(elements, table.max, table.ty)
+    }
+
+    fn sync_instance_tables_from_runtime(&self, runtime_module: &RuntimeModule) {
+        for ((runtime_table, instance_table), table_type) in runtime_module
+            .tables
+            .iter()
+            .zip(&self.instance.tables)
+            .zip(&self.instance.table_types)
+        {
+            let elements = runtime_table
+                .elements()
+                .into_iter()
+                .map(|reference| match table_type.ty {
+                    razero_wasm::module::RefType::FUNCREF => reference.and_then(|index| {
+                        if let Some(function) = self.instance.functions.get(index as usize) {
+                            return Some(encode_function_reference(
+                                function.module_id,
+                                function.function_index,
+                            ));
+                        }
+                        runtime_module
+                            .functions
+                            .get(index as usize)
+                            .and_then(|function| function.table_reference)
+                    }),
+                    razero_wasm::module::RefType::EXTERNREF => reference,
+                    _ => reference,
+                })
+                .collect::<Vec<_>>();
+            let shared = instance_table.shared_elements();
+            let mut table_elements = shared.write().expect("table write lock");
+            table_elements.clear();
+            table_elements.extend(elements);
+        }
     }
 
     pub fn memory_read(&self, offset: usize, len: usize) -> Option<Vec<u8>> {
         let state = lock_or_poison(&self.runtime.state);
         let memory = state.module().memory.as_ref()?;
         let end = offset.checked_add(len)?;
-        memory.bytes().get(offset..end).map(ToOwned::to_owned)
+        let bytes = memory.bytes();
+        bytes.get(offset..end).map(ToOwned::to_owned)
     }
 
     pub fn memory_write(&self, offset: usize, values: &[u8]) -> bool {
@@ -455,7 +602,8 @@ impl InterpModuleEngine {
         let Some(end) = offset.checked_add(values.len()) else {
             return false;
         };
-        let Some(slice) = memory.bytes_mut().get_mut(offset..end) else {
+        let mut bytes = memory.bytes_mut();
+        let Some(slice) = bytes.get_mut(offset..end) else {
             return false;
         };
         slice.copy_from_slice(values);
@@ -544,7 +692,29 @@ impl WasmModuleEngine for InterpModuleEngine {
 
     fn resolve_imported_memory(&mut self, imported_module_engine: &dyn WasmModuleEngine) {
         let imported = Self::resolve_imported_module_engine(imported_module_engine);
-        lock_or_poison(&self.runtime.state).module_mut().memory = imported.snapshot().memory;
+        let shared_memory = self.runtime.snapshot().memory;
+        if let Some(memory) = shared_memory.clone() {
+            lock_or_poison(&imported.runtime.state).module_mut().memory = Some(memory.clone());
+            lock_or_poison(&self.runtime.state).module_mut().memory = Some(memory);
+        }
+    }
+
+    fn memory_snapshot(&self) -> Option<(Vec<u8>, Option<u32>, bool)> {
+        self.runtime
+            .snapshot()
+            .memory
+            .map(|memory| (memory.bytes().to_vec(), memory.max_pages, memory.shared))
+    }
+
+    fn overwrite_memory(&self, bytes: &[u8], maximum_pages: Option<u32>, shared: bool) -> bool {
+        let mut state = lock_or_poison(&self.runtime.state);
+        let Some(memory) = state.module_mut().memory.as_mut() else {
+            return false;
+        };
+        memory.max_pages = maximum_pages;
+        memory.shared = shared;
+        memory.overwrite(bytes);
+        true
     }
 
     fn lookup_function(
@@ -553,20 +723,20 @@ impl WasmModuleEngine for InterpModuleEngine {
         type_id: FunctionTypeId,
         table_offset: Index,
     ) -> Option<(&ModuleInstance, Index)> {
-        let function_index = table
-            .elements
-            .get(table_offset as usize)
-            .copied()
-            .flatten()?;
+        let reference = table.get(table_offset as usize).flatten()?;
+        let (module_id, function_index) = decode_function_reference(reference);
+        if module_id != self.instance.id {
+            return None;
+        }
         let function = self.instance.functions.get(function_index as usize)?;
         (function.type_id == type_id).then_some((&self.instance, function_index))
     }
 
     fn get_global_value(&self, index: Index) -> (u64, u64) {
-        self.snapshot()
+        self.instance
             .globals
             .get(index as usize)
-            .map(|global| (global.lo, global.hi))
+            .map(|global| global.value())
             .unwrap_or((0, 0))
     }
 
@@ -584,6 +754,9 @@ impl WasmModuleEngine for InterpModuleEngine {
                 .get(index as usize)
                 .is_some_and(|ty| ty.val_type == WasmValueType::V128);
         }
+        if let Some(global) = self.instance.globals.get_mut(index as usize) {
+            global.set_value(lo, hi);
+        }
     }
 
     fn owns_globals(&self) -> bool {
@@ -591,7 +764,7 @@ impl WasmModuleEngine for InterpModuleEngine {
     }
 
     fn function_instance_reference(&self, func_index: Index) -> Reference {
-        Some(func_index)
+        Some(encode_function_reference(self.instance.id, func_index))
     }
 }
 
@@ -663,7 +836,7 @@ impl InterpEngine {
                         functions: &function_type_indices,
                         types: &interp_types,
                         call_frame_stack_size_in_u64: 0,
-                        ensure_termination: false,
+                        ensure_termination: module.ensure_termination,
                     })
                     .map_err(|err| {
                         EngineError::new(format!("local[{local_index}] failed: {err}"))
@@ -749,6 +922,69 @@ impl WasmEngine for InterpEngine {
     }
 }
 
+fn runtime_funcref_slot(
+    reference: u64,
+    instance: &ModuleInstance,
+    functions: &mut Vec<Function>,
+    wrappers: &mut HashMap<(ModuleInstanceId, u32), usize>,
+) -> usize {
+    let (module_id, function_index) = decode_function_reference(reference);
+    if let Some(local_index) = instance.functions.iter().position(|function| {
+        function.module_id == module_id && function.function_index == function_index
+    }) {
+        return local_index;
+    }
+    if let Some(local_index) = instance
+        .functions
+        .iter()
+        .position(|function| function.is_host && function.function_index == function_index)
+    {
+        return local_index;
+    }
+    *wrappers.entry((module_id, function_index)).or_insert_with(|| {
+        let (signature, callback) = if let Some(callback) = lookup_guest_callback(module_id, function_index) {
+            callback
+        } else if let Some(runtime) = lookup_module_runtime(module_id) {
+            let target = runtime.snapshot();
+            (
+                target.functions[function_index as usize].signature.clone(),
+                Arc::new(move |params: &[u64]| {
+                    runtime
+                        .call_from_import(function_index as usize, params)
+                        .map_err(|err| err.to_string())
+                }) as GuestCallback,
+            )
+        } else {
+            panic!("foreign function callback missing for module {module_id} function {function_index}")
+        };
+        let wrapper = Function::new_host_with_table_reference(
+            signature.clone(),
+            imported_host_function(signature, move |params| callback(params).map_err(Trap::new)),
+            reference,
+        );
+        let slot = functions.len();
+        functions.push(wrapper);
+        slot
+    })
+}
+
+fn store_funcref_reference(
+    slot: u64,
+    instance: &ModuleInstance,
+    runtime_module: &RuntimeModule,
+) -> Option<u64> {
+    if let Some(function) = instance.functions.get(slot as usize) {
+        return Some(encode_function_reference(
+            function.module_id,
+            function.function_index,
+        ));
+    }
+    runtime_module
+        .functions
+        .get(slot as usize)
+        .and_then(|function| function.table_reference)
+}
+
 fn build_runtime_module(
     parent: &CompiledModule,
     instance: &ModuleInstance,
@@ -779,18 +1015,71 @@ fn build_runtime_module(
             );
         }
     }
+    let mut wrappers = HashMap::<(ModuleInstanceId, u32), usize>::new();
+    let globals = instance
+        .globals
+        .iter()
+        .zip(instance.global_types.iter())
+        .map(|(global, global_type)| {
+            let (lo, hi) = global.value();
+            crate::interpreter::GlobalValue {
+                lo: if global_type.val_type == WasmValueType::FUNCREF && lo != 0 {
+                    runtime_funcref_slot(lo, instance, &mut functions, &mut wrappers) as u64 + 1
+                } else {
+                    lo
+                },
+                hi,
+                is_vector: global.ty.val_type == WasmValueType::V128,
+            }
+        })
+        .collect();
+    let tables = instance
+        .tables
+        .iter()
+        .zip(instance.table_types.iter())
+        .map(|(table, table_type)| {
+            Table::from_elements_typed(
+                table
+                    .elements()
+                    .into_iter()
+                    .map(|reference| match table_type.ty {
+                        razero_wasm::module::RefType::FUNCREF => reference.map(|reference| {
+                            runtime_funcref_slot(reference, instance, &mut functions, &mut wrappers)
+                                as u64
+                        }),
+                        razero_wasm::module::RefType::EXTERNREF => reference,
+                        _ => reference,
+                    })
+                    .collect(),
+                table_type.max,
+                table_type.ty,
+            )
+        })
+        .collect();
+    let element_instances = instance
+        .element_instances
+        .iter()
+        .zip(instance.source.element_section.iter())
+        .map(|(element_instance, segment)| {
+            Some(
+                element_instance
+                    .iter()
+                    .map(|reference| match segment.ty {
+                        razero_wasm::module::RefType::FUNCREF => reference.map(|reference| {
+                            runtime_funcref_slot(reference, instance, &mut functions, &mut wrappers)
+                                as u64
+                        }),
+                        razero_wasm::module::RefType::EXTERNREF => *reference,
+                        _ => *reference,
+                    })
+                    .collect(),
+            )
+        })
+        .collect();
 
     Ok(RuntimeModule {
         functions,
-        globals: instance
-            .globals
-            .iter()
-            .map(|global| crate::interpreter::GlobalValue {
-                lo: global.value,
-                hi: global.value_hi,
-                is_vector: global.ty.val_type == WasmValueType::V128,
-            })
-            .collect(),
+        globals,
         memory: instance.memory_instance.as_ref().map(|memory| {
             Memory::from_bytes(
                 memory.bytes.to_vec(),
@@ -801,21 +1090,11 @@ fn build_runtime_module(
                 memory.shared,
             )
         }),
-        tables: instance
-            .tables
-            .iter()
-            .map(|table| Table {
-                elements: table
-                    .elements
-                    .iter()
-                    .copied()
-                    .map(|reference| reference.map(|index| index as usize))
-                    .collect(),
-            })
-            .collect(),
+        tables,
         types: parent.types.clone(),
         data_instances: instance.data_instances.iter().cloned().map(Some).collect(),
-        exit_code: instance.exit_code(),
+        element_instances,
+        closed: instance.closed.clone(),
     })
 }
 

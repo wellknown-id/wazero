@@ -8,12 +8,14 @@ use crate::ssa::{
 };
 use crate::wazevoapi::ExitCode;
 
-use super::abi::{lower_abi_params, FLOAT_ARG_RESULT_REGS, INT_ARG_RESULT_REGS};
+use super::abi::{FLOAT_ARG_RESULT_REGS, INT_ARG_RESULT_REGS};
 use super::abi_entry_preamble::compile_entry_preamble;
 use super::abi_host_call::compile_host_function_trampoline;
 use super::cond::Cond;
+use super::ext::ExtMode;
 use super::instr::Amd64Instr;
 use super::lower_constant::lower_constant;
+use super::lower_mem::mem_operand_from_base;
 use super::machine_pro_epi_logue::{append_epilogue, append_prologue};
 use super::machine_regalloc::do_regalloc;
 use super::operands::{AddressMode, Label, Operand};
@@ -56,6 +58,10 @@ impl Amd64Machine {
 
     pub(crate) fn compiler(&self) -> &dyn CompilerContext {
         unsafe { self.compiler.expect("compiler not set").as_ref() }
+    }
+
+    pub(crate) fn compiler_mut(&mut self) -> &mut dyn CompilerContext {
+        unsafe { self.compiler.expect("compiler not set").as_mut() }
     }
 
     pub(crate) fn current_block_mut(&mut self) -> &mut Amd64Block {
@@ -122,10 +128,52 @@ impl Amd64Machine {
 
     pub fn encode_all(&self) -> Result<Vec<u8>, BackendError> {
         let mut out = Vec::new();
-        for block in &self.blocks {
-            for inst in &block.instructions {
-                out.extend(inst.encode()?);
+        let mut label_offsets = BTreeMap::new();
+        let mut pending_branches = Vec::new();
+
+        let mut encode_block =
+            |block: &Amd64Block, out: &mut Vec<u8>| -> Result<(), BackendError> {
+                label_offsets.insert(block.id as u32, out.len() as i64);
+                for inst in &block.instructions {
+                    let before = out.len();
+                    out.extend(inst.encode()?);
+                    match inst.kind() {
+                        super::InstructionKind::Jmp | super::InstructionKind::JmpIf => {
+                            let data = inst.0.borrow();
+                            let Some(Operand::Label(label)) = data.op1.as_ref() else {
+                                return Err(BackendError::new("branch missing label target"));
+                            };
+                            pending_branches.push((before, out.len() - 4, label.0));
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(())
+            };
+
+        if self.block_order.is_empty() {
+            for block in &self.blocks {
+                encode_block(block, &mut out)?;
             }
+        } else {
+            for &id in &self.block_order {
+                let block = self
+                    .blocks
+                    .iter()
+                    .find(|block| block.id == id)
+                    .ok_or_else(|| BackendError::new("missing block for encode order"))?;
+                encode_block(block, &mut out)?;
+            }
+        }
+
+        for (_inst_offset, imm_offset, label) in pending_branches {
+            let target_offset = *label_offsets
+                .get(&label)
+                .ok_or_else(|| BackendError::new("missing branch label"))?;
+            let branch_offset = target_offset - (imm_offset as i64 + 4);
+            let disp = i32::try_from(branch_offset)
+                .map_err(|_| BackendError::new("branch target out of range"))?;
+            out[imm_offset..imm_offset + 4].copy_from_slice(&disp.to_le_bytes());
         }
         Ok(out)
     }
@@ -150,6 +198,63 @@ impl Amd64Machine {
         }
         if !self.blocks[target_idx].preds.contains(&current_id) {
             self.blocks[target_idx].preds.push(current_id);
+        }
+    }
+
+    fn lower_call_arguments(&mut self, abi: &FunctionAbi, args: &[Value]) {
+        for (value, arg) in args.iter().copied().zip(&abi.args) {
+            let src = self.compiler().v_reg_of(value);
+            if arg.kind == AbiArgKind::Reg {
+                self.insert_move(arg.reg, src, arg.ty);
+            } else if arg.ty.is_int() {
+                self.push(Amd64Instr::mov_rm(
+                    src,
+                    Operand::mem(AddressMode::imm_rbp((arg.offset + 16) as i32 as u32)),
+                    (arg.ty.bits() / 8) as u8,
+                ));
+            } else {
+                self.push(Amd64Instr::xmm_mov_rm(
+                    match arg.ty {
+                        Type::F32 => SseOpcode::Movss,
+                        Type::F64 => SseOpcode::Movsd,
+                        Type::V128 => SseOpcode::Movdqu,
+                        Type::I32 | Type::I64 | Type::Invalid => unreachable!(),
+                    },
+                    src,
+                    Operand::mem(AddressMode::imm_rbp((arg.offset + 16) as i32 as u32)),
+                ));
+            }
+        }
+    }
+
+    fn lower_call_results(&mut self, instruction: &Instruction, abi: &FunctionAbi) {
+        let (ret0, rest) = instruction.returns();
+        for (index, value) in std::iter::once(ret0)
+            .filter(|value| value.valid())
+            .chain(rest.as_slice().iter().copied())
+            .enumerate()
+        {
+            let ret = &abi.rets[index];
+            let dst = self.compiler().v_reg_of(value);
+            if ret.kind == AbiArgKind::Reg {
+                self.insert_move(dst, ret.reg, ret.ty);
+            } else if ret.ty.is_int() {
+                self.push(Amd64Instr::mov64_mr(
+                    Operand::mem(AddressMode::imm_rbp((ret.offset + 16) as i32 as u32)),
+                    dst,
+                ));
+            } else {
+                self.push(Amd64Instr::xmm_unary_rm_r(
+                    match ret.ty {
+                        Type::F32 => SseOpcode::Movss,
+                        Type::F64 => SseOpcode::Movsd,
+                        Type::V128 => SseOpcode::Movdqu,
+                        Type::I32 | Type::I64 | Type::Invalid => unreachable!(),
+                    },
+                    Operand::mem(AddressMode::imm_rbp((ret.offset + 16) as i32 as u32)),
+                    dst,
+                ));
+            }
         }
     }
 }
@@ -265,20 +370,172 @@ impl BackendMachine for Amd64Machine {
                 let lhs = self.compiler().v_reg_of(instruction.v);
                 let rhs = self.compiler().v_reg_of(instruction.v2);
                 let is_64 = instruction.typ.bits() == 64;
-                self.current_block_mut()
-                    .instructions
-                    .push(Amd64Instr::mov_rr(lhs, dst, is_64));
                 let op = match instruction.opcode {
                     Opcode::Iadd => super::AluRmiROpcode::Add,
                     Opcode::Isub => super::AluRmiROpcode::Sub,
                     Opcode::Imul => super::AluRmiROpcode::Mul,
                     _ => unreachable!(),
                 };
+                let lhs_def = self.compiler().value_definition(instruction.v);
+                let rhs_def = self.compiler().value_definition(instruction.v2);
+                match instruction.opcode {
+                    Opcode::Iadd | Opcode::Imul => {
+                        if self.compiler().match_instr(rhs_def, Opcode::Iconst) {
+                            let imm = self
+                                .compiler()
+                                .ssa_builder()
+                                .instruction_of_value(instruction.v2)
+                                .expect("iconst instruction")
+                                .u1 as u32;
+                            self.current_block_mut()
+                                .instructions
+                                .push(Amd64Instr::mov_rr(lhs, dst, is_64));
+                            self.current_block_mut()
+                                .instructions
+                                .push(Amd64Instr::alu_rmi_r(op, Operand::imm32(imm), dst, is_64));
+                        } else if self.compiler().match_instr(lhs_def, Opcode::Iconst) {
+                            let imm = self
+                                .compiler()
+                                .ssa_builder()
+                                .instruction_of_value(instruction.v)
+                                .expect("iconst instruction")
+                                .u1 as u32;
+                            self.current_block_mut()
+                                .instructions
+                                .push(Amd64Instr::mov_rr(rhs, dst, is_64));
+                            self.current_block_mut()
+                                .instructions
+                                .push(Amd64Instr::alu_rmi_r(op, Operand::imm32(imm), dst, is_64));
+                        } else {
+                            self.current_block_mut()
+                                .instructions
+                                .push(Amd64Instr::mov_rr(lhs, dst, is_64));
+                            self.current_block_mut()
+                                .instructions
+                                .push(Amd64Instr::alu_rmi_r(op, Operand::reg(rhs), dst, is_64));
+                        }
+                    }
+                    Opcode::Isub => {
+                        if self.compiler().match_instr(rhs_def, Opcode::Iconst) {
+                            let imm = self
+                                .compiler()
+                                .ssa_builder()
+                                .instruction_of_value(instruction.v2)
+                                .expect("iconst instruction")
+                                .u1 as u32;
+                            self.current_block_mut()
+                                .instructions
+                                .push(Amd64Instr::mov_rr(lhs, dst, is_64));
+                            self.current_block_mut()
+                                .instructions
+                                .push(Amd64Instr::alu_rmi_r(op, Operand::imm32(imm), dst, is_64));
+                        } else {
+                            self.current_block_mut()
+                                .instructions
+                                .push(Amd64Instr::mov_rr(lhs, dst, is_64));
+                            self.current_block_mut()
+                                .instructions
+                                .push(Amd64Instr::alu_rmi_r(op, Operand::reg(rhs), dst, is_64));
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            Opcode::Load => {
+                let (ptr, offset, typ) = instruction.load_data();
+                let dst = self.compiler().v_reg_of(instruction.return_());
+                let ptr = self.compiler().v_reg_of(ptr);
+                let mem = mem_operand_from_base(ptr, offset);
+                let inst = match typ {
+                    Type::I32 => Amd64Instr::movzx_rm_r(ExtMode::LQ, mem, dst),
+                    Type::I64 => Amd64Instr::mov64_mr(mem, dst),
+                    Type::F32 => Amd64Instr::xmm_unary_rm_r(SseOpcode::Movss, mem, dst),
+                    Type::F64 => Amd64Instr::xmm_unary_rm_r(SseOpcode::Movsd, mem, dst),
+                    Type::V128 => Amd64Instr::xmm_unary_rm_r(SseOpcode::Movdqu, mem, dst),
+                    Type::Invalid => panic!("invalid load type"),
+                };
+                self.current_block_mut().instructions.push(inst);
+            }
+            Opcode::Store | Opcode::Istore8 | Opcode::Istore16 | Opcode::Istore32 => {
+                let (value, ptr, offset, size_bits) = instruction.store_data();
+                let value = self.compiler().v_reg_of(value);
+                let ptr = self.compiler().v_reg_of(ptr);
+                let mem = mem_operand_from_base(ptr, offset);
+                let inst = match instruction.opcode {
+                    Opcode::Store | Opcode::Istore8 | Opcode::Istore16 | Opcode::Istore32
+                        if matches!(instruction.v.ty(), Type::I32 | Type::I64) =>
+                    {
+                        Amd64Instr::mov_rm(value, mem, size_bits / 8)
+                    }
+                    Opcode::Store if matches!(instruction.v.ty(), Type::F32) => {
+                        Amd64Instr::xmm_mov_rm(SseOpcode::Movss, value, mem)
+                    }
+                    Opcode::Store if matches!(instruction.v.ty(), Type::F64) => {
+                        Amd64Instr::xmm_mov_rm(SseOpcode::Movsd, value, mem)
+                    }
+                    Opcode::Store if matches!(instruction.v.ty(), Type::V128) => {
+                        Amd64Instr::xmm_mov_rm(SseOpcode::Movdqu, value, mem)
+                    }
+                    _ => panic!("unsupported amd64 store type: {:?}", instruction.v.ty()),
+                };
+                self.current_block_mut().instructions.push(inst);
+            }
+            Opcode::Call => {
+                let (func_ref, sig, args) = instruction.call_data();
+                let signature = self
+                    .compiler()
+                    .ssa_builder()
+                    .resolve_signature(sig)
+                    .expect("call signature must exist")
+                    .clone();
+                let abi_info = self
+                    .compiler_mut()
+                    .get_function_abi(&signature)
+                    .abi_info_as_u64();
+                let abi = self.compiler_mut().get_function_abi(&signature).clone();
+                self.lower_call_arguments(&abi, args);
                 self.current_block_mut()
                     .instructions
-                    .push(Amd64Instr::alu_rmi_r(op, Operand::reg(rhs), dst, is_64));
+                    .push(Amd64Instr::call(func_ref.0 as u64, abi_info));
+                self.lower_call_results(instruction, &abi);
             }
-            _ => {}
+            Opcode::CallIndirect => {
+                let (func_ptr, sig, args) = instruction.call_indirect_data();
+                let signature = self
+                    .compiler()
+                    .ssa_builder()
+                    .resolve_signature(sig)
+                    .expect("call signature must exist")
+                    .clone();
+                let abi_info = self
+                    .compiler_mut()
+                    .get_function_abi(&signature)
+                    .abi_info_as_u64();
+                let abi = self.compiler_mut().get_function_abi(&signature).clone();
+                self.lower_call_arguments(&abi, args);
+                let func_ptr_reg = self.compiler().v_reg_of(func_ptr);
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::mov_rr(
+                        func_ptr_reg,
+                        crate::backend::VReg::from_real_reg(
+                            super::reg::R10,
+                            crate::backend::RegType::Int,
+                        ),
+                        true,
+                    ));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::call_indirect(
+                        Operand::reg(crate::backend::VReg::from_real_reg(
+                            super::reg::R10,
+                            crate::backend::RegType::Int,
+                        )),
+                        abi_info,
+                    ));
+                self.lower_call_results(instruction, &abi);
+            }
+            _ => panic!("unhandled amd64 opcode lowering: {:?}", instruction.opcode),
         }
     }
 
@@ -330,9 +587,6 @@ impl BackendMachine for Amd64Machine {
     }
 
     fn reg_alloc(&mut self) {
-        if self.block_order.len() != 1 {
-            return;
-        }
         do_regalloc(self);
     }
 
@@ -378,15 +632,44 @@ impl BackendMachine for Amd64Machine {
     }
 
     fn lower_params(&mut self, params: &[Value]) {
-        let regs: Vec<_> = params
-            .iter()
-            .copied()
-            .filter(|value| value.valid())
-            .map(|value| self.compiler().v_reg_of(value))
-            .collect();
         let abi = self.current_abi.clone();
-        let lowered = lower_abi_params(&abi, &regs);
-        self.current_block_mut().params = regs.clone();
+        let mut lowered = Vec::new();
+        for (value, arg) in params.iter().copied().zip(&abi.args) {
+            if !value.valid() {
+                continue;
+            }
+            let reg = self.compiler().v_reg_of(value);
+            if arg.kind == AbiArgKind::Reg {
+                if arg.ty.is_int() {
+                    lowered.push(Amd64Instr::mov_rr(arg.reg, reg, arg.ty.bits() == 64));
+                } else {
+                    lowered.push(Amd64Instr::xmm_unary_rm_r(
+                        match arg.ty {
+                            Type::F32 => SseOpcode::Movss,
+                            Type::F64 => SseOpcode::Movsd,
+                            _ => SseOpcode::Movdqu,
+                        },
+                        Operand::reg(arg.reg),
+                        reg,
+                    ));
+                }
+            } else if arg.ty.is_int() {
+                lowered.push(Amd64Instr::mov64_mr(
+                    Operand::mem(AddressMode::imm_rbp((arg.offset + 16) as u32)),
+                    reg,
+                ));
+            } else {
+                lowered.push(Amd64Instr::xmm_unary_rm_r(
+                    match arg.ty {
+                        Type::F32 => SseOpcode::Movss,
+                        Type::F64 => SseOpcode::Movsd,
+                        _ => SseOpcode::Movdqu,
+                    },
+                    Operand::mem(AddressMode::imm_rbp((arg.offset + 16) as u32)),
+                    reg,
+                ));
+            }
+        }
         self.current_block_mut().instructions.splice(0..0, lowered);
     }
 
@@ -436,6 +719,7 @@ mod tests {
     use std::ptr::NonNull;
 
     use super::Amd64Machine;
+    use crate::backend::isa::amd64::{Amd64Instr, Label, Operand};
     use crate::backend::machine::Machine;
     use crate::backend::{
         CompilerContext, FunctionAbi, RegType, SSAValueDefinition, SourceOffsetInfo, VReg,
@@ -587,5 +871,18 @@ mod tests {
         m.lower_returns(&[Value(0).with_type(Type::I64)]);
 
         assert!(m.format().contains("16(%rbp)"));
+    }
+
+    #[test]
+    fn encode_all_resolves_block_label_branches() {
+        let mut m = Amd64Machine::new();
+        m.start_lowering_function(BasicBlockId(1));
+        m.start_block(BasicBlockId(0));
+        m.insert_return();
+        m.start_block(BasicBlockId(1));
+        m.push(Amd64Instr::jmp(Operand::label(Label(0))));
+
+        let bytes = m.encode_all().unwrap();
+        assert_eq!(bytes, vec![0xC3, 0xE9, 0xFA, 0xFF, 0xFF, 0xFF]);
     }
 }

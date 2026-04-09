@@ -617,4 +617,35 @@ mod tests {
             multi_value.code_section.len()
         );
     }
+
+    #[test]
+    fn rejects_remaining_spectest_validator_gap_fixtures() {
+        for (path, features) in [
+            (
+                "../internal/integration_test/spectest/v1/testdata/binary.37.wasm",
+                CoreFeatures::V1,
+            ),
+            (
+                "../internal/integration_test/spectest/v1/testdata/binary.80.wasm",
+                CoreFeatures::V1,
+            ),
+            (
+                "../internal/integration_test/spectest/v2/testdata/binary.41.wasm",
+                CoreFeatures::V2,
+            ),
+            (
+                "../internal/integration_test/spectest/extended-const/testdata/global.1.wasm",
+                CoreFeatures::V2 | CoreFeatures::EXTENDED_CONST,
+            ),
+            (
+                "../internal/integration_test/spectest/extended-const/testdata/global.2.wasm",
+                CoreFeatures::V2 | CoreFeatures::EXTENDED_CONST,
+            ),
+        ] {
+            assert!(
+                decode_module(&fixture(path), features).is_err(),
+                "{path} should be rejected"
+            );
+        }
+    }
 }

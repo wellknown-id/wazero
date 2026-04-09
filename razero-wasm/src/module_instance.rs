@@ -2,6 +2,10 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 use crate::const_expr::{
     evaluate_const_expr as evaluate_runtime_const_expr, ConstExpr, ConstExprError,
@@ -15,11 +19,11 @@ use crate::module::{
     ValueType,
 };
 use crate::store_module_list::{ModuleInstanceId, ModuleLinks};
-use crate::table::TableInstance;
+use crate::table::{encode_function_reference, TableInstance};
 
 pub type FunctionTypeId = u32;
 pub type DataInstance = Vec<u8>;
-pub type ElementInstance = Vec<Option<u32>>;
+pub type ElementInstance = Vec<Option<u64>>;
 
 pub const MAXIMUM_FUNCTION_TYPES: u32 = 1 << 27;
 
@@ -29,11 +33,57 @@ pub const EXIT_CODE_FLAG_RESOURCE_NOT_CLOSED: u64 = 1 << 1;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct FunctionInstance {
+    pub module_id: ModuleInstanceId,
     pub module_name: String,
     pub function_index: u32,
     pub type_id: FunctionTypeId,
     pub is_host: bool,
 }
+
+#[derive(Clone, Default)]
+pub struct ModuleCloseState(Arc<AtomicU64>);
+
+impl ModuleCloseState {
+    pub fn is_closed(&self) -> bool {
+        self.load() != 0
+    }
+
+    pub fn exit_code(&self) -> Option<u32> {
+        let closed = self.load();
+        (closed != 0).then_some((closed >> 32) as u32)
+    }
+
+    pub fn set_exit_code(&self, exit_code: u32, flag: u64) -> bool {
+        self.0
+            .compare_exchange(
+                0,
+                flag | ((exit_code as u64) << 32),
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+
+    pub fn load(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+impl fmt::Debug for ModuleCloseState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("ModuleCloseState")
+            .field(&self.load())
+            .finish()
+    }
+}
+
+impl PartialEq for ModuleCloseState {
+    fn eq(&self, other: &Self) -> bool {
+        self.load() == other.load()
+    }
+}
+
+impl Eq for ModuleCloseState {}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ModuleInstance {
@@ -44,13 +94,14 @@ pub struct ModuleInstance {
     pub global_types: Vec<GlobalType>,
     pub memory_instance: Option<MemoryInstance>,
     pub memory_type: Option<Memory>,
+    pub imported_memory_module_id: Option<ModuleInstanceId>,
     pub tables: Vec<TableInstance>,
     pub table_types: Vec<Table>,
     pub functions: Vec<FunctionInstance>,
     pub type_ids: Vec<FunctionTypeId>,
     pub data_instances: Vec<DataInstance>,
     pub element_instances: Vec<ElementInstance>,
-    pub closed: u64,
+    pub closed: ModuleCloseState,
     pub store_links: ModuleLinks,
     pub source: Module,
 }
@@ -131,7 +182,7 @@ impl ModuleInstance {
     }
 
     pub fn is_closed(&self) -> bool {
-        self.closed != 0
+        self.closed.is_closed()
     }
 
     pub fn close(&mut self) -> bool {
@@ -154,7 +205,7 @@ impl ModuleInstance {
     }
 
     pub fn exit_code(&self) -> Option<u32> {
-        (self.closed != 0).then_some((self.closed >> 32) as u32)
+        self.closed.exit_code()
     }
 
     pub fn set_store_links(&mut self, links: ModuleLinks) {
@@ -186,14 +237,14 @@ impl ModuleInstance {
     }
 
     pub fn validate_data(&self, data: &[DataSegment]) -> Result<(), ModuleInstantiationError> {
-        let memory = self
-            .memory_instance
-            .as_ref()
-            .ok_or(ModuleInstantiationError::MissingMemory)?;
         for (index, segment) in data.iter().enumerate() {
             if segment.is_passive() {
                 continue;
             }
+            let memory = self
+                .memory_instance
+                .as_ref()
+                .ok_or(ModuleInstantiationError::MissingMemory)?;
             let offset = self.evaluate_offset(&segment.offset_expression)?;
             let end = offset
                 .checked_add(segment.init.len())
@@ -253,17 +304,57 @@ impl ModuleInstance {
                 ModuleInstantiationError::TableOutOfBounds {
                     table_index: element.table_index,
                     offset,
-                    len: table.elements.len(),
+                    len: table.len(),
                 },
             )?;
-            if end > table.elements.len() {
-                return Err(ModuleInstantiationError::TableOutOfBounds {
+            if end > table.len() {
+                return Ok(());
+            }
+            table.write_range(offset, &values);
+        }
+        Ok(())
+    }
+
+    pub fn validate_elements(
+        &self,
+        elements: &[ElementSegment],
+    ) -> Result<(), ModuleInstantiationError> {
+        for element in elements {
+            if !element.is_active() || element.init.is_empty() {
+                continue;
+            }
+
+            let offset = self.evaluate_offset(&element.offset_expr)?;
+            let table_index = element.table_index as usize;
+            let table = self
+                .tables
+                .get(table_index)
+                .ok_or(ModuleInstantiationError::MissingTable(element.table_index))?;
+            let end = offset.checked_add(element.init.len()).ok_or(
+                ModuleInstantiationError::TableOutOfBounds {
                     table_index: element.table_index,
                     offset,
-                    len: table.elements.len(),
-                });
+                    len: table.len(),
+                },
+            )?;
+            if end > table.len() {
+                if !self
+                    .source
+                    .enabled_features
+                    .contains(razero_features::CoreFeatures::REFERENCE_TYPES)
+                    && element.table_index < self.source.import_table_count
+                {
+                    return Err(ModuleInstantiationError::TableOutOfBounds {
+                        table_index: element.table_index,
+                        offset,
+                        len: table.len(),
+                    });
+                }
+                continue;
             }
-            table.elements[offset..end].clone_from_slice(&values);
+            for init in &element.init {
+                let _ = self.evaluate_reference(init)?;
+            }
         }
         Ok(())
     }
@@ -286,16 +377,12 @@ impl ModuleInstance {
 
     pub fn add_defined_global(&mut self, global_type: GlobalType, value: u64) {
         self.global_types.push(global_type);
-        self.globals.push(GlobalInstance {
-            ty: global_type,
-            value,
-            value_hi: 0,
-            mutable: global_type.mutable,
-        });
+        self.globals.push(GlobalInstance::new(global_type, value));
     }
 
     pub fn add_defined_function(&mut self, type_id: FunctionTypeId, function_index: u32) {
         self.functions.push(FunctionInstance {
+            module_id: self.id,
             module_name: self.module_name.clone(),
             function_index,
             type_id,
@@ -323,7 +410,7 @@ impl ModuleInstance {
     fn evaluate_reference(
         &self,
         expr: &ConstExpr,
-    ) -> Result<Option<u32>, ModuleInstantiationError> {
+    ) -> Result<Option<u64>, ModuleInstantiationError> {
         let data = &expr.data;
         let Some(&opcode) = data.first() else {
             return Err(ModuleInstantiationError::InvalidConstExpression(
@@ -340,11 +427,21 @@ impl ModuleInstance {
                             "read ref.func index: {err}"
                         ))
                     })?;
-                Ok(Some(index))
+                let function = self.functions.get(index as usize).ok_or_else(|| {
+                    ModuleInstantiationError::InvalidConstExpression(
+                        "ref.func index out of range".to_string(),
+                    )
+                })?;
+                let (module_id, function_index) = if function.is_host {
+                    (self.id, index)
+                } else {
+                    (function.module_id, function.function_index)
+                };
+                Ok(Some(encode_function_reference(module_id, function_index)))
             }
             _ => self
                 .evaluate_const_expr(expr)
-                .map(|(values, _)| Some(values[0] as u32)),
+                .map(|(values, _)| Some(values[0])),
         }
     }
 
@@ -368,19 +465,27 @@ impl ModuleInstance {
                     .global_types
                     .get(index as usize)
                     .ok_or_else(|| ConstExprError::new("global type index out of range"))?;
-                Ok((global_type.val_type, global.value, global.value_hi))
+                let (value, value_hi) = global.value();
+                Ok((global_type.val_type, value, value_hi))
             },
-            |index| Ok(Some(index)),
+            |index| {
+                let function = self
+                    .functions
+                    .get(index as usize)
+                    .ok_or_else(|| ConstExprError::new("ref.func index out of range"))?;
+                let (module_id, function_index) = if function.is_host {
+                    (self.id, index)
+                } else {
+                    (function.module_id, function.function_index)
+                };
+                Ok(Some(encode_function_reference(module_id, function_index)))
+            },
         )
         .map_err(|err| ModuleInstantiationError::InvalidConstExpression(err.to_string()))
     }
 
     fn set_exit_code(&mut self, exit_code: u32, flag: u64) -> bool {
-        if self.closed != 0 {
-            return false;
-        }
-        self.closed = flag | ((exit_code as u64) << 32);
-        true
+        self.closed.set_exit_code(exit_code, flag)
     }
 }
 
@@ -396,7 +501,7 @@ mod tests {
     use crate::const_expr::ConstExpr;
     use crate::instruction::{
         OPCODE_END, OPCODE_F32_CONST, OPCODE_F64_CONST, OPCODE_GLOBAL_GET, OPCODE_I32_ADD,
-        OPCODE_I32_CONST,
+        OPCODE_I32_CONST, OPCODE_REF_FUNC,
     };
     use crate::leb128;
     use crate::module::{ElementMode, Export, ExternType, FunctionType, RefType};
@@ -411,7 +516,7 @@ mod tests {
         assert_eq!(Some(255), module.exit_code());
         assert_eq!(
             EXIT_CODE_FLAG_RESOURCE_CLOSED | ((255_u64) << 32),
-            module.closed
+            module.closed.load()
         );
         assert!(!module.close());
         assert_eq!(
@@ -504,7 +609,7 @@ mod tests {
         module.apply_elements(&elements).unwrap();
 
         assert_eq!(vec![Some(0), None], module.element_instances[0]);
-        assert_eq!(vec![None, Some(0), None, None], module.tables[0].elements);
+        assert_eq!(vec![None, Some(0), None, None], module.tables[0].elements());
     }
 
     #[test]
@@ -576,6 +681,24 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_const_expr_encodes_ref_func_references() {
+        let mut module = ModuleInstance::new(7, "const", Module::default(), Vec::new());
+        module.functions.push(FunctionInstance {
+            module_id: 11,
+            module_name: "imported".to_string(),
+            function_index: 3,
+            type_id: 0,
+            is_host: false,
+        });
+        let expr = ConstExpr::new(vec![OPCODE_REF_FUNC, leb128::encode_u32(0)[0], OPCODE_END]);
+
+        let (values, value_type) = module.evaluate_const_expr(&expr).unwrap();
+
+        assert_eq!(ValueType::FUNCREF, value_type);
+        assert_eq!(vec![encode_function_reference(11, 3)], values);
+    }
+
+    #[test]
     fn apply_data_supports_extended_const_offsets() {
         let mut module = ModuleInstance::new(1, "data", Module::default(), Vec::new());
         module.define_memory(&Memory {
@@ -625,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_elements_reports_out_of_bounds_error() {
+    fn apply_elements_ignores_out_of_bounds_active_segment() {
         let mut module = ModuleInstance::new(1, "elem", Module::default(), Vec::new());
         module.add_defined_table(&Table {
             min: 1,
@@ -634,11 +757,7 @@ mod tests {
         });
 
         assert_eq!(
-            Err(ModuleInstantiationError::TableOutOfBounds {
-                table_index: 0,
-                offset: 1,
-                len: 1,
-            }),
+            Ok(()),
             module.apply_elements(&[ElementSegment {
                 mode: ElementMode::Active,
                 table_index: 0,
@@ -650,5 +769,6 @@ mod tests {
                 )],
             }])
         );
+        assert_eq!(Some(None), module.tables[0].get(0));
     }
 }

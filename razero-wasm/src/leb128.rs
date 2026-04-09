@@ -157,6 +157,9 @@ pub fn load_i32(bytes: &[u8]) -> Result<(i32, usize), Leb128Error> {
         let Some(&byte) = bytes.get(bytes_read) else {
             return Err(Leb128Error::UnexpectedEof);
         };
+        if shift >= 32 {
+            return Err(Leb128Error::Overflow32);
+        }
 
         ret |= u32::from(byte & PAYLOAD) << shift;
         shift += 7;
@@ -238,6 +241,9 @@ pub fn load_i64(bytes: &[u8]) -> Result<(i64, usize), Leb128Error> {
         let Some(&byte) = bytes.get(bytes_read) else {
             return Err(Leb128Error::UnexpectedEof);
         };
+        if shift >= 64 {
+            return Err(Leb128Error::Overflow64);
+        }
 
         ret |= u64::from(byte & PAYLOAD) << shift;
         shift += 7;

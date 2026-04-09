@@ -12,7 +12,9 @@ path = "src/lib.rs"
 razero-features = { workspace = true }
 razero-wasm = { workspace = true }
 razero-decoder = { workspace = true }
+razero-compiler = { workspace = true }
 razero-interp = { workspace = true }
+razero-platform = { workspace = true }
 razero-secmem = { workspace = true }
 
 [dev-dependencies]

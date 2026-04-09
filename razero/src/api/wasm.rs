@@ -7,11 +7,12 @@ use std::{
         atomic::{AtomicBool, AtomicU32, Ordering},
         Arc, Mutex, Weak,
     },
+    thread,
 };
 
 use crate::{
     api::error::{ExitError, Result, RuntimeError},
-    ctx_keys::{Context, InvocationContext},
+    ctx_keys::{Context, ContextDoneError, InvocationContext},
     experimental::{
         close_notifier::CloseNotifier,
         fuel::FuelController,
@@ -20,14 +21,16 @@ use crate::{
         r#yield::{Resumer, YieldError, Yielder},
         snapshotter::{Snapshot, Snapshotter},
     },
+    runtime::RuntimeStore,
 };
 use razero_interp::{
-    engine::{take_suspended_invocation, InterpEngine, SuspendedInvocation},
+    engine::{take_suspended_invocation, SuspendedInvocation},
     interpreter::{is_yield_suspend_payload, YieldSuspend},
 };
 use razero_wasm::{
-    module::FunctionType as WasmFunctionType, module_instance_lookup::LookupError,
-    store::Store as WasmStore, store_module_list::ModuleInstanceId,
+    module::{FunctionType as WasmFunctionType, Module as WasmModule},
+    module_instance_lookup::LookupError,
+    store_module_list::ModuleInstanceId,
 };
 
 pub type HostCallback =
@@ -54,6 +57,44 @@ pub(crate) fn with_active_invocation<T>(
 
 pub(crate) fn active_invocation() -> Option<(Context, Module)> {
     ACTIVE_INVOCATIONS.with(|active| active.borrow().last().cloned())
+}
+
+fn context_done_exit_code(reason: ContextDoneError) -> u32 {
+    match reason {
+        ContextDoneError::Canceled => crate::api::error::EXIT_CODE_CONTEXT_CANCELED,
+        ContextDoneError::DeadlineExceeded => crate::api::error::EXIT_CODE_DEADLINE_EXCEEDED,
+    }
+}
+
+pub(crate) fn install_close_on_context_done(
+    ctx: &Context,
+    module: &Module,
+    enabled: bool,
+) -> Result<Option<Arc<AtomicBool>>> {
+    if !enabled {
+        return Ok(None);
+    }
+
+    if let Some(reason) = ctx.done_error() {
+        let exit_code = context_done_exit_code(reason);
+        let _ = module.close_with_exit_code(ctx, exit_code);
+        return Err(ExitError::new(exit_code).into());
+    }
+
+    if !ctx.has_lifecycle() {
+        return Ok(None);
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let wait_ctx = ctx.clone();
+    let wait_module = module.clone();
+    let wait_stop = stop.clone();
+    thread::spawn(move || {
+        if let Some(reason) = wait_ctx.wait_until_done_or_stopped(&wait_stop) {
+            let _ = wait_module.close_with_exit_code(&wait_ctx, context_done_exit_code(reason));
+        }
+    });
+    Ok(Some(stop))
 }
 
 fn listener_stack_for_call(
@@ -357,6 +398,7 @@ impl GlobalValue {
 
 trait GlobalAccess: Send + Sync {
     fn get(&self) -> GlobalValue;
+    fn set(&self, value: GlobalValue);
     fn is_mutable(&self) -> bool;
 }
 
@@ -370,6 +412,10 @@ impl GlobalAccess for OwnedGlobalAccess {
         *self.value.lock().expect("global poisoned")
     }
 
+    fn set(&self, value: GlobalValue) {
+        *self.value.lock().expect("global poisoned") = value;
+    }
+
     fn is_mutable(&self) -> bool {
         self.mutable
     }
@@ -377,12 +423,19 @@ impl GlobalAccess for OwnedGlobalAccess {
 
 struct DynamicGlobalAccess {
     getter: Arc<dyn Fn() -> GlobalValue + Send + Sync>,
+    setter: Option<Arc<dyn Fn(GlobalValue) + Send + Sync>>,
     mutable: bool,
 }
 
 impl GlobalAccess for DynamicGlobalAccess {
     fn get(&self) -> GlobalValue {
         (self.getter)()
+    }
+
+    fn set(&self, value: GlobalValue) {
+        self.setter
+            .as_ref()
+            .expect("mutable global setter is unavailable")(value);
     }
 
     fn is_mutable(&self) -> bool {
@@ -405,13 +458,15 @@ impl Global {
         }
     }
 
-    pub(crate) fn dynamic(
+    pub(crate) fn dynamic_with_setter(
         mutable: bool,
         getter: impl Fn() -> GlobalValue + Send + Sync + 'static,
+        setter: Option<Arc<dyn Fn(GlobalValue) + Send + Sync>>,
     ) -> Self {
         Self {
             access: Arc::new(DynamicGlobalAccess {
                 getter: Arc::new(getter),
+                setter,
                 mutable,
             }),
         }
@@ -427,6 +482,16 @@ impl Global {
 
     pub fn get(&self) -> GlobalValue {
         self.access.get()
+    }
+
+    pub fn set(&self, value: GlobalValue) {
+        assert!(self.is_mutable(), "global is immutable");
+        assert_eq!(
+            self.value_type(),
+            value.value_type(),
+            "global type mismatch"
+        );
+        self.access.set(value);
     }
 }
 
@@ -661,6 +726,8 @@ impl Function {
         let callback = self.inner.callback.clone().ok_or_else(|| {
             RuntimeError::new("guest function execution is not yet wired through the public API")
         })?;
+        let close_on_context_done =
+            install_close_on_context_done(ctx, &module, module.close_on_context_done())?;
 
         let listener = ctx
             .function_listener_factory
@@ -727,6 +794,9 @@ impl Function {
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
             callback(invocation_ctx.clone(), module.clone(), params)
         }));
+        if let Some(stop) = close_on_context_done {
+            stop.store(true, Ordering::SeqCst);
+        }
 
         let consume_fuel =
             |controller: &Option<Arc<dyn FuelController>>,
@@ -795,11 +865,13 @@ pub(crate) struct ModuleInner {
     all_globals: Vec<Global>,
     close_notifier: Option<Arc<dyn CloseNotifier>>,
     close_hook: Option<Arc<dyn Fn(u32) + Send + Sync>>,
+    close_on_context_done: bool,
     closed: AtomicBool,
     exit_code: AtomicU32,
     default_fuel: i64,
     runtime_registry: Option<Weak<Mutex<BTreeMap<String, Module>>>>,
-    runtime_store: Option<Weak<Mutex<WasmStore<InterpEngine>>>>,
+    runtime_store: Option<Weak<Mutex<RuntimeStore>>>,
+    lower_module: Option<WasmModule>,
     store_module_id: Option<ModuleInstanceId>,
     import_aliases: Mutex<Vec<String>>,
 }
@@ -817,8 +889,10 @@ impl Module {
         all_globals: Vec<Global>,
         close_notifier: Option<Arc<dyn CloseNotifier>>,
         close_hook: Option<Arc<dyn Fn(u32) + Send + Sync>>,
+        close_on_context_done: bool,
         runtime_registry: Option<Weak<Mutex<BTreeMap<String, Module>>>>,
-        runtime_store: Option<Weak<Mutex<WasmStore<InterpEngine>>>>,
+        runtime_store: Option<Weak<Mutex<RuntimeStore>>>,
+        lower_module: Option<WasmModule>,
         function_source_offsets: BTreeMap<String, u64>,
         store_module_id: Option<ModuleInstanceId>,
     ) -> Self {
@@ -847,11 +921,13 @@ impl Module {
                     all_globals,
                     close_notifier,
                     close_hook,
+                    close_on_context_done,
                     closed: AtomicBool::new(false),
                     exit_code: AtomicU32::new(0),
                     default_fuel,
                     runtime_registry,
                     runtime_store,
+                    lower_module,
                     store_module_id,
                     import_aliases: Mutex::new(Vec::new()),
                 }
@@ -871,8 +947,12 @@ impl Module {
         self.inner.store_module_id
     }
 
-    pub(crate) fn runtime_store(&self) -> Option<Arc<Mutex<WasmStore<InterpEngine>>>> {
+    pub(crate) fn runtime_store(&self) -> Option<Arc<Mutex<RuntimeStore>>> {
         self.inner.runtime_store.as_ref().and_then(Weak::upgrade)
+    }
+
+    pub(crate) fn lower_module(&self) -> Option<WasmModule> {
+        self.inner.lower_module.clone()
     }
 
     pub fn exported_function(&self, name: &str) -> Option<Function> {
@@ -1048,6 +1128,9 @@ impl Module {
                     store.name_to_module.remove(&alias);
                 }
             }
+            store
+                .close_module_with_exit_code(module_id, exit_code)
+                .map_err(|err| RuntimeError::new(err.to_string()))?;
         }
         if let Some(notifier) = &self.inner.close_notifier {
             notifier.close_notify(ctx, exit_code);
@@ -1076,6 +1159,10 @@ impl Module {
 
     pub fn exit_code(&self) -> u32 {
         self.inner.exit_code.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn close_on_context_done(&self) -> bool {
+        self.inner.close_on_context_done
     }
 }
 
@@ -1315,9 +1402,12 @@ mod tests {
     use super::{
         decode_externref, decode_f32, decode_f64, decode_i32, decode_u32, encode_externref,
         encode_f32, encode_f64, encode_i32, encode_i64, encode_u32, extern_type_name,
-        value_type_name, ExternType, FunctionDefinition, ValueType,
+        value_type_name, ExternType, FunctionDefinition, Global, GlobalValue, ValueType,
     };
-    use std::{f32, f64};
+    use std::{
+        f32, f64,
+        panic::{catch_unwind, AssertUnwindSafe},
+    };
 
     #[test]
     fn function_definition_tracks_signature() {
@@ -1327,6 +1417,31 @@ mod tests {
         assert_eq!("sum", definition.name());
         assert_eq!(2, definition.param_types().len());
         assert_eq!(1, definition.result_types().len());
+    }
+
+    #[test]
+    fn mutable_globals_round_trip_through_public_api() {
+        let global = Global::new(GlobalValue::I64(1), true);
+        assert_eq!(GlobalValue::I64(1), global.get());
+
+        global.set(GlobalValue::I64(2));
+
+        assert_eq!(GlobalValue::I64(2), global.get());
+    }
+
+    #[test]
+    fn immutable_globals_reject_setters() {
+        let global = Global::new(GlobalValue::I64(1), false);
+
+        let err = catch_unwind(AssertUnwindSafe(|| global.set(GlobalValue::I64(2))))
+            .expect_err("immutable globals must reject mutation");
+
+        let message = err
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| err.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("<non-string panic>");
+        assert!(message.contains("immutable"));
     }
 
     #[test]

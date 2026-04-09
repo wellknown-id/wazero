@@ -15,6 +15,8 @@ const CONCURRENT_ADD_WASM: &[u8] =
     include_bytes!("../../examples/concurrent-instantiation/testdata/add.wasm");
 const AGE_CALCULATOR_WASM: &[u8] =
     include_bytes!("../../examples/import-go/testdata/age_calculator.wasm");
+const HELLO_WORLD_WASM: &[u8] =
+    include_bytes!("../../examples/hello-host/testdata/hello_world.wasm");
 const RESULT_OFFSET_WASM: &[u8] =
     include_bytes!("../../examples/multiple-results/testdata/result_offset.wasm");
 const MULTI_VALUE_WASM: &[u8] =
@@ -112,6 +114,47 @@ fn import_go_age_calculator_smoke_matches_go_example() {
 
     assert_eq!(
         vec!["println >> 21".to_string(), "log_i32 >> 21".to_string()],
+        *lines.lock().unwrap()
+    );
+}
+
+#[test]
+fn hello_host_smoke_matches_rust_example() {
+    let runtime = Runtime::new();
+    let lines = Arc::new(Mutex::new(Vec::new()));
+
+    runtime
+        .new_host_module_builder("env")
+        .new_function_builder()
+        .with_func(
+            {
+                let lines = lines.clone();
+                move |_ctx, module, params| {
+                    let memory = module.memory().expect("guest should export memory");
+                    let message = String::from_utf8(
+                        memory
+                            .read(params[0] as usize, params[1] as usize)
+                            .expect("guest string should be in bounds"),
+                    )
+                    .expect("guest string should be utf-8");
+                    lines.lock().unwrap().push(message);
+                    Ok(Vec::new())
+                }
+            },
+            &[ValueType::I32, ValueType::I32],
+            &[],
+        )
+        .export("print")
+        .instantiate(&Context::default())
+        .unwrap();
+
+    let module = runtime
+        .instantiate_binary(HELLO_WORLD_WASM, ModuleConfig::new())
+        .unwrap();
+    module.exported_function("run").unwrap().call(&[]).unwrap();
+
+    assert_eq!(
+        vec!["hello world from guest".to_string()],
         *lines.lock().unwrap()
     );
 }

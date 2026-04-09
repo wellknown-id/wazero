@@ -31,6 +31,8 @@ pub const EXECUTION_CONTEXT_OFFSET_MEMORY_WAIT32_TRAMPOLINE_ADDRESS: Offset = Of
 pub const EXECUTION_CONTEXT_OFFSET_MEMORY_WAIT64_TRAMPOLINE_ADDRESS: Offset = Offset(1168);
 pub const EXECUTION_CONTEXT_OFFSET_MEMORY_NOTIFY_TRAMPOLINE_ADDRESS: Offset = Offset(1176);
 pub const EXECUTION_CONTEXT_OFFSET_FUEL: Offset = Offset(1184);
+pub const EXECUTION_CONTEXT_SIZE: usize =
+    (EXECUTION_CONTEXT_OFFSET_FUEL.raw() as usize) + core::mem::size_of::<i64>();
 
 #[derive(Copy, Clone, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(transparent)]

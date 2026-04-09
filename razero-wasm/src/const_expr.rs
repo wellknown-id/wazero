@@ -333,7 +333,7 @@ mod tests {
         let (values, value_type) = evaluate_const_expr(
             &ConstExpr::from_opcode(OPCODE_REF_FUNC, &[5]),
             |_| unreachable!(),
-            |index| Ok(Some(index + 100)),
+            |index| Ok(Some(u64::from(index + 100))),
         )
         .unwrap();
         assert_eq!(ValueType::FUNCREF, value_type);

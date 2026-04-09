@@ -7,6 +7,9 @@ use std::sync::{Arc, Mutex};
 
 use razero_wasm::module::{Module, ModuleId};
 
+use crate::aot::{
+    deserialize_aot_metadata, serialize_aot_metadata, AotCompiledMetadata, AotMetadataError,
+};
 use crate::engine::{AlignedBytes, Executables, SourceMap};
 
 const MAGIC: &[u8; 6] = b"WAZEVO";
@@ -16,12 +19,15 @@ pub enum EngineCacheError {
     InvalidHeader(String),
     Io(String),
     ChecksumMismatch { expected: u32, actual: u32 },
+    AotMetadata(String),
 }
 
 impl Display for EngineCacheError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidHeader(message) | Self::Io(message) => f.write_str(message),
+            Self::InvalidHeader(message) | Self::Io(message) | Self::AotMetadata(message) => {
+                f.write_str(message)
+            }
             Self::ChecksumMismatch { expected, actual } => {
                 write!(
                     f,
@@ -39,6 +45,43 @@ pub struct CachedCompiledModule {
     pub executables: Executables,
     pub function_offsets: Vec<usize>,
     pub source_map: SourceMap,
+    pub aot: AotCompiledMetadata,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PrecompiledModuleArtifact {
+    pub executable: Vec<u8>,
+    pub function_offsets: Vec<usize>,
+    pub source_map: SourceMap,
+    pub aot: AotCompiledMetadata,
+}
+
+impl PrecompiledModuleArtifact {
+    pub fn serialize(&self) -> Vec<u8> {
+        serialize_compiled_module(
+            env!("CARGO_PKG_VERSION"),
+            &self.executable,
+            &self.function_offsets,
+            &self.source_map,
+            &self.aot,
+        )
+    }
+
+    pub fn deserialize(bytes: &[u8]) -> Result<Option<Self>, EngineCacheError> {
+        deserialize_compiled_module(env!("CARGO_PKG_VERSION"), bytes)
+            .map(|cached| cached.map(Self::from))
+    }
+}
+
+impl From<CachedCompiledModule> for PrecompiledModuleArtifact {
+    fn from(value: CachedCompiledModule) -> Self {
+        Self {
+            executable: value.executables.executable.as_slice().to_vec(),
+            function_offsets: value.function_offsets,
+            source_map: value.source_map,
+            aot: value.aot,
+        }
+    }
 }
 
 pub trait CompiledModuleCache: Send + Sync {
@@ -80,6 +123,7 @@ pub fn serialize_compiled_module(
     executable: &[u8],
     function_offsets: &[usize],
     source_map: &SourceMap,
+    aot: &AotCompiledMetadata,
 ) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.extend_from_slice(MAGIC);
@@ -107,6 +151,9 @@ pub fn serialize_compiled_module(
             buf.extend_from_slice(&(executable_offset as u64).to_le_bytes());
         }
     }
+    let aot_bytes = serialize_aot_metadata(aot);
+    buf.extend_from_slice(&(aot_bytes.len() as u64).to_le_bytes());
+    buf.extend_from_slice(&aot_bytes);
     buf
 }
 
@@ -140,7 +187,13 @@ pub fn deserialize_compiled_module(
         return Ok(None);
     }
 
-    let function_count = read_u32(&mut cursor)? as usize;
+    let function_count = read_u32(&mut cursor)? as u64;
+    let function_count = checked_vec_len(
+        &cursor,
+        function_count,
+        8,
+        "compilationcache: invalid function offset table length",
+    )?;
     let mut function_offsets = Vec::with_capacity(function_count);
     for index in 0..function_count {
         function_offsets.push(read_u64_named(
@@ -152,7 +205,13 @@ pub fn deserialize_compiled_module(
     let executable_len = read_u64_named(
         &mut cursor,
         "compilationcache: error reading executable size",
-    )? as usize;
+    )?;
+    let executable_len = checked_vec_len(
+        &cursor,
+        executable_len,
+        1,
+        "compilationcache: invalid executable size",
+    )?;
     let mut executable = vec![0; executable_len];
     read_exact(
         &mut cursor,
@@ -172,7 +231,13 @@ pub fn deserialize_compiled_module(
             let len = read_u64_named(
                 &mut cursor,
                 "compilationcache: could not read source map length",
-            )? as usize;
+            )?;
+            let len = checked_vec_len(
+                &cursor,
+                len,
+                16,
+                "compilationcache: invalid source map length",
+            )?;
             let mut executable_offsets = Vec::with_capacity(len);
             let mut wasm_binary_offsets = Vec::with_capacity(len);
             for _ in 0..len {
@@ -197,6 +262,28 @@ pub fn deserialize_compiled_module(
         }
     };
 
+    let aot_len = read_u64_named(
+        &mut cursor,
+        "compilationcache: could not read aot metadata length",
+    )?;
+    let aot_len = checked_vec_len(
+        &cursor,
+        aot_len,
+        1,
+        "compilationcache: invalid aot metadata length",
+    )?;
+    let mut aot_bytes = vec![0; aot_len];
+    read_exact(
+        &mut cursor,
+        &mut aot_bytes,
+        "compilationcache: could not read aot metadata",
+    )?;
+    let aot = deserialize_aot_metadata(&aot_bytes).map_err(|err| match err {
+        AotMetadataError::InvalidHeader(message) | AotMetadataError::Io(message) => {
+            EngineCacheError::AotMetadata(message)
+        }
+    })?;
+
     Ok(Some(CachedCompiledModule {
         executables: Executables {
             executable: AlignedBytes::from_bytes(executable),
@@ -204,6 +291,7 @@ pub fn deserialize_compiled_module(
         },
         function_offsets,
         source_map,
+        aot,
     }))
 }
 
@@ -241,6 +329,30 @@ fn read_u64_named(cursor: &mut Cursor<&[u8]>, context: &str) -> Result<u64, Engi
     Ok(u64::from_le_bytes(buf))
 }
 
+fn checked_vec_len(
+    cursor: &Cursor<&[u8]>,
+    len: u64,
+    element_size: usize,
+    context: &str,
+) -> Result<usize, EngineCacheError> {
+    let len =
+        usize::try_from(len).map_err(|_| EngineCacheError::InvalidHeader(context.to_string()))?;
+    let bytes_needed = len
+        .checked_mul(element_size)
+        .ok_or_else(|| EngineCacheError::InvalidHeader(context.to_string()))?;
+    if bytes_needed > remaining(cursor) {
+        return Err(EngineCacheError::InvalidHeader(context.to_string()));
+    }
+    Ok(len)
+}
+
+fn remaining(cursor: &Cursor<&[u8]>) -> usize {
+    cursor
+        .get_ref()
+        .len()
+        .saturating_sub(cursor.position() as usize)
+}
+
 fn crc32c(bytes: &[u8]) -> u32 {
     let mut crc = !0u32;
     for byte in bytes {
@@ -256,8 +368,13 @@ fn crc32c(bytes: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{crc32c, deserialize_compiled_module, file_cache_key, serialize_compiled_module};
+    use crate::aot::{
+        AotCompiledMetadata, AotFunctionMetadata, AotGlobalTypeMetadata, AotImportDescMetadata,
+        AotImportMetadata, AotMemoryMetadata, AotModuleContextMetadata, AotSourceMapEntry,
+        AotTableMetadata,
+    };
     use crate::engine::SourceMap;
-    use razero_wasm::module::Module;
+    use razero_wasm::module::{ExternType, Module, RefType, ValueType};
 
     #[test]
     fn cache_key_rehashes_module_id() {
@@ -274,26 +391,104 @@ mod tests {
             executable_offsets: vec![4, 8],
             wasm_binary_offsets: vec![10, 20],
         };
-        let bytes = serialize_compiled_module("0.0.0", &[1, 2, 3, 4], &[0, 2], &source_map);
+        let aot = AotCompiledMetadata {
+            module_id: [9; 32],
+            import_function_count: 1,
+            entry_preamble_offsets: vec![0, 8],
+            imports: vec![AotImportMetadata {
+                ty: ExternType::MEMORY,
+                module: "env".to_string(),
+                name: "memory".to_string(),
+                desc: AotImportDescMetadata::Memory(AotMemoryMetadata {
+                    min: 1,
+                    cap: 2,
+                    max: 3,
+                    is_max_encoded: true,
+                    is_shared: false,
+                }),
+                index_per_type: 0,
+            }],
+            memory: Some(AotMemoryMetadata {
+                min: 2,
+                cap: 2,
+                max: 6,
+                is_max_encoded: true,
+                is_shared: false,
+            }),
+            tables: vec![AotTableMetadata {
+                min: 4,
+                max: Some(5),
+                ty: RefType::FUNCREF,
+            }],
+            globals: vec![AotGlobalTypeMetadata {
+                val_type: ValueType::I64,
+                mutable: true,
+            }],
+            functions: vec![AotFunctionMetadata {
+                local_function_index: 0,
+                wasm_function_index: 1,
+                type_index: 0,
+                executable_offset: 0,
+                executable_len: 4,
+            }],
+            relocations: Vec::new(),
+            module_context: AotModuleContextMetadata {
+                total_size: 16,
+                module_instance_offset: 0,
+                local_memory_begin: 8,
+                imported_memory_begin: -1,
+                imported_functions_begin: -1,
+                globals_begin: -1,
+                type_ids_1st_element: -1,
+                tables_begin: -1,
+                before_listener_trampolines_1st_element: -1,
+                after_listener_trampolines_1st_element: -1,
+                data_instances_1st_element: 8,
+                element_instances_1st_element: 16,
+            },
+            source_map: vec![AotSourceMapEntry {
+                wasm_binary_offset: 10,
+                executable_offset: 4,
+            }],
+            ensure_termination: false,
+            memory_isolation_enabled: false,
+            ..AotCompiledMetadata::default()
+        };
+        let bytes = serialize_compiled_module("0.0.0", &[1, 2, 3, 4], &[0, 2], &source_map, &aot);
         let cached = deserialize_compiled_module("0.0.0", &bytes)
             .unwrap()
             .unwrap();
         assert_eq!(cached.executables.executable.as_slice(), &[1, 2, 3, 4]);
         assert_eq!(cached.function_offsets, vec![0, 2]);
         assert_eq!(cached.source_map, source_map);
+        assert_eq!(cached.aot, aot);
     }
 
     #[test]
     fn deserialize_rejects_checksum_mismatch() {
-        let mut bytes = serialize_compiled_module("0.0.0", &[1, 2, 3], &[0], &SourceMap::default());
-        let last = bytes.len() - 1;
-        bytes[last] ^= 0xff;
-        assert!(deserialize_compiled_module("0.0.0", &bytes).is_err());
+        let version = "0.0.0";
+        let executable = [1, 2, 3];
+        let mut bytes = serialize_compiled_module(
+            version,
+            &executable,
+            &[0],
+            &SourceMap::default(),
+            &AotCompiledMetadata::default(),
+        );
+        let checksum_offset = super::MAGIC.len() + 1 + version.len() + 4 + 8 + 8 + executable.len();
+        bytes[checksum_offset] ^= 0xff;
+        assert!(deserialize_compiled_module(version, &bytes).is_err());
     }
 
     #[test]
     fn version_mismatch_returns_stale_cache() {
-        let bytes = serialize_compiled_module("0.0.0", &[1, 2, 3], &[0], &SourceMap::default());
+        let bytes = serialize_compiled_module(
+            "0.0.0",
+            &[1, 2, 3],
+            &[0],
+            &SourceMap::default(),
+            &AotCompiledMetadata::default(),
+        );
         assert!(deserialize_compiled_module("1.0.0", &bytes)
             .unwrap()
             .is_none());

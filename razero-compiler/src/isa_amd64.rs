@@ -1,5 +1,7 @@
 #![doc = "amd64 ISA selection glue."]
 
+use std::slice;
+
 pub const ARCH: &str = "amd64";
 
 pub fn is_supported() -> bool {
@@ -16,7 +18,14 @@ pub fn unwind_stack(
 }
 
 pub fn go_call_stack_view(words: &[u64]) -> &[u64] {
-    words
+    let size_bytes = words[0] as usize;
+    assert_eq!(
+        size_bytes & 7,
+        0,
+        "amd64 go-call stack size must be u64 aligned"
+    );
+    let len = size_bytes / 8;
+    unsafe { slice::from_raw_parts(words.as_ptr().add(1), len) }
 }
 
 pub fn adjust_cloned_stack(

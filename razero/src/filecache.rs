@@ -1,22 +1,30 @@
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+};
 
-use crate::cache::CompilationCache;
+use crate::cache::{BinaryCompilationArtifact, CompilationCache};
 
 pub type Key = [u8; 32];
 
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct FileCompilationCache {
     root: PathBuf,
+    binary_artifacts: Arc<Mutex<HashMap<String, BinaryCompilationArtifact>>>,
 }
 
 impl FileCompilationCache {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            binary_artifacts: Arc::default(),
+        }
     }
 
     pub fn root(&self) -> &Path {
@@ -114,6 +122,16 @@ impl CompilationCache for FileCompilationCache {
 
     fn insert(&self, key: &str, bytes: &[u8]) {
         let _ = self.insert_bytes(key, bytes);
+    }
+
+    fn get_binary_artifact(&self, key: &str) -> Option<BinaryCompilationArtifact> {
+        self.binary_artifacts.lock().ok()?.get(key).cloned()
+    }
+
+    fn insert_binary_artifact(&self, key: &str, artifact: BinaryCompilationArtifact) {
+        if let Ok(mut modules) = self.binary_artifacts.lock() {
+            modules.insert(key.to_string(), artifact);
+        }
     }
 }
 

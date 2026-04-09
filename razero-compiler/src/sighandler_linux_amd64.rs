@@ -1,54 +1,52 @@
 #![doc = "Linux amd64 signal-handler glue."]
 
-use std::sync::{Mutex, OnceLock};
+pub use crate::sighandler_linux::{registered_jit_code_ranges, JitCodeRange, MAX_JIT_CODE_RANGES};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct JitCodeRange {
-    pub start: usize,
-    pub end: usize,
-}
-
-pub const MAX_JIT_CODE_RANGES: usize = 4096;
 pub const ASM_SOURCE: &str = include_str!("sighandler_linux_amd64.S");
 
-fn ranges() -> &'static Mutex<Vec<JitCodeRange>> {
-    static RANGES: OnceLock<Mutex<Vec<JitCodeRange>>> = OnceLock::new();
-    RANGES.get_or_init(|| Mutex::new(Vec::new()))
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+core::arch::global_asm!(
+    include_str!("sighandler_linux_amd64.S"),
+    options(att_syntax)
+);
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+unsafe extern "C" {
+    fn razero_jit_sig_handler_addr() -> usize;
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn handler_addr() -> usize {
+    unsafe { razero_jit_sig_handler_addr() }
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+fn handler_addr() -> usize {
+    0
 }
 
 pub fn signal_handler_supported() -> bool {
-    false
+    cfg!(all(target_os = "linux", target_arch = "x86_64"))
 }
 
-pub fn install_signal_handler() {}
+pub fn install_signal_handler() {
+    crate::sighandler_linux::install_signal_handler(handler_addr());
+}
 
 pub fn register_jit_code_range(start: usize, end: usize) {
-    assert!(start != 0 && end > start, "invalid JIT code range");
-    let mut guard = ranges().lock().unwrap();
-    if guard
-        .iter()
-        .any(|range| range.start == start && range.end == end)
-    {
-        return;
-    }
-    assert!(
-        guard.len() < MAX_JIT_CODE_RANGES,
-        "too many JIT code ranges"
-    );
-    guard.push(JitCodeRange { start, end });
-    guard.sort_by_key(|range| range.start);
-}
-
-pub fn registered_jit_code_ranges() -> Vec<JitCodeRange> {
-    ranges().lock().unwrap().clone()
+    crate::sighandler_linux::register_jit_code_range(start, end, handler_addr());
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{register_jit_code_range, registered_jit_code_ranges, ASM_SOURCE};
+    use super::{
+        install_signal_handler, register_jit_code_range, registered_jit_code_ranges,
+        signal_handler_supported, ASM_SOURCE,
+    };
 
     #[test]
     fn registers_unique_ranges() {
+        crate::sighandler_linux::reset_jit_code_ranges_for_tests();
         register_jit_code_range(100, 200);
         register_jit_code_range(100, 200);
         assert!(registered_jit_code_ranges()
@@ -58,6 +56,18 @@ mod tests {
 
     #[test]
     fn assembly_source_contains_expected_labels() {
-        assert!(ASM_SOURCE.contains("jitSigHandler"));
+        assert!(ASM_SOURCE.contains("razero_jit_sig_handler"));
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn install_signal_handler_replaces_sigsegv_handler() {
+        install_signal_handler();
+        assert!(signal_handler_supported());
+        assert!(crate::sighandler_linux::signal_handler_installed());
+        assert_eq!(
+            crate::sighandler_linux::current_sigsegv_handler(),
+            super::handler_addr()
+        );
     }
 }

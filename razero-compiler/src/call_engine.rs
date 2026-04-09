@@ -6,13 +6,14 @@ use std::sync::Arc;
 use razero_wasm::engine::FunctionHandle;
 use razero_wasm::host_func::{Caller, HostFuncError, HostFuncRef};
 use razero_wasm::module::Index;
-use razero_wasm::module_instance::{ModuleExitError, ModuleInstance};
+use razero_wasm::module_instance::{ModuleCloseState, ModuleExitError, ModuleInstance};
 use razero_wasm::table::Reference;
 use razero_wasm::wasmruntime;
 
 use crate::engine::CompiledModule;
+use crate::hostmodule::host_module_host_func_from_opaque;
 use crate::memmove::memmove_ptr;
-use crate::wazevoapi::ExitCode;
+use crate::wazevoapi::{go_function_index_from_exit_code, ExitCode};
 
 pub const CALL_STACK_CEILING: usize = 50_000_000;
 
@@ -129,6 +130,7 @@ pub struct CallEngine {
     number_of_results: usize,
     host_func: Option<HostFuncRef>,
     _compiled_module: Option<Arc<CompiledModule>>,
+    module_close_state: Option<ModuleCloseState>,
 }
 
 impl std::fmt::Debug for CallEngine {
@@ -158,6 +160,7 @@ impl CallEngine {
         number_of_results: usize,
         host_func: Option<HostFuncRef>,
         compiled_module: Option<Arc<CompiledModule>>,
+        module_close_state: Option<ModuleCloseState>,
     ) -> Self {
         let mut call_engine = Self {
             index_in_module,
@@ -175,6 +178,7 @@ impl CallEngine {
             number_of_results,
             host_func,
             _compiled_module: compiled_module,
+            module_close_state,
         };
         call_engine.init();
         call_engine
@@ -251,6 +255,8 @@ impl CallEngine {
             });
         }
 
+        self.exec_ctx.caller_module_context_ptr = 0;
+
         if self.uses_compiled_entrypoint() {
             self.invoke_compiled(stack)?;
         } else if self.exec_ctx.exit_code == ExitCode::OK {
@@ -275,12 +281,36 @@ impl CallEngine {
                 | ExitCode::CALL_GO_MODULE_FUNCTION
                 | ExitCode::CALL_GO_FUNCTION_WITH_LISTENER
                 | ExitCode::CALL_GO_MODULE_FUNCTION_WITH_LISTENER => {
-                    self.invoke_host(stack)?;
-                    self.exec_ctx.exit_code = ExitCode::OK;
+                    if self.exec_ctx.stack_pointer_before_go_call != 0
+                        && self.exec_ctx.go_call_return_address != 0
+                    {
+                        self.invoke_compiled_host_import()?;
+                    } else {
+                        self.invoke_host(stack)?;
+                        self.exec_ctx.exit_code = ExitCode::OK;
+                    }
                 }
                 ExitCode::CHECK_MODULE_EXIT_CODE => {
                     self.check_module_exit_code()?;
                     self.exec_ctx.exit_code = ExitCode::OK;
+                    if self.exec_ctx.stack_pointer_before_go_call != 0
+                        && self.exec_ctx.go_call_return_address != 0
+                    {
+                        #[cfg(target_arch = "x86_64")]
+                        crate::entrypoint_amd64::after_go_function_call_entrypoint(
+                            self.exec_ctx.go_call_return_address as *const u8,
+                            self.exec_ctx_ptr(),
+                            self.exec_ctx.stack_pointer_before_go_call,
+                            self.exec_ctx.frame_pointer_before_go_call,
+                        );
+                        #[cfg(target_arch = "aarch64")]
+                        crate::entrypoint_arm64::after_go_function_call_entrypoint(
+                            self.exec_ctx.go_call_return_address as *const u8,
+                            self.exec_ctx_ptr(),
+                            self.exec_ctx.stack_pointer_before_go_call,
+                            self.exec_ctx.frame_pointer_before_go_call,
+                        );
+                    }
                 }
                 ExitCode::UNREACHABLE => {
                     return Err(CallEngineError::Runtime(wasmruntime::UNREACHABLE));
@@ -371,6 +401,56 @@ impl CallEngine {
         Ok(&stack[..self.number_of_results])
     }
 
+    fn invoke_compiled_host_import(&mut self) -> Result<(), CallEngineError> {
+        let host = unsafe {
+            host_module_host_func_from_opaque(
+                go_function_index_from_exit_code(self.exec_ctx.exit_code),
+                self.exec_ctx.go_function_call_callee_module_context_opaque,
+            )
+        };
+        let go_call_stack_words = unsafe {
+            std::slice::from_raw_parts_mut(
+                self.exec_ctx.stack_pointer_before_go_call as *mut u64,
+                1,
+            )
+        };
+        let go_call_stack = crate::isa_amd64::go_call_stack_view(go_call_stack_words);
+        let go_call_stack = unsafe {
+            std::slice::from_raw_parts_mut(go_call_stack.as_ptr() as *mut u64, go_call_stack.len())
+        };
+        let mut caller = Caller::new(self.caller_module_instance_mut().map(|module| module as _));
+        host.call(&mut caller, go_call_stack)?;
+        self.exec_ctx.exit_code = ExitCode::OK;
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            crate::entrypoint_amd64::after_go_function_call_entrypoint(
+                self.exec_ctx.go_call_return_address as *const u8,
+                self.exec_ctx_ptr(),
+                self.exec_ctx.stack_pointer_before_go_call,
+                self.exec_ctx.frame_pointer_before_go_call,
+            );
+            Ok(())
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            crate::entrypoint_arm64::after_go_function_call_entrypoint(
+                self.exec_ctx.go_call_return_address as *const u8,
+                self.exec_ctx_ptr(),
+                self.exec_ctx.stack_pointer_before_go_call,
+                self.exec_ctx.frame_pointer_before_go_call,
+            );
+            Ok(())
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            Err(CallEngineError::UnsupportedExit {
+                exit_code: self.exec_ctx.exit_code,
+                detail: "compiled host-call re-entry is not supported on this architecture",
+            })
+        }
+    }
+
     fn initial_exit_code(&self) -> ExitCode {
         if self.host_func.is_some() {
             ExitCode::CALL_GO_FUNCTION
@@ -431,24 +511,33 @@ impl CallEngine {
     }
 
     fn caller_module_instance_mut(&mut self) -> Option<&mut ModuleInstance> {
-        if self.module_context_ptr == 0 {
+        let module_context_ptr = self.exec_ctx.caller_module_context_ptr;
+        if module_context_ptr == 0 {
             return None;
         }
         let module_ptr = unsafe {
-            std::ptr::read_unaligned(self.module_context_ptr as *const usize) as *mut ModuleInstance
+            std::ptr::read_unaligned(module_context_ptr as *const usize) as *mut ModuleInstance
         };
         (!module_ptr.is_null()).then(|| unsafe { &mut *module_ptr })
     }
 
     fn caller_module_instance(&self) -> Option<&ModuleInstance> {
-        if self.module_context_ptr == 0 {
+        let module_context_ptr = self.exec_ctx.caller_module_context_ptr;
+        if module_context_ptr == 0 {
             return None;
         }
         let module_ptr = unsafe {
-            std::ptr::read_unaligned(self.module_context_ptr as *const usize)
-                as *const ModuleInstance
+            std::ptr::read_unaligned(module_context_ptr as *const usize) as *const ModuleInstance
         };
         (!module_ptr.is_null()).then(|| unsafe { &*module_ptr })
+    }
+
+    fn active_module_instance_mut(&mut self) -> Option<&mut ModuleInstance> {
+        self.caller_module_instance_mut()
+    }
+
+    fn active_module_instance(&self) -> Option<&ModuleInstance> {
+        self.caller_module_instance()
     }
 
     fn module_opaque_mut(&mut self) -> Option<&mut [u8]> {
@@ -473,7 +562,7 @@ impl CallEngine {
         };
 
         let result = {
-            let Some(module) = self.caller_module_instance_mut() else {
+            let Some(module) = self.active_module_instance_mut() else {
                 return Err(self.unsupported_exit("memory.grow requires a module context"));
             };
             let Some(memory) = module.memory_instance.as_mut() else {
@@ -497,7 +586,7 @@ impl CallEngine {
             Some(offset) if offset >= 0 => offset as usize,
             _ => return,
         };
-        let (ptr, len) = match self.caller_module_instance() {
+        let (ptr, len) = match self.active_module_instance() {
             Some(module) => match module.memory_instance.as_ref() {
                 Some(memory) => (
                     memory
@@ -526,7 +615,7 @@ impl CallEngine {
                 actual: stack.len(),
             });
         }
-        let Some(module) = self.caller_module_instance_mut() else {
+        let Some(module) = self.active_module_instance_mut() else {
             return Err(self.unsupported_exit("table.grow requires a module context"));
         };
         let table_index = usize::try_from(stack[0]).unwrap_or(usize::MAX);
@@ -551,12 +640,14 @@ impl CallEngine {
     }
 
     fn check_module_exit_code(&self) -> Result<(), CallEngineError> {
-        self.caller_module_instance()
-            .ok_or_else(|| {
-                self.unsupported_exit("check_module_exit_code requires a module context")
-            })?
-            .fail_if_closed()
-            .map_err(CallEngineError::from)
+        match self
+            .module_close_state
+            .as_ref()
+            .and_then(ModuleCloseState::exit_code)
+        {
+            Some(exit_code) => Err(CallEngineError::from(ModuleExitError { exit_code })),
+            None => Ok(()),
+        }
     }
 
     fn unsupported_exit(&self, detail: &'static str) -> CallEngineError {
@@ -571,7 +662,7 @@ fn raw_reference(raw: u64) -> Reference {
     if raw == u64::MAX {
         None
     } else {
-        u32::try_from(raw).ok()
+        Some(raw)
     }
 }
 
@@ -593,6 +684,7 @@ pub fn aligned_stack_top(stack: &[u8]) -> usize {
 mod tests {
     use std::sync::Arc;
 
+    use crate::aot::AotCompiledMetadata;
     use razero_wasm::host_func::stack_host_func;
     use razero_wasm::memory::MemoryInstance;
     use razero_wasm::module::{Memory, Module, Table};
@@ -640,7 +732,7 @@ mod tests {
 
     #[test]
     fn call_engine_init_sets_bottom_pointer() {
-        let call_engine = CallEngine::new(0, 0, 0, 0, 0, 0, 0, None, None);
+        let call_engine = CallEngine::new(0, 0, 0, 0, 0, 0, 0, None, None, None);
         assert_eq!(call_engine.stack_top & 15, 0);
         assert_eq!(
             call_engine.exec_ctx.stack_bottom_ptr,
@@ -650,7 +742,7 @@ mod tests {
 
     #[test]
     fn grow_stack_copies_active_window() {
-        let mut call_engine = CallEngine::new(0, 0, 0, 0, 0, 0, 0, None, None);
+        let mut call_engine = CallEngine::new(0, 0, 0, 0, 0, 0, 0, None, None, None);
         call_engine.stack = (0..32).collect();
         call_engine.stack_top = call_engine.stack.as_ptr() as usize + 15;
         call_engine.exec_ctx.stack_grow_required_size = 160;
@@ -670,7 +762,7 @@ mod tests {
 
     #[test]
     fn grow_stack_rejects_ceiling_overflow() {
-        let mut call_engine = CallEngine::new(0, 0, 0, 0, 0, 0, 0, None, None);
+        let mut call_engine = CallEngine::new(0, 0, 0, 0, 0, 0, 0, None, None, None);
         call_engine.stack = vec![0; CALL_STACK_CEILING + 1];
         assert!(call_engine.grow_stack().is_err());
     }
@@ -681,7 +773,7 @@ mod tests {
             stack[0] += stack[1];
             Ok(())
         });
-        let mut call_engine = CallEngine::new(3, 0, 0, 0, 2, 2, 1, Some(host), None);
+        let mut call_engine = CallEngine::new(3, 0, 0, 0, 2, 2, 1, Some(host), None, None);
         let mut stack = [20, 22];
         let results = call_engine.invoke_host(&mut stack).unwrap();
         assert_eq!(results, &[42]);
@@ -693,7 +785,7 @@ mod tests {
             stack[0] = stack[0].wrapping_mul(2);
             Ok(())
         });
-        let mut call_engine = CallEngine::new(3, 0, 0, 0, 1, 1, 1, Some(host), None);
+        let mut call_engine = CallEngine::new(3, 0, 0, 0, 1, 1, 1, Some(host), None, None);
         let mut stack = [21];
         let results = call_engine.call(&mut stack).unwrap();
         assert_eq!(results, &[42]);
@@ -713,6 +805,7 @@ mod tests {
             1,
             None,
             None,
+            None,
         );
         let mut stack = [20, 22];
         let results = call_engine.call(&mut stack).unwrap();
@@ -722,7 +815,7 @@ mod tests {
 
     #[test]
     fn exit_code_loop_grows_stack_before_returning() {
-        let mut call_engine = CallEngine::new(0, 0, 0, 0, 0, 0, 0, None, None);
+        let mut call_engine = CallEngine::new(0, 0, 0, 0, 0, 0, 0, None, None, None);
         call_engine.stack = vec![0; 32];
         call_engine.stack_top = call_engine.stack.as_ptr() as usize + 15;
         call_engine.exec_ctx.stack_pointer_before_go_call = call_engine.stack.as_ptr() as usize + 8;
@@ -738,7 +831,7 @@ mod tests {
 
     #[test]
     fn exit_code_loop_maps_traps_to_runtime_errors() {
-        let mut call_engine = CallEngine::new(0, 0, 0, 0, 0, 0, 0, None, None);
+        let mut call_engine = CallEngine::new(0, 0, 0, 0, 0, 0, 0, None, None, None);
         call_engine.exec_ctx.exit_code = ExitCode::FUEL_EXHAUSTED;
         let err = call_engine.run_exit_code_loop(&mut []).unwrap_err();
         assert_eq!(err, CallEngineError::Runtime(wasmruntime::FUEL_EXHAUSTED));
@@ -753,7 +846,7 @@ mod tests {
 
     #[test]
     fn unsupported_runtime_builtins_remain_explicit() {
-        let mut call_engine = CallEngine::new(0, 0, 0, 0, 0, 0, 0, None, None);
+        let mut call_engine = CallEngine::new(0, 0, 0, 0, 0, 0, 0, None, None, None);
         call_engine.exec_ctx.exit_code = ExitCode::MEMORY_WAIT32;
         let err = call_engine.run_exit_code_loop(&mut []).unwrap_err();
         match err {
@@ -770,6 +863,7 @@ mod tests {
             function_offsets: vec![0],
             module: module.clone(),
             offsets: ModuleContextOffsetData::new(module, false),
+            aot: AotCompiledMetadata::default(),
             shared_functions: Arc::new(SharedFunctions::default()),
             ensure_termination: false,
             fuel_enabled: false,
@@ -795,6 +889,7 @@ mod tests {
             1,
             None,
             Some(parent),
+            Some(module_engine.module().closed.clone()),
         )
     }
 
@@ -838,12 +933,13 @@ mod tests {
         assert_eq!(before_len, u64::from(65_536u32));
 
         let mut stack = [1u64];
+        call_engine.exec_ctx.caller_module_context_ptr = call_engine.module_context_ptr();
         call_engine.exec_ctx.exit_code = ExitCode::GROW_MEMORY;
         let results = call_engine.run_exit_code_loop(&mut stack).unwrap();
         assert_eq!(results, &[1]);
         assert_eq!(
             call_engine
-                .caller_module_instance()
+                .active_module_instance()
                 .unwrap()
                 .memory_instance
                 .as_ref()
@@ -875,15 +971,17 @@ mod tests {
         let mut call_engine = runtime_call_engine_for(module, instance);
 
         let mut table_stack = [0u64, 2, 7];
+        call_engine.exec_ctx.caller_module_context_ptr = call_engine.module_context_ptr();
         call_engine.exec_ctx.exit_code = ExitCode::TABLE_GROW;
         let results = call_engine.run_exit_code_loop(&mut table_stack).unwrap();
         assert_eq!(results, &[0]);
         assert_eq!(
-            call_engine.caller_module_instance().unwrap().tables[0].elements,
+            call_engine.active_module_instance().unwrap().tables[0].elements(),
             vec![Some(7), Some(7)]
         );
 
         let mut ref_stack = [5u64];
+        call_engine.exec_ctx.caller_module_context_ptr = call_engine.module_context_ptr();
         call_engine.exec_ctx.exit_code = ExitCode::REF_FUNC;
         let results = call_engine.run_exit_code_loop(&mut ref_stack).unwrap();
         assert_eq!(results, &[5]);

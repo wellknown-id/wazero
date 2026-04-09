@@ -43,18 +43,18 @@ impl<M: Machine + 'static> Compiler<M> {
             }
         }
 
-        if let Some(branch0) = br0.as_ref() {
-            self.lower_branches(branch0, br1.as_ref());
-        }
-
         assert!(
             !(br1.is_some() && br0.is_none()),
             "conditional branch must be followed by an unconditional branch"
         );
 
+        let mut instructions = Vec::new();
         while let Some(instr_id) = cur {
             let instr = self.ssa_builder.instruction(instr_id).clone();
             cur = instr.prev;
+            instructions.push(instr);
+        }
+        for instr in instructions.into_iter().rev() {
             self.set_current_group_id(instr.gid);
             if instr.lowered() {
                 continue;
@@ -74,19 +74,14 @@ impl<M: Machine + 'static> Compiler<M> {
             self.lower_function_arguments(block);
         }
 
+        if let Some(branch0) = br0.as_ref() {
+            self.lower_branches(branch0, br1.as_ref());
+        }
+
         self.machine.end_block();
     }
 
     fn lower_branches(&mut self, br0: &Instruction, br1: Option<&Instruction>) {
-        self.set_current_group_id(br0.gid);
-        self.machine.lower_single_branch(br0);
-        self.machine.flush_pending_instructions();
-        if let Some(br1) = br1 {
-            self.set_current_group_id(br1.gid);
-            self.machine.lower_conditional_branch(br1);
-            self.machine.flush_pending_instructions();
-        }
-
         if matches!(br0.opcode, Opcode::Jump) {
             let (_, args, target) = br0.branch_data();
             let arg_exists = !args.is_empty();
@@ -94,12 +89,42 @@ impl<M: Machine + 'static> Compiler<M> {
                 !(arg_exists && br1.is_some()),
                 "critical edge split must be completed before lowering"
             );
-            if arg_exists && target.is_return() {
-                self.machine.lower_returns(args);
-            } else if arg_exists {
-                self.lower_block_arguments(args, target);
+            if target.is_return() {
+                if arg_exists {
+                    self.machine.lower_returns(args);
+                    self.machine.flush_pending_instructions();
+                }
+                if let Some(br1) = br1 {
+                    self.set_current_group_id(br1.gid);
+                    self.machine.lower_conditional_branch(br1);
+                    self.machine.flush_pending_instructions();
+                }
+                self.machine.insert_return();
+                self.machine.flush_pending_instructions();
+            } else {
+                if arg_exists {
+                    self.lower_block_arguments(args, target);
+                }
+                if let Some(br1) = br1 {
+                    self.set_current_group_id(br1.gid);
+                    self.machine.lower_conditional_branch(br1);
+                    self.machine.flush_pending_instructions();
+                }
+                self.set_current_group_id(br0.gid);
+                self.machine.lower_single_branch(br0);
+                self.machine.flush_pending_instructions();
             }
+        } else {
+            if let Some(br1) = br1 {
+                self.set_current_group_id(br1.gid);
+                self.machine.lower_conditional_branch(br1);
+                self.machine.flush_pending_instructions();
+            }
+            self.set_current_group_id(br0.gid);
+            self.machine.lower_single_branch(br0);
+            self.machine.flush_pending_instructions();
         }
+
         self.machine.flush_pending_instructions();
     }
 

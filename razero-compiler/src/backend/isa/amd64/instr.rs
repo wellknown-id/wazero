@@ -431,7 +431,7 @@ impl Amd64Instr {
             | InstructionKind::Jmp
             | InstructionKind::JmpIf
             | InstructionKind::Nop0 => {}
-            InstructionKind::Call => {
+            InstructionKind::Call | InstructionKind::CallIndirect => {
                 let (_, _, ret_int, ret_float, _) = abi_info_from_u64(d.u2);
                 for &reg in INT_ARG_RESULT_REGS.iter().take(ret_int as usize) {
                     out.push(vreg_for_real_reg(reg));
@@ -478,11 +478,31 @@ impl Amd64Instr {
         let d = self.0.borrow();
         match d.kind {
             InstructionKind::Ret
-            | InstructionKind::Call
             | InstructionKind::Jmp
             | InstructionKind::JmpIf
             | InstructionKind::Setcc
             | InstructionKind::Nop0 => {}
+            InstructionKind::Call => {
+                let (arg_int, arg_float, _, _, _) = abi_info_from_u64(d.u2);
+                for &reg in INT_ARG_RESULT_REGS.iter().take(arg_int as usize) {
+                    out.push(vreg_for_real_reg(reg));
+                }
+                for &reg in FLOAT_ARG_RESULT_REGS.iter().take(arg_float as usize) {
+                    out.push(vreg_for_real_reg(reg));
+                }
+            }
+            InstructionKind::CallIndirect => {
+                if let Some(op1) = &d.op1 {
+                    op1.uses(out);
+                }
+                let (arg_int, arg_float, _, _, _) = abi_info_from_u64(d.u2);
+                for &reg in INT_ARG_RESULT_REGS.iter().take(arg_int as usize) {
+                    out.push(vreg_for_real_reg(reg));
+                }
+                for &reg in FLOAT_ARG_RESULT_REGS.iter().take(arg_float as usize) {
+                    out.push(vreg_for_real_reg(reg));
+                }
+            }
             InstructionKind::AluRmiR
             | InstructionKind::CmpRmiR
             | InstructionKind::Cmove

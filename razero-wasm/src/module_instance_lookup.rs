@@ -6,7 +6,7 @@ use crate::global::GlobalInstance;
 use crate::memory::MemoryInstance;
 use crate::module::{Export, ExternType};
 use crate::module_instance::{FunctionInstance, FunctionTypeId, ModuleInstance};
-use crate::table::TableInstance;
+use crate::table::{decode_function_reference, TableInstance};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LookupError {
@@ -144,7 +144,6 @@ impl ModuleInstance {
             .get(table_index as usize)
             .ok_or(LookupError::TableIndexOutOfBounds(table_index))?;
         let function_index = table
-            .elements
             .get(table_offset as usize)
             .ok_or(LookupError::TableElementOutOfBounds {
                 table_index,
@@ -154,6 +153,10 @@ impl ModuleInstance {
                 table_index,
                 offset: table_offset,
             })?;
+        let (module_id, function_index) = decode_function_reference(function_index);
+        if module_id != self.id {
+            return Err(LookupError::FunctionIndexOutOfBounds(function_index));
+        }
         let function = self
             .functions
             .get(function_index as usize)
@@ -175,6 +178,7 @@ mod tests {
     use super::*;
     use crate::module::{Export, ExternType, Module, RefType, Table};
     use crate::module_instance::ModuleInstance;
+    use crate::table::encode_function_reference;
 
     #[test]
     fn exported_lookup_uses_go_style_errors() {
@@ -210,6 +214,7 @@ mod tests {
     fn lookup_function_checks_type_ids() {
         let mut module = ModuleInstance::new(1, "table", Module::default(), Vec::new());
         module.functions.push(FunctionInstance {
+            module_id: 1,
             module_name: "table".to_string(),
             function_index: 0,
             type_id: 7,
@@ -220,12 +225,12 @@ mod tests {
             max: Some(1),
             ..Table::default()
         });
-        module.tables.push(TableInstance {
-            elements: vec![Some(0)],
-            min: 1,
-            max: Some(1),
-            ty: RefType::FUNCREF,
-        });
+        module.tables.push(TableInstance::from_elements(
+            vec![Some(encode_function_reference(1, 0))],
+            1,
+            Some(1),
+            RefType::FUNCREF,
+        ));
 
         assert_eq!(0, module.lookup_function(0, 7, 0).unwrap().function_index);
         assert_eq!(

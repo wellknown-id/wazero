@@ -106,14 +106,123 @@ Turn prototypes into an experimental runtime that can be evaluated seriously.
 - Add observability hooks for trap causes, fuel usage, yield counts, and policy denials.
 - Keep the secure mode opt-in until behavior and compatibility are well understood.
 
+### 7. Rust-port AOT packaging and native distribution
+
+Track the Rust port as a first-class deliverable, not as an afterthought to the
+Go runtime. The goal is to keep the core runtime small, keep WASI out of core
+crates, preserve interpreter availability for no-JIT environments, and support
+native packaging for embedders that want a fully linked executable.
+
+#### Current implemented state
+
+- The Rust runtime already supports explicit **interpreter** and **compiler**
+  modes.
+- `razero` now supports **precompiled artifacts** through
+  `build_precompiled_artifact`, `compile_precompiled_artifact`, and
+  `instantiate_precompiled_artifact`, so `.wasm` can be AOT-prepared and later
+  loaded without recompiling at runtime.
+- `razero-compiler` now preserves a richer **AOT metadata** sidecar describing:
+  target, function metadata, relocations, function signatures, module shape,
+  import descriptors, memory/table/global metadata, module-context layout, and
+  execution-context/helper ABI details.
+- `CompiledModule::emit_relocatable_object()` now emits a first
+  **Linux/x86_64 ELF relocatable object** plus Razero metadata sidecar.
+- `razero_compiler::runtime_support::LinkedModule` provides a minimal
+  metadata-driven linked startup/call surface for simple Linux/x86_64 AOT
+  modules.
+- `razero_compiler::linker::link_native_executable(...)` now packages one or
+  more relocatable Wasm objects into a native executable for the current narrow
+  surface: exported functions with scalar C ABI-compatible signatures.
+- `razero_compiler::linker::link_hello_host_executable(...)` now provides a
+  **specialized** native-link flow for the existing `hello-host` example,
+  including its `env.print(ptr, len)` host import and local memory setup.
+- The current packaging flow emits a package metadata bundle alongside the
+  executable (`.razero-package`) and is covered by end-to-end Rust tests.
+
+#### Product shape we should preserve
+
+- **Interpreter runtime mode remains required.** Packaged native executables do
+  not replace the interpreter; they are a separate AOT deployment target.
+- **WASI stays out of the core crates.** Host APIs remain embedder-defined and
+  must be linked or supplied explicitly.
+- **Initial packaged host ABI remains C ABI first.**
+- **Linux ELF remains the first shipping object/executable target**, with
+  x86_64 the current implemented architecture.
+
+#### What is still incomplete
+
+- The **generic** native-link path is still intentionally narrow:
+  - Linux/x86_64 only
+  - exported functions only
+  - scalar C ABI-compatible signatures only
+  - no generic packaging yet for imports, local/global runtime state, start
+    sections, tables, element segments, or richer module shapes
+- `hello-host` is now packaged, but through a **special-case linker path**, not
+  through a generalized host-ABI/runtime-support layer.
+- There is not yet a stable, general-purpose packaging story for:
+  - arbitrary host imports
+  - multiple linked Wasm modules with cross-module runtime state
+  - modules with memory/table/global requirements beyond the specialized paths
+  - AArch64 object emission and native packaging
+- The package metadata format exists in code, but still needs to be treated as a
+  versioned product surface with explicit compatibility guarantees.
+
+#### Work still required to finish this properly
+
+1. **Generalize host-import packaging**
+   - Replace the `hello-host` special case with a reusable host-ABI/runtime
+     support layer.
+   - Make imported functions resolve through explicit packaged host descriptors
+     instead of generated ad hoc example logic.
+   - Keep host ownership explicit: the packager should wire host APIs supplied by
+     the embedder, not smuggle system functionality back into core crates.
+
+2. **Generalize runtime-state packaging**
+   - Support packaged modules that need memory, globals, tables, start functions,
+     and data/element initialization without relying on hand-written per-example
+     startup code.
+   - Promote the current metadata-driven startup assumptions into a real runtime
+     support contract.
+
+3. **Stabilize the packaging ABI**
+   - Treat execution-context layout, module-context layout, helper IDs, symbol
+     names, sidecar schema, and `.razero-package` contents as versioned ABI.
+   - Document what is private vs link-visible so future compiler/runtime changes
+     do not silently break packaged artifacts.
+
+4. **Widen target coverage**
+   - Add AArch64 relocatable object emission and packaging.
+   - Decide later whether Mach-O/COFF are in scope, but do not block Linux/ELF
+     hardening on that decision.
+
+5. **Decide crate/product boundaries**
+   - Keep `razero` focused on embedding/runtime APIs.
+   - Keep `razero-compiler` focused on codegen, metadata, object emission, and
+     linker support unless and until a separate `razero-aot` / `razero-pack`
+     crate becomes warranted.
+   - Preserve `razero-ffi` as a possible stable static-lib integration surface,
+     but do not force packaged execution to depend on a bloated monolithic FFI
+     layer.
+
+6. **Expand validation coverage**
+   - Keep interpreter, compiler, precompiled-artifact, and native-packaged flows
+     all green at once.
+   - Add more end-to-end fixtures covering:
+     - one Wasm module + one host static library
+     - multiple Wasm modules
+     - packaged explicit host imports beyond `hello-host`
+     - negative tests for ABI mismatches, malformed metadata, and unsupported
+       target/runtime shapes
+
 ## Suggested implementation order
 
 1. Foundation and threat model
 2. Hardware-assisted memory sandboxing prototype
 3. Deterministic CPU metering
 4. Pure core engine (WASI decoupling)
-5. Async yield and resume
-6. Broader validation and platform expansion
+5. Rust AOT metadata, precompiled artifacts, and Linux/ELF packaging hardening
+6. Async yield and resume
+7. Broader validation and platform expansion
 
 This order prioritizes containment and deterministic limits before more invasive coroutine-style execution work.
 
@@ -135,4 +244,6 @@ This order prioritizes containment and deterministic limits before more invasive
 - A Linux-first memory sandboxing prototype.
 - A compiler prototype with fuel metering and resource exhaustion traps.
 - A minimalist, pure WebAssembly core engine completely decoupled from system, OS, and WASI dependencies.
+- A Linux-first Rust AOT/native-packaging path with documented ABI limits, plus
+  a concrete plan to generalize host-import and runtime-state packaging.
 - An experimental status report describing what is safe, what is incomplete, and what remains research.

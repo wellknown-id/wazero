@@ -1,52 +1,70 @@
 #![doc = "Runtime-side Wasm globals."]
 
 use std::fmt;
+use std::sync::{Arc, RwLock};
 
 use crate::module::{GlobalType, ValueType};
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
+struct GlobalValue {
+    lo: u64,
+    hi: u64,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct GlobalInstance {
     pub ty: GlobalType,
-    pub value: u64,
-    pub value_hi: u64,
     pub mutable: bool,
+    value: Arc<RwLock<GlobalValue>>,
 }
 
 impl GlobalInstance {
     pub fn new(ty: GlobalType, value: u64) -> Self {
         Self {
             ty,
-            value,
-            value_hi: 0,
             mutable: ty.mutable,
+            value: Arc::new(RwLock::new(GlobalValue { lo: value, hi: 0 })),
         }
     }
 
     pub fn with_value_hi(ty: GlobalType, value: u64, value_hi: u64) -> Self {
         Self {
             ty,
-            value,
-            value_hi,
             mutable: ty.mutable,
+            value: Arc::new(RwLock::new(GlobalValue {
+                lo: value,
+                hi: value_hi,
+            })),
         }
     }
 
     pub fn value(&self) -> (u64, u64) {
-        (self.value, self.value_hi)
+        let value = self.value.read().expect("global read lock");
+        (value.lo, value.hi)
     }
 
     pub fn set_value(&mut self, lo: u64, hi: u64) {
-        self.value = lo;
-        self.value_hi = hi;
+        let mut value = self.value.write().expect("global write lock");
+        value.lo = lo;
+        value.hi = hi;
     }
 }
 
+impl PartialEq for GlobalInstance {
+    fn eq(&self, other: &Self) -> bool {
+        self.ty == other.ty && self.mutable == other.mutable && self.value() == other.value()
+    }
+}
+
+impl Eq for GlobalInstance {}
+
 impl fmt::Display for GlobalInstance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (value, _) = self.value();
         match self.ty.val_type {
-            ValueType::I32 | ValueType::I64 => write!(f, "global({})", self.value),
-            ValueType::F32 => write!(f, "global({})", f32::from_bits(self.value as u32)),
-            ValueType::F64 => write!(f, "global({})", f64::from_bits(self.value)),
+            ValueType::I32 | ValueType::I64 => write!(f, "global({value})"),
+            ValueType::F32 => write!(f, "global({})", f32::from_bits(value as u32)),
+            ValueType::F64 => write!(f, "global({})", f64::from_bits(value)),
             other => panic!("BUG: unknown value type {:X}", other.0),
         }
     }

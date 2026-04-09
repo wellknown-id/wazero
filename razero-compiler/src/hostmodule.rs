@@ -8,8 +8,8 @@ use razero_wasm::module::Module;
 
 use crate::engine::AlignedBytes;
 
-const HOST_MODULE_HEADER_SIZE: usize = 32;
-const HOST_FUNCTION_SLOT_SIZE: usize = 16;
+pub(crate) const HOST_MODULE_HEADER_SIZE: usize = 32;
+pub(crate) const HOST_FUNCTION_SLOT_SIZE: usize = 16;
 
 pub(crate) fn build_host_module_opaque(module: &Module) -> AlignedBytes {
     let size = HOST_MODULE_HEADER_SIZE + module.code_section.len() * HOST_FUNCTION_SLOT_SIZE;

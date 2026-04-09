@@ -6,7 +6,10 @@ use std::{
     ptr, slice,
 };
 
-use razero::{CompiledModule, Context, Instance, ModuleConfig, Runtime, RuntimeConfig};
+use razero::{
+    CompiledModule, Context, Instance, ModuleConfig, Runtime, RuntimeConfig, RuntimeEngineKind,
+};
+use razero_platform::compiler_supported;
 
 static VERSION_BYTES: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
 const WASM_PAGE_SIZE: u64 = 65_536;
@@ -238,6 +241,20 @@ pub extern "C" fn razero_runtime_config_new() -> *mut RazeroRuntimeConfigHandle 
 }
 
 #[no_mangle]
+pub extern "C" fn razero_runtime_config_new_compiler() -> *mut RazeroRuntimeConfigHandle {
+    into_handle::<_, RazeroRuntimeConfigHandle>(RuntimeConfigHandle {
+        config: RuntimeConfig::new_compiler(),
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn razero_runtime_config_new_interpreter() -> *mut RazeroRuntimeConfigHandle {
+    into_handle::<_, RazeroRuntimeConfigHandle>(RuntimeConfigHandle {
+        config: RuntimeConfig::new_interpreter(),
+    })
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn razero_runtime_config_enable_secure_mode(
     config: *mut RazeroRuntimeConfigHandle,
     enabled: bool,
@@ -364,6 +381,12 @@ pub unsafe extern "C" fn razero_runtime_new(
     let config = handle_ref::<RuntimeConfigHandle, _>(config)
         .map(|config| config.config.clone())
         .unwrap_or_else(RuntimeConfig::new);
+    if config.engine_kind() == RuntimeEngineKind::Compiler && !compiler_supported() {
+        return fail(
+            RazeroStatus::InstantiateError,
+            "compiler runtime is not supported on this host",
+        );
+    }
 
     *out_runtime = into_handle::<_, RazeroRuntimeHandle>(RuntimeHandle {
         runtime: Runtime::with_config(config),
@@ -746,6 +769,7 @@ mod tests {
             let config = handle_ref::<RuntimeConfigHandle, _>(runtime_config).unwrap();
             assert_eq!(1, config.config.memory_limit_pages());
             assert_eq!(i64::MAX, config.config.fuel());
+            assert_eq!(RuntimeEngineKind::Interpreter, config.config.engine_kind());
 
             assert_eq!(
                 RazeroStatus::Ok,
@@ -755,6 +779,41 @@ mod tests {
             assert_eq!(0, config.config.fuel());
 
             razero_runtime_config_free(runtime_config);
+        }
+    }
+
+    #[test]
+    fn runtime_config_engine_constructors_bridge_public_api() {
+        unsafe {
+            let auto = razero_runtime_config_new();
+            let compiler = razero_runtime_config_new_compiler();
+            let interpreter = razero_runtime_config_new_interpreter();
+
+            assert_eq!(
+                RuntimeEngineKind::Interpreter,
+                handle_ref::<RuntimeConfigHandle, _>(auto)
+                    .unwrap()
+                    .config
+                    .engine_kind()
+            );
+            assert_eq!(
+                RuntimeEngineKind::Compiler,
+                handle_ref::<RuntimeConfigHandle, _>(compiler)
+                    .unwrap()
+                    .config
+                    .engine_kind()
+            );
+            assert_eq!(
+                RuntimeEngineKind::Interpreter,
+                handle_ref::<RuntimeConfigHandle, _>(interpreter)
+                    .unwrap()
+                    .config
+                    .engine_kind()
+            );
+
+            razero_runtime_config_free(auto);
+            razero_runtime_config_free(compiler);
+            razero_runtime_config_free(interpreter);
         }
     }
 

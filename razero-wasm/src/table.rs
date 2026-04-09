@@ -1,22 +1,44 @@
 #![doc = "Runtime-side Wasm table instances."]
 
-use crate::module::{RefType, Table};
+use std::sync::{Arc, RwLock};
 
-pub type Reference = Option<u32>;
+use crate::module::{RefType, Table};
+use crate::store_module_list::ModuleInstanceId;
+
+pub type Reference = Option<u64>;
 pub type ElementInstance = Vec<Reference>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+pub fn encode_function_reference(module_id: ModuleInstanceId, function_index: u32) -> u64 {
+    ((module_id & u64::from(u32::MAX)) << 32) | u64::from(function_index)
+}
+
+pub fn decode_function_reference(reference: u64) -> (ModuleInstanceId, u32) {
+    (reference >> 32, reference as u32)
+}
+
+#[derive(Debug, Clone)]
 pub struct TableInstance {
-    pub elements: ElementInstance,
+    elements: Arc<RwLock<ElementInstance>>,
     pub min: u32,
     pub max: Option<u32>,
     pub ty: RefType,
 }
 
+impl PartialEq for TableInstance {
+    fn eq(&self, other: &Self) -> bool {
+        self.min == other.min
+            && self.max == other.max
+            && self.ty == other.ty
+            && self.elements() == other.elements()
+    }
+}
+
+impl Eq for TableInstance {}
+
 impl Default for TableInstance {
     fn default() -> Self {
         Self {
-            elements: Vec::new(),
+            elements: Arc::new(RwLock::new(Vec::new())),
             min: 0,
             max: None,
             ty: RefType::FUNCREF,
@@ -27,15 +49,55 @@ impl Default for TableInstance {
 impl TableInstance {
     pub fn new(table: &Table) -> Self {
         Self {
-            elements: vec![None; table.min as usize],
+            elements: Arc::new(RwLock::new(vec![None; table.min as usize])),
             min: table.min,
             max: table.max,
             ty: table.ty,
         }
     }
 
-    pub fn grow(&mut self, delta: u32, initial_ref: Reference) -> u32 {
-        let current_len = self.elements.len() as u32;
+    pub fn from_elements(
+        elements: ElementInstance,
+        min: u32,
+        max: Option<u32>,
+        ty: RefType,
+    ) -> Self {
+        Self {
+            elements: Arc::new(RwLock::new(elements)),
+            min,
+            max,
+            ty,
+        }
+    }
+
+    pub fn elements(&self) -> ElementInstance {
+        self.elements.read().expect("table read lock").clone()
+    }
+
+    pub fn shared_elements(&self) -> Arc<RwLock<ElementInstance>> {
+        self.elements.clone()
+    }
+
+    pub fn len(&self) -> usize {
+        self.elements.read().expect("table read lock").len()
+    }
+
+    pub fn get(&self, index: usize) -> Option<Reference> {
+        self.elements
+            .read()
+            .expect("table read lock")
+            .get(index)
+            .copied()
+    }
+
+    pub fn write_range(&self, offset: usize, values: &[Reference]) {
+        self.elements.write().expect("table write lock")[offset..offset + values.len()]
+            .clone_from_slice(values);
+    }
+
+    pub fn grow(&self, delta: u32, initial_ref: Reference) -> u32 {
+        let mut elements = self.elements.write().expect("table write lock");
+        let current_len = elements.len() as u32;
         if delta == 0 {
             return current_len;
         }
@@ -47,9 +109,9 @@ impl TableInstance {
             return u32::MAX;
         }
 
-        self.elements.resize(new_len as usize, None);
+        elements.resize(new_len as usize, None);
         if let Some(initial_ref) = initial_ref {
-            self.elements[current_len as usize..].fill(Some(initial_ref));
+            elements[current_len as usize..].fill(Some(initial_ref));
         }
         current_len
     }
@@ -73,7 +135,7 @@ mod tests {
         };
 
         let instance = TableInstance::new(&table);
-        assert_eq!(instance.elements, vec![None, None, None]);
+        assert_eq!(instance.elements(), vec![None, None, None]);
         assert_eq!(instance.min, 3);
         assert_eq!(instance.max, Some(5));
         assert_eq!(instance.ty, RefType::EXTERNREF);
@@ -81,41 +143,31 @@ mod tests {
 
     #[test]
     fn grow_returns_previous_length_and_fills_with_reference() {
-        let mut table = TableInstance {
-            elements: vec![Some(1), Some(2)],
-            min: 2,
-            max: Some(10),
-            ty: RefType::FUNCREF,
-        };
+        let table =
+            TableInstance::from_elements(vec![Some(1), Some(2)], 2, Some(10), RefType::FUNCREF);
 
         assert_eq!(table.grow(3, Some(99)), 2);
         assert_eq!(
-            table.elements,
+            table.elements(),
             vec![Some(1), Some(2), Some(99), Some(99), Some(99)]
         );
         assert_eq!(table.grow(0, Some(99)), 5);
         assert_eq!(
-            table.elements,
+            table.elements(),
             vec![Some(1), Some(2), Some(99), Some(99), Some(99)]
         );
     }
 
     #[test]
     fn grow_returns_minus_one_on_bounds_failure() {
-        let mut table = TableInstance {
-            elements: vec![None; 4],
-            min: 4,
-            max: Some(5),
-            ty: RefType::FUNCREF,
-        };
+        let mut table = TableInstance::from_elements(vec![None; 4], 4, Some(5), RefType::FUNCREF);
 
         assert_eq!(table.grow(2, None), u32::MAX);
-        assert_eq!(table.elements.len(), 4);
+        assert_eq!(table.len(), 4);
 
-        table.elements = vec![None; 16];
-        table.max = None;
+        table = TableInstance::from_elements(vec![None; 16], 4, None, RefType::FUNCREF);
         assert_eq!(table.grow(u32::MAX - 15, None), u32::MAX);
-        assert_eq!(table.elements.len(), 16);
+        assert_eq!(table.len(), 16);
     }
 
     #[test]

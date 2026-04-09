@@ -143,7 +143,6 @@ impl CommandActionValue {
 }
 
 #[test]
-#[ignore = "blocked on runtime parity gaps; run manually when chasing spec parity"]
 fn spectest_v1_suite() {
     run_suite(
         "v1",
@@ -153,7 +152,6 @@ fn spectest_v1_suite() {
 }
 
 #[test]
-#[ignore = "blocked on runtime parity gaps; run manually when chasing spec parity"]
 fn spectest_v2_suite() {
     run_suite(
         "v2",
@@ -163,7 +161,6 @@ fn spectest_v2_suite() {
 }
 
 #[test]
-#[ignore = "blocked on runtime parity gaps; run manually when chasing spec parity"]
 fn spectest_threads_suite() {
     run_suite(
         "threads",
@@ -173,7 +170,6 @@ fn spectest_threads_suite() {
 }
 
 #[test]
-#[ignore = "blocked on runtime parity gaps; run manually when chasing spec parity"]
 fn spectest_tail_call_suite() {
     run_suite(
         "tail-call",
@@ -183,7 +179,6 @@ fn spectest_tail_call_suite() {
 }
 
 #[test]
-#[ignore = "blocked on runtime parity gaps; run manually when chasing spec parity"]
 fn spectest_extended_const_suite() {
     run_suite(
         "extended-const",
@@ -259,6 +254,26 @@ fn spectest_threads_atomic_regression() {
         &repo_path("../internal/integration_test/spectest/threads/testdata"),
         "atomic",
         CoreFeatures::V2 | CORE_FEATURES_THREADS,
+    );
+}
+
+#[test]
+fn spectest_v1_memory_regression() {
+    run_case(
+        "v1",
+        &repo_path("../internal/integration_test/spectest/v1/testdata"),
+        "memory",
+        CoreFeatures::V1,
+    );
+}
+
+#[test]
+fn spectest_v2_memory_regression() {
+    run_case(
+        "v2",
+        &repo_path("../internal/integration_test/spectest/v2/testdata"),
+        "memory",
+        CoreFeatures::V2,
     );
 }
 

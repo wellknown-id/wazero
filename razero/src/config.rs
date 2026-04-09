@@ -17,6 +17,14 @@ use razero_wasm::module::Module as WasmModule;
 
 pub const MEMORY_LIMIT_PAGES: u32 = 65_536;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RuntimeEngineKind {
+    Auto,
+    Compiler,
+    #[default]
+    Interpreter,
+}
+
 #[derive(Clone, Default)]
 pub struct RuntimeConfig {
     core_features: CoreFeatures,
@@ -28,6 +36,7 @@ pub struct RuntimeConfig {
     close_on_context_done: bool,
     secure_mode: bool,
     fuel: i64,
+    engine_kind: RuntimeEngineKind,
 }
 
 impl RuntimeConfig {
@@ -37,6 +46,27 @@ impl RuntimeConfig {
             memory_limit_pages: MEMORY_LIMIT_PAGES,
             debug_info_enabled: true,
             ..Self::default()
+        }
+    }
+
+    pub fn new_compiler() -> Self {
+        Self {
+            engine_kind: RuntimeEngineKind::Compiler,
+            ..Self::new()
+        }
+    }
+
+    pub fn new_auto() -> Self {
+        Self {
+            engine_kind: RuntimeEngineKind::Auto,
+            ..Self::new()
+        }
+    }
+
+    pub fn new_interpreter() -> Self {
+        Self {
+            engine_kind: RuntimeEngineKind::Interpreter,
+            ..Self::new()
         }
     }
 
@@ -124,6 +154,10 @@ impl RuntimeConfig {
     pub fn fuel(&self) -> i64 {
         self.fuel
     }
+
+    pub fn engine_kind(&self) -> RuntimeEngineKind {
+        self.engine_kind
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -160,6 +194,7 @@ pub struct CompiledModule {
 pub(crate) struct CompiledModuleInner {
     pub(crate) name: Option<String>,
     pub(crate) bytes: Vec<u8>,
+    pub(crate) precompiled_bytes: Option<Vec<u8>>,
     pub(crate) imported_functions: Vec<FunctionDefinition>,
     pub(crate) exported_functions: BTreeMap<String, FunctionDefinition>,
     pub(crate) imported_memories: Vec<MemoryDefinition>,
@@ -216,5 +251,30 @@ impl CompiledModule {
 
     pub fn is_closed(&self) -> bool {
         self.inner.closed.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RuntimeConfig, RuntimeEngineKind};
+
+    #[test]
+    fn runtime_config_engine_constructors_select_expected_kind() {
+        assert_eq!(
+            RuntimeEngineKind::Interpreter,
+            RuntimeConfig::new().engine_kind()
+        );
+        assert_eq!(
+            RuntimeEngineKind::Compiler,
+            RuntimeConfig::new_compiler().engine_kind()
+        );
+        assert_eq!(
+            RuntimeEngineKind::Auto,
+            RuntimeConfig::new_auto().engine_kind()
+        );
+        assert_eq!(
+            RuntimeEngineKind::Interpreter,
+            RuntimeConfig::new_interpreter().engine_kind()
+        );
     }
 }

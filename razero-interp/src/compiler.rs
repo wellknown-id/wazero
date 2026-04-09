@@ -6,10 +6,12 @@ use std::fmt;
 
 use crate::operations::{
     AtomicArithmeticOp, FloatKind, InclusiveRange, Instruction, Label, LabelKind, MemoryArg,
-    OperationKind, SignedInt, SignedType, UnsignedInt, UnsignedType,
+    OperationKind, Shape, SignedInt, SignedType, UnsignedInt, UnsignedType, V128CmpType,
+    V128LoadType,
 };
 
 const OPCODE_MISC_PREFIX: u8 = 0xfc;
+const OPCODE_VEC_PREFIX: u8 = 0xfd;
 const OPCODE_TAIL_CALL_RETURN_CALL: u8 = 0x12;
 const OPCODE_TAIL_CALL_RETURN_CALL_INDIRECT: u8 = 0x13;
 const OPCODE_ATOMIC_PREFIX: u8 = 0xfe;
@@ -967,11 +969,7 @@ impl<'a> Lowerer<'a> {
                 ));
                 self.mark_tail_call_terminated()?;
             }
-            0xfd => {
-                return Err(CompileError::new(format!(
-                    "unsupported instruction in interpreter compiler: 0x{opcode:x}"
-                )));
-            }
+            OPCODE_VEC_PREFIX => self.handle_vec()?,
             _ => {
                 return Err(CompileError::new(format!(
                     "unsupported instruction in interpreter compiler: 0x{opcode:x}"
@@ -1094,6 +1092,834 @@ impl<'a> Lowerer<'a> {
             _ => {
                 return Err(CompileError::new(format!(
                     "unsupported misc instruction in interpreter compiler: 0x{misc_op:x}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_vec(&mut self) -> Result<(), CompileError> {
+        self.pc += 1;
+        let vec_op = self.byte_at(self.pc)?;
+        match vec_op {
+            0x0c => {
+                self.pc += 1;
+                let lo = u64::from_le_bytes(
+                    self.config.body[self.pc..self.pc + 8]
+                        .try_into()
+                        .map_err(|_| CompileError::new("missing v128.const immediate"))?,
+                );
+                self.pc += 8;
+                let hi = u64::from_le_bytes(
+                    self.config.body[self.pc..self.pc + 8]
+                        .try_into()
+                        .map_err(|_| CompileError::new("missing v128.const immediate"))?,
+                );
+                self.emit(Instruction::v128_const(lo, hi));
+                self.pc += 7;
+            }
+            0x00 => {
+                let inst =
+                    self.read_memory_and(|arg| Instruction::v128_load(V128LoadType::Load128, arg))?;
+                self.emit(inst);
+            }
+            0x01 => {
+                let inst = self
+                    .read_memory_and(|arg| Instruction::v128_load(V128LoadType::Load8x8S, arg))?;
+                self.emit(inst);
+            }
+            0x02 => {
+                let inst = self
+                    .read_memory_and(|arg| Instruction::v128_load(V128LoadType::Load8x8U, arg))?;
+                self.emit(inst);
+            }
+            0x03 => {
+                let inst = self
+                    .read_memory_and(|arg| Instruction::v128_load(V128LoadType::Load16x4S, arg))?;
+                self.emit(inst);
+            }
+            0x04 => {
+                let inst = self
+                    .read_memory_and(|arg| Instruction::v128_load(V128LoadType::Load16x4U, arg))?;
+                self.emit(inst);
+            }
+            0x05 => {
+                let inst = self
+                    .read_memory_and(|arg| Instruction::v128_load(V128LoadType::Load32x2S, arg))?;
+                self.emit(inst);
+            }
+            0x06 => {
+                let inst = self
+                    .read_memory_and(|arg| Instruction::v128_load(V128LoadType::Load32x2U, arg))?;
+                self.emit(inst);
+            }
+            0x07 => {
+                let inst = self
+                    .read_memory_and(|arg| Instruction::v128_load(V128LoadType::Load8Splat, arg))?;
+                self.emit(inst);
+            }
+            0x08 => {
+                let inst = self.read_memory_and(|arg| {
+                    Instruction::v128_load(V128LoadType::Load16Splat, arg)
+                })?;
+                self.emit(inst);
+            }
+            0x09 => {
+                let inst = self.read_memory_and(|arg| {
+                    Instruction::v128_load(V128LoadType::Load32Splat, arg)
+                })?;
+                self.emit(inst);
+            }
+            0x0a => {
+                let inst = self.read_memory_and(|arg| {
+                    Instruction::v128_load(V128LoadType::Load64Splat, arg)
+                })?;
+                self.emit(inst);
+            }
+            0x54 => {
+                let arg = self.read_memory_arg()?;
+                self.pc += 1;
+                self.emit(Instruction::v128_load_lane(self.byte_at(self.pc)?, 8, arg));
+            }
+            0x55 => {
+                let arg = self.read_memory_arg()?;
+                self.pc += 1;
+                self.emit(Instruction::v128_load_lane(self.byte_at(self.pc)?, 16, arg));
+            }
+            0x56 => {
+                let arg = self.read_memory_arg()?;
+                self.pc += 1;
+                self.emit(Instruction::v128_load_lane(self.byte_at(self.pc)?, 32, arg));
+            }
+            0x57 => {
+                let arg = self.read_memory_arg()?;
+                self.pc += 1;
+                self.emit(Instruction::v128_load_lane(self.byte_at(self.pc)?, 64, arg));
+            }
+            0x5c => {
+                let inst = self
+                    .read_memory_and(|arg| Instruction::v128_load(V128LoadType::Load32Zero, arg))?;
+                self.emit(inst);
+            }
+            0x5d => {
+                let inst = self
+                    .read_memory_and(|arg| Instruction::v128_load(V128LoadType::Load64Zero, arg))?;
+                self.emit(inst);
+            }
+            0x0b => {
+                let inst = self.read_memory_and(Instruction::v128_store)?;
+                self.emit(inst);
+            }
+            0x58 => {
+                let arg = self.read_memory_arg()?;
+                self.pc += 1;
+                self.emit(Instruction::v128_store_lane(self.byte_at(self.pc)?, 8, arg));
+            }
+            0x59 => {
+                let arg = self.read_memory_arg()?;
+                self.pc += 1;
+                self.emit(Instruction::v128_store_lane(
+                    self.byte_at(self.pc)?,
+                    16,
+                    arg,
+                ));
+            }
+            0x5a => {
+                let arg = self.read_memory_arg()?;
+                self.pc += 1;
+                self.emit(Instruction::v128_store_lane(
+                    self.byte_at(self.pc)?,
+                    32,
+                    arg,
+                ));
+            }
+            0x5b => {
+                let arg = self.read_memory_arg()?;
+                self.pc += 1;
+                self.emit(Instruction::v128_store_lane(
+                    self.byte_at(self.pc)?,
+                    64,
+                    arg,
+                ));
+            }
+            0x0d => {
+                self.pc += 1;
+                let lanes = self
+                    .config
+                    .body
+                    .get(self.pc..self.pc + 16)
+                    .ok_or_else(|| CompileError::new("missing v128.shuffle lanes"))?
+                    .iter()
+                    .map(|lane| u64::from(*lane))
+                    .collect();
+                self.emit(Instruction::v128_shuffle(lanes));
+                self.pc += 15;
+            }
+            0x0e => self.emit(Instruction::new(OperationKind::V128Swizzle)),
+            0x0f => {
+                self.emit(Instruction::new(OperationKind::V128Splat).with_b1(Shape::I8x16 as u8))
+            }
+            0x10 => {
+                self.emit(Instruction::new(OperationKind::V128Splat).with_b1(Shape::I16x8 as u8))
+            }
+            0x11 => {
+                self.emit(Instruction::new(OperationKind::V128Splat).with_b1(Shape::I32x4 as u8))
+            }
+            0x12 => {
+                self.emit(Instruction::new(OperationKind::V128Splat).with_b1(Shape::I64x2 as u8))
+            }
+            0x13 => {
+                self.emit(Instruction::new(OperationKind::V128Splat).with_b1(Shape::F32x4 as u8))
+            }
+            0x14 => {
+                self.emit(Instruction::new(OperationKind::V128Splat).with_b1(Shape::F64x2 as u8))
+            }
+            0x15 => {
+                self.pc += 1;
+                self.emit(Instruction::v128_extract_lane(
+                    self.byte_at(self.pc)?,
+                    true,
+                    Shape::I8x16,
+                ));
+            }
+            0x16 => {
+                self.pc += 1;
+                self.emit(Instruction::v128_extract_lane(
+                    self.byte_at(self.pc)?,
+                    false,
+                    Shape::I8x16,
+                ));
+            }
+            0x17 => {
+                self.pc += 1;
+                self.emit(Instruction::v128_replace_lane(
+                    self.byte_at(self.pc)?,
+                    Shape::I8x16,
+                ));
+            }
+            0x18 => {
+                self.pc += 1;
+                self.emit(Instruction::v128_extract_lane(
+                    self.byte_at(self.pc)?,
+                    true,
+                    Shape::I16x8,
+                ));
+            }
+            0x19 => {
+                self.pc += 1;
+                self.emit(Instruction::v128_extract_lane(
+                    self.byte_at(self.pc)?,
+                    false,
+                    Shape::I16x8,
+                ));
+            }
+            0x1a => {
+                self.pc += 1;
+                self.emit(Instruction::v128_replace_lane(
+                    self.byte_at(self.pc)?,
+                    Shape::I16x8,
+                ));
+            }
+            0x1b => {
+                self.pc += 1;
+                self.emit(Instruction::v128_extract_lane(
+                    self.byte_at(self.pc)?,
+                    false,
+                    Shape::I32x4,
+                ));
+            }
+            0x1c => {
+                self.pc += 1;
+                self.emit(Instruction::v128_replace_lane(
+                    self.byte_at(self.pc)?,
+                    Shape::I32x4,
+                ));
+            }
+            0x1d => {
+                self.pc += 1;
+                self.emit(Instruction::v128_extract_lane(
+                    self.byte_at(self.pc)?,
+                    false,
+                    Shape::I64x2,
+                ));
+            }
+            0x1e => {
+                self.pc += 1;
+                self.emit(Instruction::v128_replace_lane(
+                    self.byte_at(self.pc)?,
+                    Shape::I64x2,
+                ));
+            }
+            0x1f => {
+                self.pc += 1;
+                self.emit(Instruction::v128_extract_lane(
+                    self.byte_at(self.pc)?,
+                    false,
+                    Shape::F32x4,
+                ));
+            }
+            0x20 => {
+                self.pc += 1;
+                self.emit(Instruction::v128_replace_lane(
+                    self.byte_at(self.pc)?,
+                    Shape::F32x4,
+                ));
+            }
+            0x21 => {
+                self.pc += 1;
+                self.emit(Instruction::v128_extract_lane(
+                    self.byte_at(self.pc)?,
+                    false,
+                    Shape::F64x2,
+                ));
+            }
+            0x22 => {
+                self.pc += 1;
+                self.emit(Instruction::v128_replace_lane(
+                    self.byte_at(self.pc)?,
+                    Shape::F64x2,
+                ));
+            }
+            0x23 => self.emit(Instruction::v128_cmp(V128CmpType::I8x16Eq)),
+            0x24 => self.emit(Instruction::v128_cmp(V128CmpType::I8x16Ne)),
+            0x25 => self.emit(Instruction::v128_cmp(V128CmpType::I8x16LtS)),
+            0x26 => self.emit(Instruction::v128_cmp(V128CmpType::I8x16LtU)),
+            0x27 => self.emit(Instruction::v128_cmp(V128CmpType::I8x16GtS)),
+            0x28 => self.emit(Instruction::v128_cmp(V128CmpType::I8x16GtU)),
+            0x29 => self.emit(Instruction::v128_cmp(V128CmpType::I8x16LeS)),
+            0x2a => self.emit(Instruction::v128_cmp(V128CmpType::I8x16LeU)),
+            0x2b => self.emit(Instruction::v128_cmp(V128CmpType::I8x16GeS)),
+            0x2c => self.emit(Instruction::v128_cmp(V128CmpType::I8x16GeU)),
+            0x2d => self.emit(Instruction::v128_cmp(V128CmpType::I16x8Eq)),
+            0x2e => self.emit(Instruction::v128_cmp(V128CmpType::I16x8Ne)),
+            0x2f => self.emit(Instruction::v128_cmp(V128CmpType::I16x8LtS)),
+            0x30 => self.emit(Instruction::v128_cmp(V128CmpType::I16x8LtU)),
+            0x31 => self.emit(Instruction::v128_cmp(V128CmpType::I16x8GtS)),
+            0x32 => self.emit(Instruction::v128_cmp(V128CmpType::I16x8GtU)),
+            0x33 => self.emit(Instruction::v128_cmp(V128CmpType::I16x8LeS)),
+            0x34 => self.emit(Instruction::v128_cmp(V128CmpType::I16x8LeU)),
+            0x35 => self.emit(Instruction::v128_cmp(V128CmpType::I16x8GeS)),
+            0x36 => self.emit(Instruction::v128_cmp(V128CmpType::I16x8GeU)),
+            0x37 => self.emit(Instruction::v128_cmp(V128CmpType::I32x4Eq)),
+            0x38 => self.emit(Instruction::v128_cmp(V128CmpType::I32x4Ne)),
+            0x39 => self.emit(Instruction::v128_cmp(V128CmpType::I32x4LtS)),
+            0x3a => self.emit(Instruction::v128_cmp(V128CmpType::I32x4LtU)),
+            0x3b => self.emit(Instruction::v128_cmp(V128CmpType::I32x4GtS)),
+            0x3c => self.emit(Instruction::v128_cmp(V128CmpType::I32x4GtU)),
+            0x3d => self.emit(Instruction::v128_cmp(V128CmpType::I32x4LeS)),
+            0x3e => self.emit(Instruction::v128_cmp(V128CmpType::I32x4LeU)),
+            0x3f => self.emit(Instruction::v128_cmp(V128CmpType::I32x4GeS)),
+            0x40 => self.emit(Instruction::v128_cmp(V128CmpType::I32x4GeU)),
+            0x41 => self.emit(Instruction::v128_cmp(V128CmpType::F32x4Eq)),
+            0x42 => self.emit(Instruction::v128_cmp(V128CmpType::F32x4Ne)),
+            0x43 => self.emit(Instruction::v128_cmp(V128CmpType::F32x4Lt)),
+            0x44 => self.emit(Instruction::v128_cmp(V128CmpType::F32x4Gt)),
+            0x45 => self.emit(Instruction::v128_cmp(V128CmpType::F32x4Le)),
+            0x46 => self.emit(Instruction::v128_cmp(V128CmpType::F32x4Ge)),
+            0x47 => self.emit(Instruction::v128_cmp(V128CmpType::F64x2Eq)),
+            0x48 => self.emit(Instruction::v128_cmp(V128CmpType::F64x2Ne)),
+            0x49 => self.emit(Instruction::v128_cmp(V128CmpType::F64x2Lt)),
+            0x4a => self.emit(Instruction::v128_cmp(V128CmpType::F64x2Gt)),
+            0x4b => self.emit(Instruction::v128_cmp(V128CmpType::F64x2Le)),
+            0x4c => self.emit(Instruction::v128_cmp(V128CmpType::F64x2Ge)),
+            0x4d => self.emit(Instruction::new(OperationKind::V128Not)),
+            0x4e => self.emit(Instruction::new(OperationKind::V128And)),
+            0x4f => self.emit(Instruction::new(OperationKind::V128AndNot)),
+            0x50 => self.emit(Instruction::new(OperationKind::V128Or)),
+            0x51 => self.emit(Instruction::new(OperationKind::V128Xor)),
+            0x52 => self.emit(Instruction::new(OperationKind::V128Bitselect)),
+            0x53 => self.emit(Instruction::new(OperationKind::V128AnyTrue)),
+            0x5e => self.emit(Instruction::new(OperationKind::V128FloatDemote)),
+            0x5f => self.emit(Instruction::new(OperationKind::V128FloatPromote)),
+            0x60 => self.emit(Instruction::new(OperationKind::V128Abs).with_b1(Shape::I8x16 as u8)),
+            0x61 => self.emit(Instruction::new(OperationKind::V128Neg).with_b1(Shape::I8x16 as u8)),
+            0x62 => {
+                self.emit(Instruction::new(OperationKind::V128Popcnt).with_b1(Shape::I8x16 as u8))
+            }
+            0x63 => {
+                self.emit(Instruction::new(OperationKind::V128AllTrue).with_b1(Shape::I8x16 as u8))
+            }
+            0x64 => {
+                self.emit(Instruction::new(OperationKind::V128BitMask).with_b1(Shape::I8x16 as u8))
+            }
+            0x65 => self.emit(
+                Instruction::new(OperationKind::V128Narrow)
+                    .with_b1(Shape::I16x8 as u8)
+                    .with_b3(true),
+            ),
+            0x66 => self.emit(
+                Instruction::new(OperationKind::V128Narrow)
+                    .with_b1(Shape::I16x8 as u8)
+                    .with_b3(false),
+            ),
+            0x67 => {
+                self.emit(Instruction::new(OperationKind::V128Ceil).with_b1(Shape::F32x4 as u8))
+            }
+            0x68 => {
+                self.emit(Instruction::new(OperationKind::V128Floor).with_b1(Shape::F32x4 as u8))
+            }
+            0x69 => {
+                self.emit(Instruction::new(OperationKind::V128Trunc).with_b1(Shape::F32x4 as u8))
+            }
+            0x6a => {
+                self.emit(Instruction::new(OperationKind::V128Nearest).with_b1(Shape::F32x4 as u8))
+            }
+            0x74 => {
+                self.emit(Instruction::new(OperationKind::V128Ceil).with_b1(Shape::F64x2 as u8))
+            }
+            0x75 => {
+                self.emit(Instruction::new(OperationKind::V128Floor).with_b1(Shape::F64x2 as u8))
+            }
+            0x76 => self.emit(
+                Instruction::new(OperationKind::V128Min)
+                    .with_b1(Shape::I8x16 as u8)
+                    .with_b3(true),
+            ),
+            0x77 => self.emit(
+                Instruction::new(OperationKind::V128Min)
+                    .with_b1(Shape::I8x16 as u8)
+                    .with_b3(false),
+            ),
+            0x78 => self.emit(
+                Instruction::new(OperationKind::V128Max)
+                    .with_b1(Shape::I8x16 as u8)
+                    .with_b3(true),
+            ),
+            0x79 => self.emit(
+                Instruction::new(OperationKind::V128Max)
+                    .with_b1(Shape::I8x16 as u8)
+                    .with_b3(false),
+            ),
+            0x7c => self.emit(
+                Instruction::new(OperationKind::V128ExtAddPairwise)
+                    .with_b1(Shape::I8x16 as u8)
+                    .with_b3(true),
+            ),
+            0x7d => self.emit(
+                Instruction::new(OperationKind::V128ExtAddPairwise)
+                    .with_b1(Shape::I8x16 as u8)
+                    .with_b3(false),
+            ),
+            0x7b => {
+                self.emit(Instruction::new(OperationKind::V128AvgrU).with_b1(Shape::I8x16 as u8))
+            }
+            0x7e => self.emit(
+                Instruction::new(OperationKind::V128ExtAddPairwise)
+                    .with_b1(Shape::I16x8 as u8)
+                    .with_b3(true),
+            ),
+            0x7f => self.emit(
+                Instruction::new(OperationKind::V128ExtAddPairwise)
+                    .with_b1(Shape::I16x8 as u8)
+                    .with_b3(false),
+            ),
+            0x7a => {
+                self.emit(Instruction::new(OperationKind::V128Trunc).with_b1(Shape::F64x2 as u8))
+            }
+            0x80 => self.emit(Instruction::new(OperationKind::V128Abs).with_b1(Shape::I16x8 as u8)),
+            0x81 => self.emit(Instruction::new(OperationKind::V128Neg).with_b1(Shape::I16x8 as u8)),
+            0x82 => self.emit(Instruction::new(OperationKind::V128Q15mulrSatS)),
+            0x6b => self.emit(Instruction::new(OperationKind::V128Shl).with_b1(Shape::I8x16 as u8)),
+            0x6c => self.emit(
+                Instruction::new(OperationKind::V128Shr)
+                    .with_b1(Shape::I8x16 as u8)
+                    .with_b3(true),
+            ),
+            0x6d => self.emit(
+                Instruction::new(OperationKind::V128Shr)
+                    .with_b1(Shape::I8x16 as u8)
+                    .with_b3(false),
+            ),
+            0x6e => self.emit(Instruction::new(OperationKind::V128Add).with_b1(Shape::I8x16 as u8)),
+            0x6f => self.emit(
+                Instruction::new(OperationKind::V128AddSat)
+                    .with_b1(Shape::I8x16 as u8)
+                    .with_b3(true),
+            ),
+            0x70 => self.emit(
+                Instruction::new(OperationKind::V128AddSat)
+                    .with_b1(Shape::I8x16 as u8)
+                    .with_b3(false),
+            ),
+            0x71 => self.emit(Instruction::new(OperationKind::V128Sub).with_b1(Shape::I8x16 as u8)),
+            0x72 => self.emit(
+                Instruction::new(OperationKind::V128SubSat)
+                    .with_b1(Shape::I8x16 as u8)
+                    .with_b3(true),
+            ),
+            0x73 => self.emit(
+                Instruction::new(OperationKind::V128SubSat)
+                    .with_b1(Shape::I8x16 as u8)
+                    .with_b3(false),
+            ),
+            0x83 => {
+                self.emit(Instruction::new(OperationKind::V128AllTrue).with_b1(Shape::I16x8 as u8))
+            }
+            0x84 => {
+                self.emit(Instruction::new(OperationKind::V128BitMask).with_b1(Shape::I16x8 as u8))
+            }
+            0x85 => self.emit(
+                Instruction::new(OperationKind::V128Narrow)
+                    .with_b1(Shape::I32x4 as u8)
+                    .with_b3(true),
+            ),
+            0x86 => self.emit(
+                Instruction::new(OperationKind::V128Narrow)
+                    .with_b1(Shape::I32x4 as u8)
+                    .with_b3(false),
+            ),
+            0x8b => self.emit(Instruction::new(OperationKind::V128Shl).with_b1(Shape::I16x8 as u8)),
+            0x8c => self.emit(
+                Instruction::new(OperationKind::V128Shr)
+                    .with_b1(Shape::I16x8 as u8)
+                    .with_b3(true),
+            ),
+            0x8d => self.emit(
+                Instruction::new(OperationKind::V128Shr)
+                    .with_b1(Shape::I16x8 as u8)
+                    .with_b3(false),
+            ),
+            0x8e => self.emit(Instruction::new(OperationKind::V128Add).with_b1(Shape::I16x8 as u8)),
+            0x8f => self.emit(
+                Instruction::new(OperationKind::V128AddSat)
+                    .with_b1(Shape::I16x8 as u8)
+                    .with_b3(true),
+            ),
+            0x90 => self.emit(
+                Instruction::new(OperationKind::V128AddSat)
+                    .with_b1(Shape::I16x8 as u8)
+                    .with_b3(false),
+            ),
+            0x87 => self.emit(
+                Instruction::new(OperationKind::V128Extend)
+                    .with_b1(Shape::I8x16 as u8)
+                    .with_b2(1)
+                    .with_b3(true),
+            ),
+            0x88 => self.emit(
+                Instruction::new(OperationKind::V128Extend)
+                    .with_b1(Shape::I8x16 as u8)
+                    .with_b2(1)
+                    .with_b3(false),
+            ),
+            0x89 => self.emit(
+                Instruction::new(OperationKind::V128Extend)
+                    .with_b1(Shape::I8x16 as u8)
+                    .with_b2(0)
+                    .with_b3(true),
+            ),
+            0x8a => self.emit(
+                Instruction::new(OperationKind::V128Extend)
+                    .with_b1(Shape::I8x16 as u8)
+                    .with_b2(0)
+                    .with_b3(false),
+            ),
+            0x91 => self.emit(Instruction::new(OperationKind::V128Sub).with_b1(Shape::I16x8 as u8)),
+            0x92 => self.emit(
+                Instruction::new(OperationKind::V128SubSat)
+                    .with_b1(Shape::I16x8 as u8)
+                    .with_b3(true),
+            ),
+            0x93 => self.emit(
+                Instruction::new(OperationKind::V128SubSat)
+                    .with_b1(Shape::I16x8 as u8)
+                    .with_b3(false),
+            ),
+            0x94 => {
+                self.emit(Instruction::new(OperationKind::V128Nearest).with_b1(Shape::F64x2 as u8))
+            }
+            0x95 => self.emit(Instruction::new(OperationKind::V128Mul).with_b1(Shape::I16x8 as u8)),
+            0x96 => self.emit(
+                Instruction::new(OperationKind::V128Min)
+                    .with_b1(Shape::I16x8 as u8)
+                    .with_b3(true),
+            ),
+            0x97 => self.emit(
+                Instruction::new(OperationKind::V128Min)
+                    .with_b1(Shape::I16x8 as u8)
+                    .with_b3(false),
+            ),
+            0x98 => self.emit(
+                Instruction::new(OperationKind::V128Max)
+                    .with_b1(Shape::I16x8 as u8)
+                    .with_b3(true),
+            ),
+            0x99 => self.emit(
+                Instruction::new(OperationKind::V128Max)
+                    .with_b1(Shape::I16x8 as u8)
+                    .with_b3(false),
+            ),
+            0x9b => {
+                self.emit(Instruction::new(OperationKind::V128AvgrU).with_b1(Shape::I16x8 as u8))
+            }
+            0x9c => self.emit(
+                Instruction::new(OperationKind::V128ExtMul)
+                    .with_b1(Shape::I8x16 as u8)
+                    .with_b2(1)
+                    .with_b3(true),
+            ),
+            0x9d => self.emit(
+                Instruction::new(OperationKind::V128ExtMul)
+                    .with_b1(Shape::I8x16 as u8)
+                    .with_b2(1)
+                    .with_b3(false),
+            ),
+            0x9e => self.emit(
+                Instruction::new(OperationKind::V128ExtMul)
+                    .with_b1(Shape::I8x16 as u8)
+                    .with_b2(0)
+                    .with_b3(true),
+            ),
+            0x9f => self.emit(
+                Instruction::new(OperationKind::V128ExtMul)
+                    .with_b1(Shape::I8x16 as u8)
+                    .with_b2(0)
+                    .with_b3(false),
+            ),
+            0xa0 => self.emit(Instruction::new(OperationKind::V128Abs).with_b1(Shape::I32x4 as u8)),
+            0xa1 => self.emit(Instruction::new(OperationKind::V128Neg).with_b1(Shape::I32x4 as u8)),
+            0xa3 => {
+                self.emit(Instruction::new(OperationKind::V128AllTrue).with_b1(Shape::I32x4 as u8))
+            }
+            0xa4 => {
+                self.emit(Instruction::new(OperationKind::V128BitMask).with_b1(Shape::I32x4 as u8))
+            }
+            0xa7 => self.emit(
+                Instruction::new(OperationKind::V128Extend)
+                    .with_b1(Shape::I16x8 as u8)
+                    .with_b2(1)
+                    .with_b3(true),
+            ),
+            0xa8 => self.emit(
+                Instruction::new(OperationKind::V128Extend)
+                    .with_b1(Shape::I16x8 as u8)
+                    .with_b2(1)
+                    .with_b3(false),
+            ),
+            0xa9 => self.emit(
+                Instruction::new(OperationKind::V128Extend)
+                    .with_b1(Shape::I16x8 as u8)
+                    .with_b2(0)
+                    .with_b3(true),
+            ),
+            0xaa => self.emit(
+                Instruction::new(OperationKind::V128Extend)
+                    .with_b1(Shape::I16x8 as u8)
+                    .with_b2(0)
+                    .with_b3(false),
+            ),
+            0xab => self.emit(Instruction::new(OperationKind::V128Shl).with_b1(Shape::I32x4 as u8)),
+            0xac => self.emit(
+                Instruction::new(OperationKind::V128Shr)
+                    .with_b1(Shape::I32x4 as u8)
+                    .with_b3(true),
+            ),
+            0xad => self.emit(
+                Instruction::new(OperationKind::V128Shr)
+                    .with_b1(Shape::I32x4 as u8)
+                    .with_b3(false),
+            ),
+            0xae => self.emit(Instruction::new(OperationKind::V128Add).with_b1(Shape::I32x4 as u8)),
+            0xb1 => self.emit(Instruction::new(OperationKind::V128Sub).with_b1(Shape::I32x4 as u8)),
+            0xb5 => self.emit(Instruction::new(OperationKind::V128Mul).with_b1(Shape::I32x4 as u8)),
+            0xb6 => self.emit(
+                Instruction::new(OperationKind::V128Min)
+                    .with_b1(Shape::I32x4 as u8)
+                    .with_b3(true),
+            ),
+            0xb7 => self.emit(
+                Instruction::new(OperationKind::V128Min)
+                    .with_b1(Shape::I32x4 as u8)
+                    .with_b3(false),
+            ),
+            0xb8 => self.emit(
+                Instruction::new(OperationKind::V128Max)
+                    .with_b1(Shape::I32x4 as u8)
+                    .with_b3(true),
+            ),
+            0xb9 => self.emit(
+                Instruction::new(OperationKind::V128Max)
+                    .with_b1(Shape::I32x4 as u8)
+                    .with_b3(false),
+            ),
+            0xba => self.emit(Instruction::new(OperationKind::V128Dot)),
+            0xbc => self.emit(
+                Instruction::new(OperationKind::V128ExtMul)
+                    .with_b1(Shape::I16x8 as u8)
+                    .with_b2(1)
+                    .with_b3(true),
+            ),
+            0xbd => self.emit(
+                Instruction::new(OperationKind::V128ExtMul)
+                    .with_b1(Shape::I16x8 as u8)
+                    .with_b2(1)
+                    .with_b3(false),
+            ),
+            0xbe => self.emit(
+                Instruction::new(OperationKind::V128ExtMul)
+                    .with_b1(Shape::I16x8 as u8)
+                    .with_b2(0)
+                    .with_b3(true),
+            ),
+            0xbf => self.emit(
+                Instruction::new(OperationKind::V128ExtMul)
+                    .with_b1(Shape::I16x8 as u8)
+                    .with_b2(0)
+                    .with_b3(false),
+            ),
+            0xc3 => {
+                self.emit(Instruction::new(OperationKind::V128AllTrue).with_b1(Shape::I64x2 as u8))
+            }
+            0xc4 => {
+                self.emit(Instruction::new(OperationKind::V128BitMask).with_b1(Shape::I64x2 as u8))
+            }
+            0xc7 => self.emit(
+                Instruction::new(OperationKind::V128Extend)
+                    .with_b1(Shape::I32x4 as u8)
+                    .with_b2(1)
+                    .with_b3(true),
+            ),
+            0xc8 => self.emit(
+                Instruction::new(OperationKind::V128Extend)
+                    .with_b1(Shape::I32x4 as u8)
+                    .with_b2(1)
+                    .with_b3(false),
+            ),
+            0xc9 => self.emit(
+                Instruction::new(OperationKind::V128Extend)
+                    .with_b1(Shape::I32x4 as u8)
+                    .with_b2(0)
+                    .with_b3(true),
+            ),
+            0xca => self.emit(
+                Instruction::new(OperationKind::V128Extend)
+                    .with_b1(Shape::I32x4 as u8)
+                    .with_b2(0)
+                    .with_b3(false),
+            ),
+            0xc0 => self.emit(Instruction::new(OperationKind::V128Abs).with_b1(Shape::I64x2 as u8)),
+            0xc1 => self.emit(Instruction::new(OperationKind::V128Neg).with_b1(Shape::I64x2 as u8)),
+            0xd6 => self.emit(Instruction::v128_cmp(V128CmpType::I64x2Eq)),
+            0xd7 => self.emit(Instruction::v128_cmp(V128CmpType::I64x2Ne)),
+            0xd8 => self.emit(Instruction::v128_cmp(V128CmpType::I64x2LtS)),
+            0xd9 => self.emit(Instruction::v128_cmp(V128CmpType::I64x2GtS)),
+            0xda => self.emit(Instruction::v128_cmp(V128CmpType::I64x2LeS)),
+            0xdb => self.emit(Instruction::v128_cmp(V128CmpType::I64x2GeS)),
+            0xdc => self.emit(
+                Instruction::new(OperationKind::V128ExtMul)
+                    .with_b1(Shape::I32x4 as u8)
+                    .with_b2(1)
+                    .with_b3(true),
+            ),
+            0xdd => self.emit(
+                Instruction::new(OperationKind::V128ExtMul)
+                    .with_b1(Shape::I32x4 as u8)
+                    .with_b2(1)
+                    .with_b3(false),
+            ),
+            0xde => self.emit(
+                Instruction::new(OperationKind::V128ExtMul)
+                    .with_b1(Shape::I32x4 as u8)
+                    .with_b2(0)
+                    .with_b3(true),
+            ),
+            0xdf => self.emit(
+                Instruction::new(OperationKind::V128ExtMul)
+                    .with_b1(Shape::I32x4 as u8)
+                    .with_b2(0)
+                    .with_b3(false),
+            ),
+            0xcb => self.emit(Instruction::new(OperationKind::V128Shl).with_b1(Shape::I64x2 as u8)),
+            0xcc => self.emit(
+                Instruction::new(OperationKind::V128Shr)
+                    .with_b1(Shape::I64x2 as u8)
+                    .with_b3(true),
+            ),
+            0xcd => self.emit(
+                Instruction::new(OperationKind::V128Shr)
+                    .with_b1(Shape::I64x2 as u8)
+                    .with_b3(false),
+            ),
+            0xce => self.emit(Instruction::new(OperationKind::V128Add).with_b1(Shape::I64x2 as u8)),
+            0xd1 => self.emit(Instruction::new(OperationKind::V128Sub).with_b1(Shape::I64x2 as u8)),
+            0xd5 => self.emit(Instruction::new(OperationKind::V128Mul).with_b1(Shape::I64x2 as u8)),
+            0xe4 => self.emit(Instruction::new(OperationKind::V128Add).with_b1(Shape::F32x4 as u8)),
+            0xe5 => self.emit(Instruction::new(OperationKind::V128Sub).with_b1(Shape::F32x4 as u8)),
+            0xe6 => self.emit(Instruction::new(OperationKind::V128Mul).with_b1(Shape::F32x4 as u8)),
+            0xe7 => self.emit(Instruction::new(OperationKind::V128Div).with_b1(Shape::F32x4 as u8)),
+            0xe0 => self.emit(Instruction::new(OperationKind::V128Abs).with_b1(Shape::F32x4 as u8)),
+            0xe1 => self.emit(Instruction::new(OperationKind::V128Neg).with_b1(Shape::F32x4 as u8)),
+            0xe3 => {
+                self.emit(Instruction::new(OperationKind::V128Sqrt).with_b1(Shape::F32x4 as u8))
+            }
+            0xe8 => self.emit(Instruction::new(OperationKind::V128Min).with_b1(Shape::F32x4 as u8)),
+            0xe9 => self.emit(Instruction::new(OperationKind::V128Max).with_b1(Shape::F32x4 as u8)),
+            0xea => {
+                self.emit(Instruction::new(OperationKind::V128Pmin).with_b1(Shape::F32x4 as u8))
+            }
+            0xeb => {
+                self.emit(Instruction::new(OperationKind::V128Pmax).with_b1(Shape::F32x4 as u8))
+            }
+            0xec => self.emit(Instruction::new(OperationKind::V128Abs).with_b1(Shape::F64x2 as u8)),
+            0xed => self.emit(Instruction::new(OperationKind::V128Neg).with_b1(Shape::F64x2 as u8)),
+            0xef => {
+                self.emit(Instruction::new(OperationKind::V128Sqrt).with_b1(Shape::F64x2 as u8))
+            }
+            0xf0 => self.emit(Instruction::new(OperationKind::V128Add).with_b1(Shape::F64x2 as u8)),
+            0xf1 => self.emit(Instruction::new(OperationKind::V128Sub).with_b1(Shape::F64x2 as u8)),
+            0xf2 => self.emit(Instruction::new(OperationKind::V128Mul).with_b1(Shape::F64x2 as u8)),
+            0xf3 => self.emit(Instruction::new(OperationKind::V128Div).with_b1(Shape::F64x2 as u8)),
+            0xf4 => self.emit(Instruction::new(OperationKind::V128Min).with_b1(Shape::F64x2 as u8)),
+            0xf5 => self.emit(Instruction::new(OperationKind::V128Max).with_b1(Shape::F64x2 as u8)),
+            0xf6 => {
+                self.emit(Instruction::new(OperationKind::V128Pmin).with_b1(Shape::F64x2 as u8))
+            }
+            0xf7 => {
+                self.emit(Instruction::new(OperationKind::V128Pmax).with_b1(Shape::F64x2 as u8))
+            }
+            0xf8 => self.emit(
+                Instruction::new(OperationKind::V128ITruncSatFromF)
+                    .with_b1(Shape::F32x4 as u8)
+                    .with_b3(true),
+            ),
+            0xf9 => self.emit(
+                Instruction::new(OperationKind::V128ITruncSatFromF)
+                    .with_b1(Shape::F32x4 as u8)
+                    .with_b3(false),
+            ),
+            0xfa => self.emit(
+                Instruction::new(OperationKind::V128FConvertFromI)
+                    .with_b1(Shape::F32x4 as u8)
+                    .with_b3(true),
+            ),
+            0xfb => self.emit(
+                Instruction::new(OperationKind::V128FConvertFromI)
+                    .with_b1(Shape::F32x4 as u8)
+                    .with_b3(false),
+            ),
+            0xfc => self.emit(
+                Instruction::new(OperationKind::V128ITruncSatFromF)
+                    .with_b1(Shape::F64x2 as u8)
+                    .with_b3(true),
+            ),
+            0xfd => self.emit(
+                Instruction::new(OperationKind::V128ITruncSatFromF)
+                    .with_b1(Shape::F64x2 as u8)
+                    .with_b3(false),
+            ),
+            0xfe => self.emit(
+                Instruction::new(OperationKind::V128FConvertFromI)
+                    .with_b1(Shape::F64x2 as u8)
+                    .with_b3(true),
+            ),
+            0xff => self.emit(
+                Instruction::new(OperationKind::V128FConvertFromI)
+                    .with_b1(Shape::F64x2 as u8)
+                    .with_b3(false),
+            ),
+            _ => {
+                return Err(CompileError::new(format!(
+                    "unsupported vector instruction in interpreter compiler: 0x{vec_op:x}"
                 )));
             }
         }
@@ -1405,9 +2231,7 @@ impl<'a> Lowerer<'a> {
             0xd0 | 0xd2 => Ok(sig([], [k(UnsignedType::I64)])),
             OPCODE_MISC_PREFIX => self.misc_signature(),
             OPCODE_ATOMIC_PREFIX => self.atomic_signature(),
-            0xfd => Err(CompileError::new(format!(
-                "unsupported instruction in interpreter compiler: 0x{opcode:x}"
-            ))),
+            OPCODE_VEC_PREFIX => self.vec_signature(),
             _ => Err(CompileError::new(format!(
                 "unsupported instruction in interpreter compiler: 0x{opcode:x}"
             ))),
@@ -1449,6 +2273,103 @@ impl<'a> Lowerer<'a> {
             )),
             _ => Err(CompileError::new(format!(
                 "unsupported misc instruction in interpreter compiler: 0x{misc:x}"
+            ))),
+        }
+    }
+
+    fn vec_signature(&self) -> Result<Signature, CompileError> {
+        let vec = self
+            .config
+            .body
+            .get(self.pc + 1)
+            .copied()
+            .ok_or_else(|| CompileError::new("unexpected eof reading vector opcode"))?;
+        match vec {
+            0x0c => Ok(sig([], [k(UnsignedType::V128)])),
+            0x0d | 0x0e => Ok(sig(
+                [k(UnsignedType::V128), k(UnsignedType::V128)],
+                [k(UnsignedType::V128)],
+            )),
+            0x54..=0x57 => Ok(sig(
+                [k(UnsignedType::I32), k(UnsignedType::V128)],
+                [k(UnsignedType::V128)],
+            )),
+            0x58..=0x5b => Ok(sig([k(UnsignedType::I32), k(UnsignedType::V128)], [])),
+            0x0f => Ok(sig([k(UnsignedType::I32)], [k(UnsignedType::V128)])),
+            0x10 => Ok(sig([k(UnsignedType::I32)], [k(UnsignedType::V128)])),
+            0x11 => Ok(sig([k(UnsignedType::I32)], [k(UnsignedType::V128)])),
+            0x12 => Ok(sig([k(UnsignedType::I64)], [k(UnsignedType::V128)])),
+            0x13 => Ok(sig([k(UnsignedType::F32)], [k(UnsignedType::V128)])),
+            0x14 => Ok(sig([k(UnsignedType::F64)], [k(UnsignedType::V128)])),
+            0x00..=0x0a | 0x5c | 0x5d => Ok(sig([k(UnsignedType::I32)], [k(UnsignedType::V128)])),
+            0x0b => Ok(sig([k(UnsignedType::I32), k(UnsignedType::V128)], [])),
+            0x15 | 0x16 | 0x18 | 0x19 | 0x1b => {
+                Ok(sig([k(UnsignedType::V128)], [k(UnsignedType::I32)]))
+            }
+            0x1d => Ok(sig([k(UnsignedType::V128)], [k(UnsignedType::I64)])),
+            0x1f => Ok(sig([k(UnsignedType::V128)], [k(UnsignedType::F32)])),
+            0x21 => Ok(sig([k(UnsignedType::V128)], [k(UnsignedType::F64)])),
+            0x17 | 0x1a | 0x1c => Ok(sig(
+                [k(UnsignedType::V128), k(UnsignedType::I32)],
+                [k(UnsignedType::V128)],
+            )),
+            0x1e => Ok(sig(
+                [k(UnsignedType::V128), k(UnsignedType::I64)],
+                [k(UnsignedType::V128)],
+            )),
+            0x20 => Ok(sig(
+                [k(UnsignedType::V128), k(UnsignedType::F32)],
+                [k(UnsignedType::V128)],
+            )),
+            0x22 => Ok(sig(
+                [k(UnsignedType::V128), k(UnsignedType::F64)],
+                [k(UnsignedType::V128)],
+            )),
+            0x53 | 0x63 | 0x64 | 0x83 | 0x84 | 0xa3 | 0xa4 | 0xc3 | 0xc4 => {
+                let result = match vec {
+                    0x53 | 0x63 | 0x64 | 0x83 | 0x84 | 0xa3 | 0xa4 | 0xc3 | 0xc4 => {
+                        k(UnsignedType::I32)
+                    }
+                    _ => unreachable!(),
+                };
+                Ok(sig([k(UnsignedType::V128)], [result]))
+            }
+            0x4d | 0x5e | 0x5f | 0x60 | 0x61 | 0x62 | 0x67 | 0x68 | 0x69 | 0x6a | 0x74 | 0x75
+            | 0x7a | 0x7c | 0x7d | 0x7e | 0x7f | 0x80 | 0x81 | 0x87 | 0x88 | 0x89 | 0x8a | 0x94
+            | 0xa0 | 0xa1 | 0xa7 | 0xa8 | 0xa9 | 0xaa | 0xc0 | 0xc1 | 0xc7 | 0xc8 | 0xc9 | 0xca
+            | 0xe0 | 0xe1 | 0xe3 | 0xec | 0xed | 0xef | 0xf8 | 0xf9 | 0xfa | 0xfb | 0xfc | 0xfd
+            | 0xfe | 0xff => Ok(sig([k(UnsignedType::V128)], [k(UnsignedType::V128)])),
+            0x23 | 0x24 | 0x25 | 0x26 | 0x27 | 0x28 | 0x29 | 0x2a | 0x2b | 0x2c | 0x2d | 0x2e
+            | 0x2f | 0x30 | 0x31 | 0x32 | 0x33 | 0x34 | 0x35 | 0x36 | 0x37 | 0x38 | 0x39 | 0x3a
+            | 0x3b | 0x3c | 0x3d | 0x3e | 0x3f | 0x40 | 0x41 | 0x42 | 0x43 | 0x44 | 0x45 | 0x46
+            | 0x47 | 0x48 | 0x49 | 0x4a | 0x4b | 0x4c | 0x4e | 0x4f | 0x50 | 0x51 | 0x65 | 0x66
+            | 0x6e | 0x6f | 0x70 | 0x71 | 0x72 | 0x73 | 0x76 | 0x77 | 0x78 | 0x79 | 0x7b | 0x82
+            | 0x85 | 0x86 | 0x8e | 0x8f | 0x90 | 0x91 | 0x92 | 0x93 | 0x95 | 0x96 | 0x97 | 0x98
+            | 0x99 | 0x9b | 0x9c | 0x9d | 0x9e | 0x9f | 0xae | 0xb1 | 0xb5 | 0xb6 | 0xb7 | 0xb8
+            | 0xb9 | 0xba | 0xbc | 0xbd | 0xbe | 0xbf | 0xce | 0xd1 | 0xd5 | 0xd6 | 0xd7 | 0xd8
+            | 0xd9 | 0xda | 0xdb | 0xdc | 0xdd | 0xde | 0xdf | 0xe4 | 0xe5 | 0xe6 | 0xe7 | 0xe8
+            | 0xe9 | 0xea | 0xeb | 0xf0 | 0xf1 | 0xf2 | 0xf3 | 0xf4 | 0xf5 | 0xf6 | 0xf7 => {
+                Ok(sig(
+                    [k(UnsignedType::V128), k(UnsignedType::V128)],
+                    [k(UnsignedType::V128)],
+                ))
+            }
+            0x52 => Ok(sig(
+                [
+                    k(UnsignedType::V128),
+                    k(UnsignedType::V128),
+                    k(UnsignedType::V128),
+                ],
+                [k(UnsignedType::V128)],
+            )),
+            0x6b | 0x6c | 0x6d | 0x8b | 0x8c | 0x8d | 0xab | 0xac | 0xad | 0xcb | 0xcc | 0xcd => {
+                Ok(sig(
+                    [k(UnsignedType::V128), k(UnsignedType::I32)],
+                    [k(UnsignedType::V128)],
+                ))
+            }
+            _ => Err(CompileError::new(format!(
+                "unsupported vector instruction in interpreter compiler: 0x{vec:x}"
             ))),
         }
     }
@@ -1813,7 +2734,13 @@ fn op_unsigned_int(kind: OperationKind, ty: UnsignedInt) -> Instruction {
 }
 
 fn op_signed_int(kind: OperationKind, ty: SignedInt) -> Instruction {
-    Instruction::new(kind).with_b1(ty as u8)
+    let raw = match ty {
+        SignedInt::Int32 => SignedType::Int32 as u8,
+        SignedInt::Uint32 => SignedType::Uint32 as u8,
+        SignedInt::Int64 => SignedType::Int64 as u8,
+        SignedInt::Uint64 => SignedType::Uint64 as u8,
+    };
+    Instruction::new(kind).with_b1(raw)
 }
 
 fn op_signed_type(kind: OperationKind, ty: SignedType) -> Instruction {

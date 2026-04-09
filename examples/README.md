@@ -10,6 +10,7 @@ The following example projects can help you practice WebAssembly with wazero:
 * [import-go](import-go) - how to define, import and call a Go-defined function
   from a WebAssembly-defined function.
 * [concurrent-instantiation](concurrent-instantiation) - how to instantiate multiple Wasm instances per Goroutine concurrently.
+* [hello-host](hello-host) - how to run a Wasm module without WASI by supplying a tiny explicit host print API, and how the same guest now maps onto the first Linux/x86_64 native-link path in the Rust port.
 * [multiple-results](multiple-results) - how to return more than one result
   from WebAssembly or Go-defined functions.
 * [multiple-runtimes](multiple-runtimes) - how to share compilation caches across multiple runtimes.

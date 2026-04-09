@@ -13,6 +13,11 @@ pub fn append_prologue(machine: &mut Amd64Machine) {
 }
 
 pub fn append_epilogue(machine: &mut Amd64Machine) {
+    machine.push(Amd64Instr::mov_rr(
+        vreg_for_real_reg(RBP),
+        vreg_for_real_reg(RSP),
+        true,
+    ));
     machine.push(Amd64Instr::pop64(vreg_for_real_reg(RBP)));
     machine.push(Amd64Instr::ret());
 }
@@ -34,6 +39,7 @@ mod tests {
         let text = m.format();
         assert!(text.contains("pushq %rbp"));
         assert!(text.contains("movq %rsp, %rbp"));
+        assert!(text.contains("movq %rbp, %rsp"));
         assert!(text.contains("popq %rbp"));
     }
 }

@@ -137,6 +137,7 @@ impl HostModuleBuilder {
         Ok(CompiledModule::new(CompiledModuleInner {
             name: Some(inner.module_name.clone()),
             bytes: Vec::new(),
+            precompiled_bytes: None,
             imported_functions: Vec::new(),
             exported_functions,
             imported_memories: Vec::new(),

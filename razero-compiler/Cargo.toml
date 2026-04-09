@@ -9,4 +9,11 @@ version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+libc = "0.2"
+object = { version = "0.36", features = ["write", "elf"] }
+razero-platform.workspace = true
 razero-wasm.workspace = true
+
+[dev-dependencies]
+razero-decoder.workspace = true
+razero-features.workspace = true

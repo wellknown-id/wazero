@@ -7,9 +7,12 @@ use std::fmt;
 use razero_features::CoreFeatures;
 
 use crate::const_expr::{evaluate_const_expr, ConstExprError};
-use crate::func_validation::{validate_wasm_function, wasm_function_uses_memory};
+use crate::func_validation::{
+    validate_wasm_function_with_context, wasm_function_uses_memory_with_context,
+};
 use crate::function_definition::FunctionDefinition;
 use crate::host_func::HostFuncRef;
+use crate::instruction::OPCODE_REF_FUNC;
 use crate::memory_definition::MemoryDefinition;
 use crate::table::check_segment_bounds;
 use crate::wasmdebug::DWARFLines;
@@ -450,6 +453,7 @@ pub struct NameMapAssoc {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Module {
+    pub enabled_features: CoreFeatures,
     pub type_section: Vec<FunctionType>,
     pub import_section: Vec<Import>,
     pub import_function_count: Index,
@@ -471,6 +475,7 @@ pub struct Module {
     pub custom_sections: Vec<CustomSection>,
     pub data_count_section: Option<u32>,
     pub id: ModuleId,
+    pub ensure_termination: bool,
     pub is_host_module: bool,
     pub function_definition_section: Vec<FunctionDefinition>,
     pub memory_definition_section: Vec<MemoryDefinition>,
@@ -508,8 +513,13 @@ impl Module {
             declarations.memory.as_ref(),
             &declarations.tables,
         )?;
-        self.validate_functions(enabled_features, &declarations.tables, MAXIMUM_FUNCTION_INDEX)?;
-        self.validate_function_memory_usage(declarations.memory.as_ref())?;
+        self.validate_functions(
+            enabled_features,
+            &declarations.tables,
+            &declarations.globals,
+            MAXIMUM_FUNCTION_INDEX,
+        )?;
+        self.validate_function_memory_usage(enabled_features, &declarations)?;
         self.validate_tables(enabled_features, &declarations.tables, MAXIMUM_TABLE_INDEX)?;
         self.validate_data_count_section()?;
         Ok(())
@@ -809,6 +819,7 @@ impl Module {
         &self,
         enabled_features: CoreFeatures,
         tables: &[Table],
+        globals: &[GlobalType],
         maximum_function_index: u32,
     ) -> Result<(), ModuleError> {
         let function_count = self.section_element_count(SectionId::FUNCTION);
@@ -829,6 +840,21 @@ impl Module {
         }
 
         let type_count = self.type_section.len() as u32;
+        let declarations = self
+            .all_declarations()
+            .map_err(|err| validation_error(err.to_string()))?;
+        let has_memory = declarations.memory.is_some();
+        let functions = declarations.functions;
+        let element_types: Vec<RefType> = self
+            .element_section
+            .iter()
+            .map(|element| element.ty)
+            .collect();
+        let declared_function_indexes = self.declared_function_indexes(functions.len());
+        let has_declared_function_indexes = declared_function_indexes
+            .iter()
+            .copied()
+            .any(|declared| declared);
         for (index, type_index) in self.function_section.iter().copied().enumerate() {
             let desc = self.func_desc(SectionId::FUNCTION, index as u32);
             if type_index >= type_count {
@@ -841,24 +867,131 @@ impl Module {
                     "code count ({code_count}) != function count ({function_count})"
                 )));
             };
-            validate_wasm_function(code, enabled_features, type_count, tables)
-                .map_err(|err| validation_error(format!("invalid {desc}: {err}")))?;
+            if !has_declared_function_indexes && code.body.contains(&OPCODE_REF_FUNC) {
+                return Err(validation_error(format!(
+                    "invalid {desc}: undeclared function reference"
+                )));
+            }
+            let func_type = &self.type_section[type_index as usize];
+            validate_wasm_function_with_context(
+                code,
+                enabled_features,
+                &self.type_section,
+                &functions,
+                tables,
+                globals,
+                &element_types,
+                &declared_function_indexes,
+                has_memory,
+                self.data_count_section,
+                func_type,
+            )
+            .map_err(|err| validation_error(format!("invalid {desc}: {err}")))?;
         }
         Ok(())
     }
 
-    fn validate_function_memory_usage(&self, memory: Option<&Memory>) -> Result<(), ModuleError> {
-        if memory.is_some() {
+    fn validate_function_memory_usage(
+        &self,
+        enabled_features: CoreFeatures,
+        declarations: &AllDeclarations,
+    ) -> Result<(), ModuleError> {
+        if declarations.memory.is_some() {
             return Ok(());
         }
-        for code in &self.code_section {
-            if wasm_function_uses_memory(code)
-                .map_err(|err| validation_error(format!("invalid function body: {err}")))?
+        let element_types: Vec<RefType> = self
+            .element_section
+            .iter()
+            .map(|element| element.ty)
+            .collect();
+        let declared_function_indexes =
+            self.declared_function_indexes(declarations.functions.len());
+        for (index, type_index) in self.function_section.iter().copied().enumerate() {
+            let Some(code) = self.code_section.get(index) else {
+                return Err(validation_error("code count does not match function count"));
+            };
+            let Some(func_type) = self.type_section.get(type_index as usize) else {
+                return Err(validation_error(format!(
+                    "invalid function[{index}] type index {type_index} out of range"
+                )));
+            };
+            if wasm_function_uses_memory_with_context(
+                code,
+                enabled_features,
+                &self.type_section,
+                &declarations.functions,
+                &declarations.tables,
+                &declarations.globals,
+                &element_types,
+                &declared_function_indexes,
+                declarations.memory.is_some(),
+                self.data_count_section,
+                func_type,
+            )
+            .map_err(|err| validation_error(format!("invalid function body: {err}")))?
             {
                 return Err(validation_error("unknown memory"));
             }
         }
         Ok(())
+    }
+
+    fn declared_function_indexes(&self, function_count: usize) -> Vec<bool> {
+        let mut declared = vec![false; function_count];
+        for export in &self.export_section {
+            if export.ty == ExternType::FUNC {
+                if let Some(slot) = declared.get_mut(export.index as usize) {
+                    *slot = true;
+                }
+            }
+        }
+        for (global_index, global) in self.global_section.iter().enumerate() {
+            let _ = evaluate_const_expr(
+                &global.init,
+                |index| {
+                    let value_type = self
+                        .resolve_const_expr_global_type(
+                            CoreFeatures::V2,
+                            SectionId::GLOBAL,
+                            global_index as u32,
+                            index,
+                        )
+                        .map_err(ConstExprError::new)?;
+                    Ok((value_type, 0, 0))
+                },
+                |function_index| {
+                    if let Some(slot) = declared.get_mut(function_index as usize) {
+                        *slot = true;
+                    }
+                    Ok(None)
+                },
+            );
+        }
+        for (element_index, element) in self.element_section.iter().enumerate() {
+            for init in &element.init {
+                let _ = evaluate_const_expr(
+                    init,
+                    |index| {
+                        let value_type = self
+                            .resolve_const_expr_global_type(
+                                CoreFeatures::V2,
+                                SectionId::ELEMENT,
+                                element_index as u32,
+                                index,
+                            )
+                            .map_err(ConstExprError::new)?;
+                        Ok((value_type, 0, 0))
+                    },
+                    |function_index| {
+                        if let Some(slot) = declared.get_mut(function_index as usize) {
+                            *slot = true;
+                        }
+                        Ok(None)
+                    },
+                );
+            }
+        }
+        declared
     }
 
     fn validate_tables(
@@ -1637,7 +1770,10 @@ mod tests {
             Err(ModuleError::Validation(
                 "invalid function[0]: unknown table index: 1".to_string()
             )),
-            module.validate(CoreFeatures::V2 | CoreFeatures::TAIL_CALL, MEMORY_LIMIT_PAGES)
+            module.validate(
+                CoreFeatures::V2 | CoreFeatures::TAIL_CALL,
+                MEMORY_LIMIT_PAGES
+            )
         );
     }
 }

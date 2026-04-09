@@ -5,7 +5,9 @@ use std::sync::Arc;
 use razero_wasm::engine::{FunctionHandle, FunctionTypeId, ModuleEngine as WasmModuleEngine};
 use razero_wasm::module::Index;
 use razero_wasm::module_instance::ModuleInstance;
-use razero_wasm::table::{Reference, TableInstance};
+use razero_wasm::table::{
+    decode_function_reference, encode_function_reference, Reference, TableInstance,
+};
 
 use crate::call_engine::CallEngine;
 use crate::engine::{AlignedBytes, CompiledModule};
@@ -101,8 +103,9 @@ impl CompilerModuleEngine {
         if offsets.globals_begin.raw() >= 0 {
             let mut cursor = offsets.globals_begin.raw() as usize;
             for global in &self.module.globals {
-                write_u64(opaque, cursor, global.value);
-                write_u64(opaque, cursor + 8, global.value_hi);
+                let (value, value_hi) = global.value();
+                write_u64(opaque, cursor, value);
+                write_u64(opaque, cursor + 8, value_hi);
                 cursor += 16;
             }
         }
@@ -182,6 +185,7 @@ impl CompilerModuleEngine {
                     .compiled_module
                     .clone()
                     .or_else(|| Some(self.parent.clone())),
+                Some(self.module.closed.clone()),
             );
         }
 
@@ -215,6 +219,7 @@ impl CompilerModuleEngine {
             typ.result_num_in_u64,
             host_func,
             Some(self.parent.clone()),
+            Some(self.module.closed.clone()),
         );
         call_engine.exec_ctx.memory_grow_trampoline_address =
             self.parent.shared_functions.memory_grow_ptr().unwrap_or(0);
@@ -342,17 +347,30 @@ impl WasmModuleEngine for CompilerModuleEngine {
         write_u64(bytes, offset as usize + 8, imported.opaque_ptr as u64);
     }
 
+    fn memory_snapshot(&self) -> Option<(Vec<u8>, Option<u32>, bool)> {
+        self.module.memory_instance.as_ref().map(|memory| {
+            (
+                memory.bytes.to_vec(),
+                self.module
+                    .memory_type
+                    .as_ref()
+                    .and_then(|memory_type| memory_type.is_max_encoded.then_some(memory_type.max)),
+                memory.shared,
+            )
+        })
+    }
+
     fn lookup_function(
         &self,
         table: &TableInstance,
         type_id: FunctionTypeId,
         table_offset: Index,
     ) -> Option<(&ModuleInstance, Index)> {
-        let function_index = table
-            .elements
-            .get(table_offset as usize)
-            .copied()
-            .flatten()?;
+        let reference = table.get(table_offset as usize).flatten()?;
+        let (module_id, function_index) = decode_function_reference(reference);
+        if module_id != self.module.id {
+            return None;
+        }
         let function = self.module.functions.get(function_index as usize)?;
         (function.type_id == type_id).then_some((&self.module, function_index))
     }
@@ -361,7 +379,7 @@ impl WasmModuleEngine for CompilerModuleEngine {
         self.module
             .globals
             .get(index as usize)
-            .map(|global| (global.value, global.value_hi))
+            .map(|global| global.value())
             .unwrap_or((0, 0))
     }
 
@@ -386,7 +404,7 @@ impl WasmModuleEngine for CompilerModuleEngine {
     }
 
     fn function_instance_reference(&self, func_index: Index) -> Reference {
-        Some(func_index)
+        Some(encode_function_reference(self.module.id, func_index))
     }
 
     fn memory_grown(&mut self) {
@@ -408,6 +426,7 @@ fn write_u64(bytes: &mut [u8], offset: usize, value: u64) {
 mod tests {
     use std::sync::Arc;
 
+    use crate::aot::AotCompiledMetadata;
     use razero_wasm::engine::ModuleEngine;
     use razero_wasm::global::GlobalInstance;
     use razero_wasm::host_func::stack_host_func;
@@ -429,6 +448,7 @@ mod tests {
             function_offsets: vec![16, 48],
             module: module.clone(),
             offsets: ModuleContextOffsetData::new(module, false),
+            aot: AotCompiledMetadata::default(),
             shared_functions: Arc::new(SharedFunctions::default()),
             ensure_termination: false,
             fuel_enabled: false,
@@ -520,6 +540,7 @@ mod tests {
                 ..Module::default()
             },
             offsets: ModuleContextOffsetData::default(),
+            aot: AotCompiledMetadata::default(),
             shared_functions: Arc::new(SharedFunctions::default()),
             ensure_termination: false,
             fuel_enabled: false,
@@ -596,6 +617,7 @@ mod tests {
             function_offsets: vec![16],
             module: imported_module.clone(),
             offsets: ModuleContextOffsetData::new(&imported_module, false),
+            aot: AotCompiledMetadata::default(),
             shared_functions: Arc::new(SharedFunctions::default()),
             ensure_termination: false,
             fuel_enabled: false,

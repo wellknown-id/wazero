@@ -31,6 +31,29 @@ impl Display for EngineError {
 
 impl Error for EngineError {}
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CompileOptions {
+    workers: usize,
+}
+
+impl CompileOptions {
+    pub fn new(workers: usize) -> Self {
+        Self {
+            workers: workers.max(1),
+        }
+    }
+
+    pub fn workers(self) -> usize {
+        self.workers
+    }
+}
+
+impl Default for CompileOptions {
+    fn default() -> Self {
+        Self::new(1)
+    }
+}
+
 pub trait FunctionHandle: Send + Sync {
     fn index(&self) -> Index;
 }
@@ -72,6 +95,14 @@ pub trait ModuleEngine: Send + Sync {
 
     fn resolve_imported_memory(&mut self, _imported_module_engine: &dyn ModuleEngine) {}
 
+    fn memory_snapshot(&self) -> Option<(Vec<u8>, Option<u32>, bool)> {
+        None
+    }
+
+    fn overwrite_memory(&self, _bytes: &[u8], _maximum_pages: Option<u32>, _shared: bool) -> bool {
+        false
+    }
+
     fn lookup_function(
         &self,
         _table: &TableInstance,
@@ -92,7 +123,7 @@ pub trait ModuleEngine: Send + Sync {
     }
 
     fn function_instance_reference(&self, func_index: Index) -> Reference {
-        Some(func_index)
+        Some(u64::from(func_index))
     }
 
     fn memory_grown(&mut self) {}
@@ -101,6 +132,14 @@ pub trait ModuleEngine: Send + Sync {
 pub trait Engine: Send + Sync {
     fn close(&mut self) -> Result<(), EngineError> {
         Ok(())
+    }
+
+    fn compile_module_with_options(
+        &mut self,
+        module: &Module,
+        _options: &CompileOptions,
+    ) -> Result<(), EngineError> {
+        self.compile_module(module)
     }
 
     fn compile_module(&mut self, _module: &Module) -> Result<(), EngineError> {
@@ -112,6 +151,20 @@ pub trait Engine: Send + Sync {
     }
 
     fn delete_compiled_module(&mut self, _module: &Module) {}
+
+    fn load_precompiled_module(
+        &mut self,
+        _module: &Module,
+        _artifact: &[u8],
+    ) -> Result<(), EngineError> {
+        Err(EngineError::new(
+            "precompiled artifacts are unsupported by this engine",
+        ))
+    }
+
+    fn precompiled_module_bytes(&self, _module: &Module) -> Option<Vec<u8>> {
+        None
+    }
 
     fn new_module_engine(
         &self,

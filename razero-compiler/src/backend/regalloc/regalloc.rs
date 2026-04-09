@@ -289,7 +289,12 @@ impl<I: Instr, B: Block<I>, F: Function<I, B>> Allocator<I, B, F> {
     }
 
     fn get_or_allocate_block_state(&mut self, block_id: i32) -> &mut BlockState {
-        self.block_states.get_or_allocate(block_id as usize)
+        self.block_states
+            .get_or_allocate(Self::block_state_key(block_id))
+    }
+
+    fn block_state_key(block_id: i32) -> usize {
+        block_id as u32 as usize
     }
 
     fn phi_blk(&self, vreg: VRegId) -> Option<B> {
@@ -348,7 +353,7 @@ impl<I: Instr, B: Block<I>, F: Function<I, B>> Allocator<I, B, F> {
             self.ss.clear();
             for succ_index in 0..blk.succs() {
                 let succ = f.succ(blk.clone(), succ_index);
-                let succ_state = match self.block_states.get(succ.id() as usize) {
+                let succ_state = match self.block_states.get(Self::block_state_key(succ.id())) {
                     Some(state) if state.seen => state,
                     _ => continue,
                 };
@@ -431,7 +436,7 @@ impl<I: Instr, B: Block<I>, F: Function<I, B>> Allocator<I, B, F> {
             self.ss.clear();
             let info = self
                 .block_states
-                .get(loop_blk.id() as usize)
+                .get(Self::block_state_key(loop_blk.id()))
                 .expect("loop block state must exist")
                 .clone();
             for vreg in info.live_ins {
@@ -503,7 +508,7 @@ impl<I: Instr, B: Block<I>, F: Function<I, B>> Allocator<I, B, F> {
         let block_id = blk.id();
         if self
             .block_states
-            .get(block_id as usize)
+            .get(Self::block_state_key(block_id))
             .is_some_and(|state| state.start_from_pred_index > -1)
         {
             return;
@@ -512,7 +517,7 @@ impl<I: Instr, B: Block<I>, F: Function<I, B>> Allocator<I, B, F> {
         self.state.current_block_id = block_id;
         let live_ins = self
             .block_states
-            .get(block_id as usize)
+            .get(Self::block_state_key(block_id))
             .map(|state| state.live_ins.clone())
             .unwrap_or_default();
         self.update_live_in_vr_state(&live_ins);
@@ -523,13 +528,16 @@ impl<I: Instr, B: Block<I>, F: Function<I, B>> Allocator<I, B, F> {
             0 => {}
             1 => {
                 let pred = f.pred(blk.clone(), 0);
-                pred_state = self.block_states.get(pred.id() as usize).cloned();
+                pred_state = self
+                    .block_states
+                    .get(Self::block_state_key(pred.id()))
+                    .cloned();
                 start_from_pred_index = 0;
             }
             preds => {
                 for index in 0..preds {
                     let pred = f.pred(blk.clone(), index);
-                    if let Some(state) = self.block_states.get(pred.id() as usize) {
+                    if let Some(state) = self.block_states.get(Self::block_state_key(pred.id())) {
                         if state.visited {
                             pred_state = Some(state.clone());
                             start_from_pred_index = index as isize;
@@ -565,7 +573,7 @@ impl<I: Instr, B: Block<I>, F: Function<I, B>> Allocator<I, B, F> {
 
         let current_state = self
             .block_states
-            .get(block_id as usize)
+            .get(Self::block_state_key(block_id))
             .cloned()
             .expect("block state must exist");
         assert!(
@@ -620,7 +628,11 @@ impl<I: Instr, B: Block<I>, F: Function<I, B>> Allocator<I, B, F> {
 
         for succ_index in 0..blk.succs() {
             let succ = f.succ(blk.clone(), succ_index);
-            let succ_state = match self.block_states.get(succ.id() as usize).cloned() {
+            let succ_state = match self
+                .block_states
+                .get(Self::block_state_key(succ.id()))
+                .cloned()
+            {
                 Some(state) => state,
                 None => continue,
             };
@@ -958,7 +970,7 @@ impl<I: Instr, B: Block<I>, F: Function<I, B>> Allocator<I, B, F> {
 
         let blk_state = self
             .block_states
-            .get(blk.id() as usize)
+            .get(Self::block_state_key(blk.id()))
             .cloned()
             .expect("block state must exist");
         let mut desired_occupants_set = RegSet::default();
@@ -977,7 +989,7 @@ impl<I: Instr, B: Block<I>, F: Function<I, B>> Allocator<I, B, F> {
             let pred = f.pred(blk.clone(), pred_index);
             let pred_state = self
                 .block_states
-                .get(pred.id() as usize)
+                .get(Self::block_state_key(pred.id()))
                 .cloned()
                 .expect("predecessor state must exist");
             self.state.reset_at(&pred_state);
@@ -1145,7 +1157,7 @@ impl<I: Instr, B: Block<I>, F: Function<I, B>> Allocator<I, B, F> {
         while pos != defining_blk {
             let block_state = self
                 .block_states
-                .get(pos.id() as usize)
+                .get(Self::block_state_key(pos.id()))
                 .expect("ancestor block state must exist");
             for (candidate, occupant) in block_state.start_regs.entries() {
                 if occupant == vreg {
@@ -1563,7 +1575,7 @@ mod tests {
                         block: &MockBlock| {
             alloc
                 .block_states
-                .get(block.id() as usize)
+                .get(Allocator::<MockInstr, MockBlock, MockFunction>::block_state_key(block.id()))
                 .unwrap()
                 .live_ins
                 .clone()

@@ -1,6 +1,7 @@
 use std::{
     cell::RefCell,
     collections::BTreeMap,
+    fmt::{Display, Formatter},
     ptr::NonNull,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -8,14 +9,23 @@ use std::{
     },
 };
 
+use razero_compiler::{
+    call_engine::CallEngineError, engine::CompilerEngine, module_engine::CompilerModuleEngine,
+};
 use razero_decoder::decoder::decode_module;
 use razero_decoder::memory::MemorySizer;
 use razero_interp::{
-    engine::InterpModuleEngine,
+    compiler::ValueType as InterpValueType,
+    engine::{register_guest_callback, InterpModuleEngine},
     interpreter::{active_host_call_stack, Module as InterpRuntimeModule},
+    signature::Signature as InterpSignature,
 };
+use razero_platform::compiler_supported;
 use razero_secmem::GuardPageAllocator;
 use razero_wasm::{
+    engine::{
+        Engine as WasmEngine, EngineError as WasmEngineError, ModuleEngine as WasmModuleEngine,
+    },
     function_definition::FunctionDefinition as WasmFunctionDefinition,
     memory_definition::MemoryDefinition as WasmMemoryDefinition,
     module::{ExternType as WasmExternType, Module as WasmModule, ValueType as WasmValueType},
@@ -25,21 +35,86 @@ use razero_wasm::{
 
 use crate::{
     api::{
-        error::{Result, RuntimeError},
+        error::{ExitError, Result, RuntimeError},
         wasm::{
-            active_invocation, with_active_invocation, CustomSection, FunctionDefinition, Global,
-            GlobalValue, HostCallback, Memory, MemoryDefinition, Module, RuntimeModuleRegistry,
-            ValueType,
+            active_invocation, install_close_on_context_done, with_active_invocation,
+            CustomSection, FunctionDefinition, Global, GlobalValue, HostCallback, Memory,
+            MemoryDefinition, Module, RuntimeModuleRegistry, ValueType,
         },
     },
     builder::HostModuleBuilder,
-    config::{CompiledModule, CompiledModuleInner, ModuleConfig, RuntimeConfig},
+    cache::BinaryCompilationArtifact,
+    config::{CompiledModule, CompiledModuleInner, ModuleConfig, RuntimeConfig, RuntimeEngineKind},
     ctx_keys::Context,
     experimental::{
+        get_compilation_workers,
         listener::StackFrame,
         memory::{DefaultMemoryAllocator, MemoryAllocator},
     },
 };
+
+pub(crate) struct PublicEngine {
+    inner: Box<dyn WasmEngine>,
+}
+
+pub(crate) type RuntimeStore = WasmStore<PublicEngine>;
+
+impl PublicEngine {
+    fn new(kind: RuntimeEngineKind, secure_mode: bool) -> Self {
+        let inner: Box<dyn WasmEngine> = match kind {
+            RuntimeEngineKind::Compiler => Box::new(CompilerEngine::with_secure_mode(secure_mode)),
+            RuntimeEngineKind::Interpreter => Box::new(razero_interp::engine::InterpEngine::new()),
+            RuntimeEngineKind::Auto => unreachable!("runtime engine kind must be resolved"),
+        };
+        Self { inner }
+    }
+}
+
+impl WasmEngine for PublicEngine {
+    fn close(&mut self) -> std::result::Result<(), WasmEngineError> {
+        self.inner.close()
+    }
+
+    fn compile_module_with_options(
+        &mut self,
+        module: &WasmModule,
+        options: &razero_wasm::engine::CompileOptions,
+    ) -> std::result::Result<(), WasmEngineError> {
+        self.inner.compile_module_with_options(module, options)
+    }
+
+    fn compile_module(&mut self, module: &WasmModule) -> std::result::Result<(), WasmEngineError> {
+        self.inner.compile_module(module)
+    }
+
+    fn compiled_module_count(&self) -> u32 {
+        self.inner.compiled_module_count()
+    }
+
+    fn delete_compiled_module(&mut self, module: &WasmModule) {
+        self.inner.delete_compiled_module(module);
+    }
+
+    fn load_precompiled_module(
+        &mut self,
+        module: &WasmModule,
+        artifact: &[u8],
+    ) -> std::result::Result<(), WasmEngineError> {
+        self.inner.load_precompiled_module(module, artifact)
+    }
+
+    fn precompiled_module_bytes(&self, module: &WasmModule) -> Option<Vec<u8>> {
+        self.inner.precompiled_module_bytes(module)
+    }
+
+    fn new_module_engine(
+        &self,
+        module: &WasmModule,
+        instance: &razero_wasm::module_instance::ModuleInstance,
+    ) -> std::result::Result<Box<dyn WasmModuleEngine>, WasmEngineError> {
+        self.inner.new_module_engine(module, instance)
+    }
+}
 
 #[derive(Clone)]
 pub struct Runtime {
@@ -49,9 +124,92 @@ pub struct Runtime {
 struct RuntimeInner {
     config: RuntimeConfig,
     modules: RuntimeModuleRegistry,
-    store: Arc<Mutex<WasmStore<razero_interp::engine::InterpEngine>>>,
+    store: Arc<Mutex<RuntimeStore>>,
     closed: AtomicU64,
 }
+
+const PRECOMPILED_ARTIFACT_MAGIC: &[u8; 8] = b"RZAOT001";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrecompiledArtifact {
+    wasm_bytes: Vec<u8>,
+    compiled_bytes: Vec<u8>,
+}
+
+impl PrecompiledArtifact {
+    pub fn new(wasm_bytes: Vec<u8>, compiled_bytes: Vec<u8>) -> Self {
+        Self {
+            wasm_bytes,
+            compiled_bytes,
+        }
+    }
+
+    pub fn wasm_bytes(&self) -> &[u8] {
+        &self.wasm_bytes
+    }
+
+    pub fn compiled_bytes(&self) -> &[u8] {
+        &self.compiled_bytes
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(
+            PRECOMPILED_ARTIFACT_MAGIC.len()
+                + 16
+                + self.wasm_bytes.len()
+                + self.compiled_bytes.len(),
+        );
+        out.extend_from_slice(PRECOMPILED_ARTIFACT_MAGIC);
+        out.extend_from_slice(&(self.wasm_bytes.len() as u64).to_le_bytes());
+        out.extend_from_slice(&self.wasm_bytes);
+        out.extend_from_slice(&(self.compiled_bytes.len() as u64).to_le_bytes());
+        out.extend_from_slice(&self.compiled_bytes);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> std::result::Result<Self, PrecompiledArtifactError> {
+        let mut cursor = 0usize;
+        if bytes.len() < PRECOMPILED_ARTIFACT_MAGIC.len()
+            || &bytes[..PRECOMPILED_ARTIFACT_MAGIC.len()] != PRECOMPILED_ARTIFACT_MAGIC
+        {
+            return Err(PrecompiledArtifactError::InvalidHeader(
+                "invalid precompiled artifact magic".to_string(),
+            ));
+        }
+        cursor += PRECOMPILED_ARTIFACT_MAGIC.len();
+        let wasm_len = read_u64_artifact(bytes, &mut cursor, "missing wasm length")? as usize;
+        let wasm_bytes = read_vec_artifact(bytes, &mut cursor, wasm_len, "truncated wasm payload")?;
+        let compiled_len =
+            read_u64_artifact(bytes, &mut cursor, "missing compiled artifact length")? as usize;
+        let compiled_bytes = read_vec_artifact(
+            bytes,
+            &mut cursor,
+            compiled_len,
+            "truncated compiled artifact payload",
+        )?;
+        if cursor != bytes.len() {
+            return Err(PrecompiledArtifactError::InvalidHeader(
+                "unexpected trailing bytes in precompiled artifact".to_string(),
+            ));
+        }
+        Ok(Self::new(wasm_bytes, compiled_bytes))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PrecompiledArtifactError {
+    InvalidHeader(String),
+}
+
+impl Display for PrecompiledArtifactError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidHeader(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for PrecompiledArtifactError {}
 
 fn closed_state(exit_code: u32) -> u64 {
     1 + (u64::from(exit_code) << 32)
@@ -121,24 +279,24 @@ fn with_current_guest_runtime_module_mut<T>(
 
 fn merged_listener_stack(ctx: &Context, module: &Module) -> Option<Vec<StackFrame>> {
     let active_frames = active_host_call_stack()?;
-    let runtime_store = module.runtime_store()?;
-    let module_id = module.store_module_id()?;
-    let store = runtime_store.lock().ok()?;
-    let mut instance = store.instance(module_id)?.clone();
+    let mut source = module.lower_module().or_else(|| {
+        let runtime_store = module.runtime_store()?;
+        let module_id = module.store_module_id()?;
+        let store = runtime_store.lock().ok()?;
+        Some(store.instance(module_id)?.source.clone())
+    })?;
     let active_stack: Vec<_> = active_frames
         .into_iter()
         .rev()
         .map(|frame| {
             StackFrame::new(
                 convert_function_definition(
-                    instance
-                        .source
-                        .function_definition(frame.function_index as u32),
+                    source.function_definition(frame.function_index as u32),
                 ),
                 Vec::new(),
                 Vec::new(),
                 frame.program_counter as u64,
-                function_source_offset(&instance.source, frame.function_index as u32),
+                function_source_offset(&source, frame.function_index as u32),
             )
         })
         .collect();
@@ -174,7 +332,10 @@ impl Runtime {
     }
 
     pub fn with_config(config: RuntimeConfig) -> Self {
-        let mut store = WasmStore::new(razero_interp::engine::InterpEngine::new());
+        let mut store = WasmStore::new(PublicEngine::new(
+            resolve_runtime_engine_kind(&config),
+            config.secure_mode(),
+        ));
         store.set_secure_memory(config.secure_mode());
         Self {
             inner: Arc::new(RuntimeInner {
@@ -191,17 +352,84 @@ impl Runtime {
     }
 
     pub fn compile(&self, bytes: &[u8]) -> Result<CompiledModule> {
+        self.compile_with_context(&Context::default(), bytes)
+    }
+
+    pub fn build_precompiled_artifact(&self, bytes: &[u8]) -> Result<PrecompiledArtifact> {
+        self.build_precompiled_artifact_with_context(&Context::default(), bytes)
+    }
+
+    pub fn build_precompiled_artifact_with_context(
+        &self,
+        ctx: &Context,
+        bytes: &[u8],
+    ) -> Result<PrecompiledArtifact> {
+        let compiled = self.compile_with_context(ctx, bytes)?;
+        let lower_module =
+            compiled.inner().lower_module.as_ref().ok_or_else(|| {
+                RuntimeError::new("compiled module is missing lower runtime state")
+            })?;
+        let compiled_bytes = self
+            .inner
+            .store
+            .lock()
+            .expect("runtime store poisoned")
+            .engine
+            .precompiled_module_bytes(lower_module)
+            .ok_or_else(|| {
+                RuntimeError::new("runtime engine does not expose precompiled artifacts")
+            })?;
+        Ok(PrecompiledArtifact::new(
+            compiled.bytes().to_vec(),
+            compiled_bytes,
+        ))
+    }
+
+    pub fn compile_with_context(&self, ctx: &Context, bytes: &[u8]) -> Result<CompiledModule> {
         self.fail_if_closed()?;
-        if let Some(cache) = self.inner.config.compilation_cache() {
+        let compiled = if let Some(cache) = self.inner.config.compilation_cache() {
             let key = cache_key(bytes);
-            if let Some(cached) = cache.get(&key) {
-                return compile_binary_module(&cached, &self.inner.config);
+            if let Some(artifact) = cache.get_binary_artifact(&key) {
+                compile_cached_binary_module(&artifact, &self.inner.config, None)?
+            } else if let Some(cached) = cache.get(&key) {
+                let artifact = decode_binary_artifact(&cached, &self.inner.config)?;
+                cache.insert_binary_artifact(&key, artifact.clone());
+                compile_cached_binary_module(&artifact, &self.inner.config, None)?
+            } else {
+                let artifact = decode_binary_artifact(bytes, &self.inner.config)?;
+                let compiled = compile_cached_binary_module(&artifact, &self.inner.config, None)?;
+                cache.insert_binary_artifact(&key, artifact);
+                cache.insert(&key, bytes);
+                compiled
             }
-            let compiled = compile_binary_module(bytes, &self.inner.config)?;
-            cache.insert(&key, bytes);
-            return Ok(compiled);
-        }
-        compile_binary_module(bytes, &self.inner.config)
+        } else {
+            compile_binary_module(bytes, &self.inner.config)?
+        };
+        self.precompile_with_context(ctx, &compiled)?;
+        Ok(compiled)
+    }
+
+    pub fn compile_precompiled_artifact(
+        &self,
+        artifact: &PrecompiledArtifact,
+    ) -> Result<CompiledModule> {
+        self.compile_precompiled_artifact_with_context(&Context::default(), artifact)
+    }
+
+    pub fn compile_precompiled_artifact_with_context(
+        &self,
+        ctx: &Context,
+        artifact: &PrecompiledArtifact,
+    ) -> Result<CompiledModule> {
+        self.fail_if_closed()?;
+        let decoded = decode_binary_artifact(artifact.wasm_bytes(), &self.inner.config)?;
+        let compiled = compile_cached_binary_module(
+            &decoded,
+            &self.inner.config,
+            Some(artifact.compiled_bytes().to_vec()),
+        )?;
+        self.precompile_with_context(ctx, &compiled)?;
+        Ok(compiled)
     }
 
     pub fn instantiate(&self, compiled: &CompiledModule, config: ModuleConfig) -> Result<Module> {
@@ -252,8 +480,35 @@ impl Runtime {
     }
 
     pub fn instantiate_binary(&self, bytes: &[u8], config: ModuleConfig) -> Result<Module> {
-        let compiled = self.compile(bytes)?;
-        self.instantiate(&compiled, config)
+        self.instantiate_binary_with_context(&Context::default(), bytes, config)
+    }
+
+    pub fn instantiate_precompiled_artifact(
+        &self,
+        artifact: &PrecompiledArtifact,
+        config: ModuleConfig,
+    ) -> Result<Module> {
+        self.instantiate_precompiled_artifact_with_context(&Context::default(), artifact, config)
+    }
+
+    pub fn instantiate_precompiled_artifact_with_context(
+        &self,
+        ctx: &Context,
+        artifact: &PrecompiledArtifact,
+        config: ModuleConfig,
+    ) -> Result<Module> {
+        let compiled = self.compile_precompiled_artifact_with_context(ctx, artifact)?;
+        self.instantiate_with_context(ctx, &compiled, config)
+    }
+
+    pub fn instantiate_binary_with_context(
+        &self,
+        ctx: &Context,
+        bytes: &[u8],
+        config: ModuleConfig,
+    ) -> Result<Module> {
+        let compiled = self.compile_with_context(ctx, bytes)?;
+        self.instantiate_with_context(ctx, &compiled, config)
     }
 
     pub fn new_host_module_builder(&self, module_name: impl Into<String>) -> HostModuleBuilder {
@@ -345,7 +600,7 @@ impl Runtime {
                 let _ = delete_from_store(&store, module_id);
             }) as Arc<dyn Fn(u32) + Send + Sync>
         });
-        Ok(Module::new(
+        let module = Module::new(
             name,
             compiled.inner().exported_functions.clone(),
             compiled.inner().host_callbacks.clone(),
@@ -360,8 +615,10 @@ impl Runtime {
                 .collect(),
             ctx.close_notifier.clone(),
             close_hook,
+            self.inner.config.close_on_context_done(),
             Some(Arc::downgrade(&self.inner.modules)),
             Some(Arc::downgrade(&self.inner.store)),
+            compiled.inner().lower_module.clone(),
             compiled
                 .inner()
                 .lower_module
@@ -369,7 +626,67 @@ impl Runtime {
                 .map(exported_function_source_offsets)
                 .unwrap_or_default(),
             store_module_id,
-        ))
+        );
+        if let (Some(module_id), Some(lower_module)) =
+            (store_module_id, compiled.inner().lower_module.as_ref())
+        {
+            for export in &lower_module.export_section {
+                if export.ty != razero_wasm::module::ExternType::FUNC {
+                    continue;
+                }
+                let Some(callback) = compiled.inner().host_callbacks.get(&export.name) else {
+                    continue;
+                };
+                let function_index = export.index;
+                let signature = lower_module
+                    .type_of_function(function_index)
+                    .map(|ty| {
+                        InterpSignature::new(
+                            ty.params
+                                .iter()
+                                .map(|ty| match *ty {
+                                    WasmValueType::I32 => InterpValueType::I32,
+                                    WasmValueType::I64 => InterpValueType::I64,
+                                    WasmValueType::F32 => InterpValueType::F32,
+                                    WasmValueType::F64 => InterpValueType::F64,
+                                    WasmValueType::V128 => InterpValueType::V128,
+                                    WasmValueType::FUNCREF => InterpValueType::FuncRef,
+                                    WasmValueType::EXTERNREF => InterpValueType::ExternRef,
+                                    _ => InterpValueType::I64,
+                                })
+                                .collect(),
+                            ty.results
+                                .iter()
+                                .map(|ty| match *ty {
+                                    WasmValueType::I32 => InterpValueType::I32,
+                                    WasmValueType::I64 => InterpValueType::I64,
+                                    WasmValueType::F32 => InterpValueType::F32,
+                                    WasmValueType::F64 => InterpValueType::F64,
+                                    WasmValueType::V128 => InterpValueType::V128,
+                                    WasmValueType::FUNCREF => InterpValueType::FuncRef,
+                                    WasmValueType::EXTERNREF => InterpValueType::ExternRef,
+                                    _ => InterpValueType::I64,
+                                })
+                                .collect(),
+                        )
+                    })
+                    .unwrap_or_default();
+                register_guest_callback(
+                    module_id,
+                    function_index,
+                    signature.clone(),
+                    Arc::new({
+                        let callback = callback.clone();
+                        move |params: &[u64]| {
+                            let (ctx, module) = active_invocation()
+                                .ok_or_else(|| "active invocation is unavailable".to_string())?;
+                            callback(ctx, module, params).map_err(|err| err.to_string())
+                        }
+                    }),
+                );
+            }
+        }
+        Ok(module)
     }
 
     fn instantiate_guest_module(
@@ -383,8 +700,12 @@ impl Runtime {
                 RuntimeError::new("compiled module is missing lower runtime state")
             })?;
         resolve_imports_with_context(ctx, &self.inner.store, &lower_module)?;
-        let module_id =
-            instantiate_in_store(&self.inner.store, lower_module.clone(), name.as_deref())?;
+        let module_id = instantiate_in_store_with_options(
+            &self.inner.store,
+            lower_module.clone(),
+            name.as_deref(),
+            compile_options_for_context(ctx),
+        )?;
         let callbacks = build_guest_callbacks(&self.inner.store, module_id, &lower_module)?;
         let memory = compiled
             .inner()
@@ -411,28 +732,129 @@ impl Runtime {
             all_globals,
             ctx.close_notifier.clone(),
             close_hook,
+            self.inner.config.close_on_context_done(),
             Some(Arc::downgrade(&self.inner.modules)),
             Some(Arc::downgrade(&self.inner.store)),
+            Some(lower_module.clone()),
             exported_function_source_offsets(&lower_module),
             Some(module_id),
         );
 
+        let function_count = lower_module
+            .all_declarations()
+            .map_err(|err| RuntimeError::new(err.to_string()))?
+            .functions
+            .len() as u32;
+        for function_index in 0..function_count {
+            let signature = lower_module
+                .type_of_function(function_index)
+                .map(|ty| {
+                    InterpSignature::new(
+                        ty.params
+                            .iter()
+                            .map(|ty| match *ty {
+                                WasmValueType::I32 => InterpValueType::I32,
+                                WasmValueType::I64 => InterpValueType::I64,
+                                WasmValueType::F32 => InterpValueType::F32,
+                                WasmValueType::F64 => InterpValueType::F64,
+                                WasmValueType::V128 => InterpValueType::V128,
+                                WasmValueType::FUNCREF => InterpValueType::FuncRef,
+                                WasmValueType::EXTERNREF => InterpValueType::ExternRef,
+                                _ => InterpValueType::I64,
+                            })
+                            .collect(),
+                        ty.results
+                            .iter()
+                            .map(|ty| match *ty {
+                                WasmValueType::I32 => InterpValueType::I32,
+                                WasmValueType::I64 => InterpValueType::I64,
+                                WasmValueType::F32 => InterpValueType::F32,
+                                WasmValueType::F64 => InterpValueType::F64,
+                                WasmValueType::V128 => InterpValueType::V128,
+                                WasmValueType::FUNCREF => InterpValueType::FuncRef,
+                                WasmValueType::EXTERNREF => InterpValueType::ExternRef,
+                                _ => InterpValueType::I64,
+                            })
+                            .collect(),
+                    )
+                })
+                .unwrap_or_default();
+            let callback = guest_callback_for_function_index(
+                self.inner.store.clone(),
+                module_id,
+                function_index,
+            );
+            register_guest_callback(
+                module_id,
+                function_index,
+                signature.clone(),
+                Arc::new(move |params: &[u64]| {
+                    let (ctx, module) = active_invocation()
+                        .ok_or_else(|| "active invocation is unavailable".to_string())?;
+                    callback(ctx, module, params).map_err(|err| err.to_string())
+                }),
+            );
+        }
+
         if let Some(start_index) = lower_module.start_section {
             let start =
                 guest_callback_for_function_index(self.inner.store.clone(), module_id, start_index);
-            if let Err(err) = start(ctx.clone(), module.clone(), &[]) {
-                let _ = delete_from_store(&self.inner.store, module_id);
+            let close_on_context_done =
+                install_close_on_context_done(ctx, &module, module.close_on_context_done())?;
+            let start_result = start(ctx.clone(), module.clone(), &[]);
+            if let Some(stop) = close_on_context_done {
+                stop.store(true, Ordering::SeqCst);
+            }
+            if let Err(err) = start_result {
                 return Err(err);
             }
         }
 
         Ok(module)
     }
+
+    fn precompile_with_context(&self, ctx: &Context, compiled: &CompiledModule) -> Result<()> {
+        let Some(lower_module) = compiled.inner().lower_module.as_ref() else {
+            return Ok(());
+        };
+        let mut store = self.inner.store.lock().expect("runtime store poisoned");
+        let result = if let Some(precompiled_bytes) = compiled.inner().precompiled_bytes.as_deref()
+        {
+            store
+                .engine
+                .load_precompiled_module(lower_module, precompiled_bytes)
+        } else {
+            store
+                .engine
+                .compile_module_with_options(lower_module, &compile_options_for_context(ctx))
+        };
+        result.map_err(|err| RuntimeError::new(err.to_string()))
+    }
+}
+
+fn resolve_runtime_engine_kind(config: &RuntimeConfig) -> RuntimeEngineKind {
+    match config.engine_kind() {
+        RuntimeEngineKind::Auto => {
+            if compiler_supported() {
+                RuntimeEngineKind::Compiler
+            } else {
+                RuntimeEngineKind::Interpreter
+            }
+        }
+        RuntimeEngineKind::Compiler => {
+            assert!(
+                compiler_supported(),
+                "compiler runtime is not supported on this host"
+            );
+            RuntimeEngineKind::Compiler
+        }
+        RuntimeEngineKind::Interpreter => RuntimeEngineKind::Interpreter,
+    }
 }
 
 fn resolve_imports_with_context(
     ctx: &Context,
-    _store: &Arc<Mutex<WasmStore<razero_interp::engine::InterpEngine>>>,
+    _store: &Arc<Mutex<RuntimeStore>>,
     module: &WasmModule,
 ) -> Result<()> {
     let Some(resolver) = ctx.import_resolver.as_ref() else {
@@ -531,13 +953,32 @@ fn apply_memory_config(module: &mut WasmModule, config: &RuntimeConfig) {
 }
 
 fn compile_binary_module(bytes: &[u8], config: &RuntimeConfig) -> Result<CompiledModule> {
-    let mut module = decode_module(bytes, config.core_features())
+    let artifact = decode_binary_artifact(bytes, config)?;
+    compile_cached_binary_module(&artifact, config, None)
+}
+
+fn decode_binary_artifact(
+    bytes: &[u8],
+    config: &RuntimeConfig,
+) -> Result<BinaryCompilationArtifact> {
+    let module = decode_module(bytes, config.core_features())
         .map_err(|err| RuntimeError::new(err.to_string()))?;
+    Ok(BinaryCompilationArtifact::new(bytes.to_vec(), module))
+}
+
+fn compile_cached_binary_module(
+    artifact: &BinaryCompilationArtifact,
+    config: &RuntimeConfig,
+    precompiled_bytes: Option<Vec<u8>>,
+) -> Result<CompiledModule> {
+    let mut module = artifact.module.clone();
+    module.enabled_features = config.core_features();
     apply_memory_config(&mut module, config);
+    module.ensure_termination = config.close_on_context_done();
     module
         .validate(config.core_features(), config.memory_limit_pages())
         .map_err(|err| RuntimeError::new(err.to_string()))?;
-    module.assign_module_id(bytes, &[], false);
+    module.assign_module_id(&artifact.bytes, &[], config.close_on_context_done());
     module.build_memory_definitions();
     let imported_functions = module
         .imported_functions()
@@ -575,7 +1016,8 @@ fn compile_binary_module(bytes: &[u8], config: &RuntimeConfig) -> Result<Compile
 
     Ok(CompiledModule::new(CompiledModuleInner {
         name,
-        bytes: bytes.to_vec(),
+        bytes: artifact.bytes.clone(),
+        precompiled_bytes,
         imported_functions,
         exported_functions,
         imported_memories,
@@ -586,6 +1028,35 @@ fn compile_binary_module(bytes: &[u8], config: &RuntimeConfig) -> Result<Compile
         lower_module: Some(module),
         closed: std::sync::atomic::AtomicBool::new(false),
     }))
+}
+
+fn read_u64_artifact(
+    bytes: &[u8],
+    cursor: &mut usize,
+    message: &str,
+) -> std::result::Result<u64, PrecompiledArtifactError> {
+    let end = cursor.saturating_add(8);
+    let slice = bytes
+        .get(*cursor..end)
+        .ok_or_else(|| PrecompiledArtifactError::InvalidHeader(message.to_string()))?;
+    let mut raw = [0u8; 8];
+    raw.copy_from_slice(slice);
+    *cursor = end;
+    Ok(u64::from_le_bytes(raw))
+}
+
+fn read_vec_artifact(
+    bytes: &[u8],
+    cursor: &mut usize,
+    len: usize,
+    message: &str,
+) -> std::result::Result<Vec<u8>, PrecompiledArtifactError> {
+    let end = cursor.saturating_add(len);
+    let slice = bytes
+        .get(*cursor..end)
+        .ok_or_else(|| PrecompiledArtifactError::InvalidHeader(message.to_string()))?;
+    *cursor = end;
+    Ok(slice.to_vec())
 }
 
 pub(crate) fn lower_host_function_callback(
@@ -627,21 +1098,36 @@ pub(crate) fn lower_host_function_callback(
 }
 
 fn instantiate_in_store(
-    store: &Arc<Mutex<WasmStore<razero_interp::engine::InterpEngine>>>,
+    store: &Arc<Mutex<RuntimeStore>>,
     module: WasmModule,
     name: Option<&str>,
+) -> Result<ModuleInstanceId> {
+    instantiate_in_store_with_options(
+        store,
+        module,
+        name,
+        razero_wasm::engine::CompileOptions::default(),
+    )
+}
+
+fn instantiate_in_store_with_options(
+    store: &Arc<Mutex<RuntimeStore>>,
+    module: WasmModule,
+    name: Option<&str>,
+    options: razero_wasm::engine::CompileOptions,
 ) -> Result<ModuleInstanceId> {
     store
         .lock()
         .expect("runtime store poisoned")
-        .instantiate(module, name.unwrap_or_default(), None)
+        .instantiate_with_options(module, name.unwrap_or_default(), None, options)
         .map_err(|err| RuntimeError::new(err.to_string()))
 }
 
-fn delete_from_store(
-    store: &Arc<Mutex<WasmStore<razero_interp::engine::InterpEngine>>>,
-    module_id: ModuleInstanceId,
-) -> Result<()> {
+fn compile_options_for_context(ctx: &Context) -> razero_wasm::engine::CompileOptions {
+    razero_wasm::engine::CompileOptions::new(get_compilation_workers(ctx))
+}
+
+fn delete_from_store(store: &Arc<Mutex<RuntimeStore>>, module_id: ModuleInstanceId) -> Result<()> {
     store
         .lock()
         .expect("runtime store poisoned")
@@ -650,7 +1136,7 @@ fn delete_from_store(
 }
 
 fn build_guest_callbacks(
-    store: &Arc<Mutex<WasmStore<razero_interp::engine::InterpEngine>>>,
+    store: &Arc<Mutex<RuntimeStore>>,
     module_id: ModuleInstanceId,
     module: &WasmModule,
 ) -> Result<BTreeMap<String, HostCallback>> {
@@ -672,29 +1158,59 @@ fn build_guest_callbacks(
 }
 
 pub(crate) fn guest_callback_for_function_index(
-    store: Arc<Mutex<WasmStore<razero_interp::engine::InterpEngine>>>,
+    store: Arc<Mutex<RuntimeStore>>,
     module_id: ModuleInstanceId,
     function_index: u32,
 ) -> HostCallback {
     Arc::new(move |ctx: Context, module: Module, params: &[u64]| {
         let params = params.to_vec();
         with_active_invocation(&ctx, &module, || {
-            let engine = store
-                .lock()
-                .expect("runtime store poisoned")
-                .module_engine(module_id)
-                .and_then(|engine| engine.as_any().downcast_ref::<InterpModuleEngine>())
-                .cloned()
-                .ok_or_else(|| RuntimeError::new("module engine is unavailable"))?;
-            engine
-                .call(function_index, &params)
-                .map_err(|err| RuntimeError::new(err.to_string()))
+            let (interp_engine, compiler_engine) = {
+                let store = store.lock().expect("runtime store poisoned");
+                let engine = store
+                    .module_engine(module_id)
+                    .ok_or_else(|| RuntimeError::new("module engine is unavailable"))?;
+                (
+                    engine
+                        .as_any()
+                        .downcast_ref::<InterpModuleEngine>()
+                        .cloned(),
+                    engine
+                        .as_any()
+                        .downcast_ref::<CompilerModuleEngine>()
+                        .cloned(),
+                )
+            };
+            if let Some(engine) = interp_engine {
+                return engine.clone().call(function_index, &params).map_err(|err| {
+                    if module.is_closed() {
+                        ExitError::new(module.exit_code()).into()
+                    } else {
+                        RuntimeError::new(err.to_string())
+                    }
+                });
+            }
+            if let Some(engine) = compiler_engine {
+                let mut call_engine = engine.new_compiler_function(function_index);
+                let mut stack = params;
+                return call_engine
+                    .call(&mut stack)
+                    .map(|results| results.to_vec())
+                    .map_err(|err| {
+                        if module.is_closed() {
+                            ExitError::new(module.exit_code()).into()
+                        } else {
+                            compiler_call_error(err)
+                        }
+                    });
+            }
+            Err(RuntimeError::new("module engine is unavailable"))
         })
     }) as HostCallback
 }
 
 fn guest_memory(
-    store: Arc<Mutex<WasmStore<razero_interp::engine::InterpEngine>>>,
+    store: Arc<Mutex<RuntimeStore>>,
     module_id: ModuleInstanceId,
     definition: MemoryDefinition,
 ) -> Memory {
@@ -713,7 +1229,7 @@ fn guest_memory(
 }
 
 fn guest_globals(
-    store: &Arc<Mutex<WasmStore<razero_interp::engine::InterpEngine>>>,
+    store: &Arc<Mutex<RuntimeStore>>,
     module_id: ModuleInstanceId,
     module: &WasmModule,
 ) -> Result<BTreeMap<String, Global>> {
@@ -737,19 +1253,27 @@ fn guest_globals(
             .ok_or_else(|| RuntimeError::new(format!("global[{index}] type missing")))?;
         let fallback = export_global_value(&instance, index)
             .ok_or_else(|| RuntimeError::new(format!("global[{index}] value missing")))?;
-        let store = store.clone();
+        let getter_store = store.clone();
+        let setter_store = store.clone();
         globals.insert(
             export.name.clone(),
-            Global::dynamic(ty.mutable, move || {
-                current_global_value(&store, module_id, index).unwrap_or(fallback)
-            }),
+            Global::dynamic_with_setter(
+                ty.mutable,
+                move || current_global_value(&getter_store, module_id, index).unwrap_or(fallback),
+                ty.mutable.then(|| {
+                    Arc::new(move |value| {
+                        set_current_global_value(&setter_store, module_id, index, value)
+                            .expect("guest global setter should be available");
+                    }) as Arc<dyn Fn(GlobalValue) + Send + Sync>
+                }),
+            ),
         );
     }
     Ok(globals)
 }
 
 fn guest_all_globals(
-    store: &Arc<Mutex<WasmStore<razero_interp::engine::InterpEngine>>>,
+    store: &Arc<Mutex<RuntimeStore>>,
     module_id: ModuleInstanceId,
 ) -> Result<Vec<Global>> {
     let locked = store.lock().expect("runtime store poisoned");
@@ -763,16 +1287,24 @@ fn guest_all_globals(
     for (index, ty) in instance.global_types.iter().copied().enumerate() {
         let fallback = export_global_value(&instance, index)
             .ok_or_else(|| RuntimeError::new(format!("global[{index}] value missing")))?;
-        let store = store.clone();
-        globals.push(Global::dynamic(ty.mutable, move || {
-            current_global_value(&store, module_id, index).unwrap_or(fallback)
-        }));
+        let getter_store = store.clone();
+        let setter_store = store.clone();
+        globals.push(Global::dynamic_with_setter(
+            ty.mutable,
+            move || current_global_value(&getter_store, module_id, index).unwrap_or(fallback),
+            ty.mutable.then(|| {
+                Arc::new(move |value| {
+                    set_current_global_value(&setter_store, module_id, index, value)
+                        .expect("guest global setter should be available");
+                }) as Arc<dyn Fn(GlobalValue) + Send + Sync>
+            }),
+        ));
     }
     Ok(globals)
 }
 
 fn interp_memory_size(
-    store: &Arc<Mutex<WasmStore<razero_interp::engine::InterpEngine>>>,
+    store: &Arc<Mutex<RuntimeStore>>,
     module_id: ModuleInstanceId,
 ) -> Option<u32> {
     if let Some(size) = with_current_guest_runtime_module(module_id, |module| {
@@ -786,15 +1318,22 @@ fn interp_memory_size(
         return Some(size);
     }
     let store = store.lock().ok()?;
-    let engine = store
+    if let Some(engine) = store
         .module_engine(module_id)?
         .as_any()
-        .downcast_ref::<InterpModuleEngine>()?;
-    engine.memory_size()
+        .downcast_ref::<InterpModuleEngine>()
+    {
+        return engine.memory_size();
+    }
+    store
+        .instance(module_id)?
+        .memory_instance
+        .as_ref()
+        .map(|memory| memory.len() as u32)
 }
 
 fn interp_memory_read(
-    store: &Arc<Mutex<WasmStore<razero_interp::engine::InterpEngine>>>,
+    store: &Arc<Mutex<RuntimeStore>>,
     module_id: ModuleInstanceId,
     offset: usize,
     len: usize,
@@ -809,15 +1348,20 @@ fn interp_memory_read(
         return Some(bytes);
     }
     let store = store.lock().ok()?;
-    let engine = store
+    if let Some(engine) = store
         .module_engine(module_id)?
         .as_any()
-        .downcast_ref::<InterpModuleEngine>()?;
-    engine.memory_read(offset, len)
+        .downcast_ref::<InterpModuleEngine>()
+    {
+        return engine.memory_read(offset, len);
+    }
+    let memory = store.instance(module_id)?.memory_instance.as_ref()?;
+    let end = offset.checked_add(len)?;
+    memory.bytes.get(offset..end).map(ToOwned::to_owned)
 }
 
 fn interp_memory_write_u32(
-    store: &Arc<Mutex<WasmStore<razero_interp::engine::InterpEngine>>>,
+    store: &Arc<Mutex<RuntimeStore>>,
     module_id: ModuleInstanceId,
     offset: u32,
     value: u32,
@@ -830,7 +1374,8 @@ fn interp_memory_write_u32(
         let Some(end) = start.checked_add(4) else {
             return false;
         };
-        let Some(slice) = memory.bytes_mut().get_mut(start..end) else {
+        let mut bytes = memory.bytes_mut();
+        let Some(slice) = bytes.get_mut(start..end) else {
             return false;
         };
         slice.copy_from_slice(&value.to_le_bytes());
@@ -838,21 +1383,24 @@ fn interp_memory_write_u32(
     }) {
         return wrote;
     }
-    let store = match store.lock() {
+    let mut store = match store.lock() {
         Ok(store) => store,
         Err(_) => return false,
     };
-    let Some(engine) = store
+    if let Some(engine) = store
         .module_engine(module_id)
         .and_then(|engine| engine.as_any().downcast_ref::<InterpModuleEngine>())
-    else {
-        return false;
-    };
-    engine.memory_write_u32(offset, value)
+    {
+        return engine.memory_write_u32(offset, value);
+    }
+    store
+        .instance_mut(module_id)
+        .and_then(|instance| instance.memory_instance.as_mut())
+        .is_some_and(|memory| memory.write_u32_le(offset, value))
 }
 
 fn interp_memory_write(
-    store: &Arc<Mutex<WasmStore<razero_interp::engine::InterpEngine>>>,
+    store: &Arc<Mutex<RuntimeStore>>,
     module_id: ModuleInstanceId,
     offset: usize,
     values: &[u8],
@@ -864,7 +1412,8 @@ fn interp_memory_write(
         let Some(end) = offset.checked_add(values.len()) else {
             return false;
         };
-        let Some(slice) = memory.bytes_mut().get_mut(offset..end) else {
+        let mut bytes = memory.bytes_mut();
+        let Some(slice) = bytes.get_mut(offset..end) else {
             return false;
         };
         slice.copy_from_slice(values);
@@ -872,21 +1421,27 @@ fn interp_memory_write(
     }) {
         return wrote;
     }
-    let store = match store.lock() {
+    let mut store = match store.lock() {
         Ok(store) => store,
         Err(_) => return false,
     };
-    let Some(engine) = store
+    if let Some(engine) = store
         .module_engine(module_id)
         .and_then(|engine| engine.as_any().downcast_ref::<InterpModuleEngine>())
-    else {
+    {
+        return engine.memory_write(offset, values);
+    }
+    let Some(offset) = u32::try_from(offset).ok() else {
         return false;
     };
-    engine.memory_write(offset, values)
+    store
+        .instance_mut(module_id)
+        .and_then(|instance| instance.memory_instance.as_mut())
+        .is_some_and(|memory| memory.write(offset, values))
 }
 
 fn interp_memory_grow(
-    store: &Arc<Mutex<WasmStore<razero_interp::engine::InterpEngine>>>,
+    store: &Arc<Mutex<RuntimeStore>>,
     module_id: ModuleInstanceId,
     delta: u32,
     maximum: Option<u32>,
@@ -902,32 +1457,67 @@ fn interp_memory_grow(
     {
         return Some(previous);
     }
-    let store = store.lock().ok()?;
-    let engine = store
+    let mut store = store.lock().ok()?;
+    if let Some(engine) = store
         .module_engine(module_id)?
         .as_any()
-        .downcast_ref::<InterpModuleEngine>()?;
-    engine.memory_grow(delta, maximum)
+        .downcast_ref::<InterpModuleEngine>()
+    {
+        return engine.memory_grow(delta, maximum);
+    }
+    let previous = {
+        let instance = store.instance_mut(module_id)?;
+        let memory = instance.memory_instance.as_mut()?;
+        if let Some(maximum) = maximum {
+            memory.max = memory.max.min(maximum);
+        }
+        memory.grow(delta)?
+    };
+    if let Some(engine) = store.module_engine_mut(module_id) {
+        engine.memory_grown();
+    }
+    Some(previous)
 }
 
 fn current_global_value(
-    store: &Arc<Mutex<WasmStore<razero_interp::engine::InterpEngine>>>,
+    store: &Arc<Mutex<RuntimeStore>>,
     module_id: ModuleInstanceId,
     index: usize,
 ) -> Option<GlobalValue> {
     let store = store.lock().ok()?;
-    let engine = store
+    let instance = store.instance(module_id)?;
+    let ty = instance.global_types.get(index)?.val_type;
+    let (lo, _hi) = store
         .module_engine(module_id)?
-        .as_any()
-        .downcast_ref::<InterpModuleEngine>()?;
-    engine
-        .global_value(index as u32)
-        .map(|(lo, _hi, ty)| convert_global_value(ty, lo))
-        .or_else(|| {
-            store
-                .instance(module_id)
-                .and_then(|instance| export_global_value(instance, index))
-        })
+        .get_global_value(index as u32);
+    Some(convert_global_value(ty, lo))
+}
+
+fn set_current_global_value(
+    store: &Arc<Mutex<RuntimeStore>>,
+    module_id: ModuleInstanceId,
+    index: usize,
+    value: GlobalValue,
+) -> Result<()> {
+    let mut store = store
+        .lock()
+        .map_err(|_| RuntimeError::new("runtime store poisoned"))?;
+    let (lo, hi) = encode_global_value(value);
+    let owns_globals = {
+        let engine = store
+            .module_engine_mut(module_id)
+            .ok_or_else(|| RuntimeError::new("module engine is unavailable"))?;
+        engine.set_global_value(index as u32, lo, hi);
+        engine.owns_globals()
+    };
+    if !owns_globals {
+        let global = store
+            .instance_mut(module_id)
+            .and_then(|instance| instance.globals.get_mut(index))
+            .ok_or_else(|| RuntimeError::new(format!("global[{index}] is unavailable")))?;
+        global.set_value(lo, hi);
+    }
+    Ok(())
 }
 
 fn export_global_value(
@@ -935,7 +1525,7 @@ fn export_global_value(
     index: usize,
 ) -> Option<GlobalValue> {
     let global = instance.globals.get(index)?;
-    Some(convert_global_value(global.ty.val_type, global.value))
+    Some(convert_global_value(global.ty.val_type, global.value().0))
 }
 
 fn convert_global_value(value_type: WasmValueType, lo: u64) -> GlobalValue {
@@ -945,6 +1535,22 @@ fn convert_global_value(value_type: WasmValueType, lo: u64) -> GlobalValue {
         WasmValueType::F32 => GlobalValue::F32(lo as u32),
         WasmValueType::F64 => GlobalValue::F64(lo),
         _ => GlobalValue::I64(lo as i64),
+    }
+}
+
+fn compiler_call_error(err: CallEngineError) -> RuntimeError {
+    match err {
+        CallEngineError::ModuleExit(err) => ExitError::new(err.exit_code).into(),
+        other => RuntimeError::new(other.to_string()),
+    }
+}
+
+fn encode_global_value(value: GlobalValue) -> (u64, u64) {
+    match value {
+        GlobalValue::I32(value) => (value as u32 as u64, 0),
+        GlobalValue::I64(value) => (value as u64, 0),
+        GlobalValue::F32(value) => (u64::from(value), 0),
+        GlobalValue::F64(value) => (value, 0),
     }
 }
 
@@ -1051,6 +1657,10 @@ pub(crate) fn to_wasm_value_type(value_type: ValueType) -> WasmValueType {
 
 #[cfg(test)]
 mod tests {
+    use razero_compiler::module_engine::CompilerModuleEngine;
+    use razero_interp::engine::InterpModuleEngine;
+    use razero_platform::compiler_supported;
+    use razero_wasm::engine::Engine as _;
     use std::sync::{
         atomic::{AtomicI64, AtomicU32, Ordering},
         Arc, Mutex,
@@ -1060,21 +1670,44 @@ mod tests {
     use super::Runtime;
     use crate::{
         api::{
-            error::RuntimeError,
-            wasm::{FunctionDefinition, ValueType},
+            error::{RuntimeError, EXIT_CODE_CONTEXT_CANCELED, EXIT_CODE_DEADLINE_EXCEEDED},
+            wasm::{FunctionDefinition, GlobalValue, ValueType},
         },
-        cache::CompilationCache,
+        cache::{BinaryCompilationArtifact, CompilationCache},
         config::ModuleConfig,
         ctx_keys::Context,
         experimental::{
             add_fuel, get_snapshotter, get_yielder, remaining_fuel, with_close_notifier,
-            with_fuel_controller, with_function_listener_factory, with_snapshotter, with_yielder,
-            CloseNotifier, FuelController, FunctionListener, FunctionListenerFactory, Snapshot,
-            StackIterator,
+            with_compilation_workers, with_fuel_controller, with_function_listener_factory,
+            with_snapshotter, with_yielder, CloseNotifier, FuelController, FunctionListener,
+            FunctionListenerFactory, Snapshot, StackIterator,
         },
         RuntimeConfig,
     };
+    use std::time::Duration;
+
+    const SIMPLE_EXPORT_WASM: &[u8] = &[
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f,
+        0x03, 0x02, 0x01, 0x00, 0x07, 0x05, 0x01, 0x01, b'f', 0x00, 0x00, 0x0a, 0x06, 0x01, 0x04,
+        0x00, 0x41, 0x2a, 0x0b,
+    ];
+    const LOOP_EXPORT_WASM: &[u8] = &[
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03,
+        0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x00, 0x0a, 0x09, 0x01,
+        0x07, 0x00, 0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b,
+    ];
     use razero_wasm::memory::MemoryBytes;
+
+    fn close_on_context_done_runtime_configs() -> Vec<RuntimeConfig> {
+        let mut configs = vec![
+            RuntimeConfig::new_interpreter().with_close_on_context_done(true),
+            RuntimeConfig::new_auto().with_close_on_context_done(true),
+        ];
+        if compiler_supported() {
+            configs.push(RuntimeConfig::new_compiler().with_close_on_context_done(true));
+        }
+        configs
+    }
 
     #[derive(Clone)]
     struct TestFuelController {
@@ -1242,15 +1875,28 @@ mod tests {
 
     #[derive(Default)]
     struct CountingCache {
-        modules: Mutex<HashMap<String, Vec<u8>>>,
-        gets: AtomicU32,
-        inserts: AtomicU32,
+        raw_modules: Mutex<HashMap<String, Vec<u8>>>,
+        binary_artifacts: Mutex<HashMap<String, BinaryCompilationArtifact>>,
+        raw_gets: AtomicU32,
+        raw_inserts: AtomicU32,
+        artifact_gets: AtomicU32,
+        artifact_inserts: AtomicU32,
+        poison_raw_bytes: bool,
+    }
+
+    impl CountingCache {
+        fn with_poisoned_raw_bytes() -> Self {
+            Self {
+                poison_raw_bytes: true,
+                ..Self::default()
+            }
+        }
     }
 
     impl CompilationCache for CountingCache {
         fn get(&self, key: &str) -> Option<Vec<u8>> {
-            self.gets.fetch_add(1, Ordering::SeqCst);
-            self.modules
+            self.raw_gets.fetch_add(1, Ordering::SeqCst);
+            self.raw_modules
                 .lock()
                 .expect("cache poisoned")
                 .get(key)
@@ -1258,11 +1904,33 @@ mod tests {
         }
 
         fn insert(&self, key: &str, bytes: &[u8]) {
-            self.inserts.fetch_add(1, Ordering::SeqCst);
-            self.modules
+            self.raw_inserts.fetch_add(1, Ordering::SeqCst);
+            let bytes = if self.poison_raw_bytes {
+                b"not-wasm".to_vec()
+            } else {
+                bytes.to_vec()
+            };
+            self.raw_modules
                 .lock()
                 .expect("cache poisoned")
-                .insert(key.to_string(), bytes.to_vec());
+                .insert(key.to_string(), bytes);
+        }
+
+        fn get_binary_artifact(&self, key: &str) -> Option<BinaryCompilationArtifact> {
+            self.artifact_gets.fetch_add(1, Ordering::SeqCst);
+            self.binary_artifacts
+                .lock()
+                .expect("cache poisoned")
+                .get(key)
+                .cloned()
+        }
+
+        fn insert_binary_artifact(&self, key: &str, artifact: BinaryCompilationArtifact) {
+            self.artifact_inserts.fetch_add(1, Ordering::SeqCst);
+            self.binary_artifacts
+                .lock()
+                .expect("cache poisoned")
+                .insert(key.to_string(), artifact);
         }
     }
 
@@ -1298,8 +1966,29 @@ mod tests {
         runtime_a.compile(bytes).unwrap();
         runtime_b.compile(bytes).unwrap();
 
-        assert_eq!(2, cache.gets.load(Ordering::SeqCst));
-        assert_eq!(1, cache.inserts.load(Ordering::SeqCst));
+        assert_eq!(2, cache.artifact_gets.load(Ordering::SeqCst));
+        assert_eq!(1, cache.artifact_inserts.load(Ordering::SeqCst));
+        assert_eq!(1, cache.raw_gets.load(Ordering::SeqCst));
+        assert_eq!(1, cache.raw_inserts.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn warm_binary_cache_prefers_compiled_artifact_over_raw_wasm_bytes() {
+        let cache = Arc::new(CountingCache::with_poisoned_raw_bytes());
+        let config = RuntimeConfig::new().with_compilation_cache(cache.clone());
+        let runtime_a = Runtime::with_config(config.clone());
+        let runtime_b = Runtime::with_config(config);
+        let bytes = b"\0asm\x01\0\0\0";
+
+        runtime_a.compile(bytes).unwrap();
+        let module = runtime_b
+            .instantiate_binary(bytes, ModuleConfig::new())
+            .unwrap();
+
+        assert!(!module.is_closed());
+        assert_eq!(2, cache.artifact_gets.load(Ordering::SeqCst));
+        assert_eq!(1, cache.artifact_inserts.load(Ordering::SeqCst));
+        assert_eq!(1, cache.raw_gets.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -1355,8 +2044,10 @@ mod tests {
             .compile(&Context::default())
             .unwrap();
 
-        assert_eq!(0, cache.gets.load(Ordering::SeqCst));
-        assert_eq!(0, cache.inserts.load(Ordering::SeqCst));
+        assert_eq!(0, cache.raw_gets.load(Ordering::SeqCst));
+        assert_eq!(0, cache.raw_inserts.load(Ordering::SeqCst));
+        assert_eq!(0, cache.artifact_gets.load(Ordering::SeqCst));
+        assert_eq!(0, cache.artifact_inserts.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -1390,6 +2081,205 @@ mod tests {
                 .expect_err("out-of-bounds load should trap");
             assert!(err.to_string().contains("out of bounds memory access"));
         }
+    }
+
+    #[test]
+    fn runtime_defaults_to_interpreter_until_auto_is_safe() {
+        let runtime = Runtime::new();
+        let compiled = runtime
+            .compile(&[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f,
+                0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00,
+                0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x41, 0x01, 0x6a, 0x0b,
+            ])
+            .unwrap();
+        let module = runtime.instantiate(&compiled, ModuleConfig::new()).unwrap();
+        let store = runtime.inner.store.lock().expect("runtime store poisoned");
+        let engine = store
+            .module_engine(module.store_module_id().expect("guest module id"))
+            .expect("module engine should exist");
+
+        assert!(engine.as_any().is::<InterpModuleEngine>());
+    }
+
+    #[test]
+    fn auto_runtime_config_selects_compiler_engine_when_supported() {
+        let runtime = Runtime::with_config(RuntimeConfig::new_auto());
+        let compiled = runtime
+            .compile(&[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f,
+                0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00,
+                0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x41, 0x01, 0x6a, 0x0b,
+            ])
+            .unwrap();
+        let module = runtime.instantiate(&compiled, ModuleConfig::new()).unwrap();
+        let store = runtime.inner.store.lock().expect("runtime store poisoned");
+        let engine = store
+            .module_engine(module.store_module_id().expect("guest module id"))
+            .expect("module engine should exist");
+
+        assert_eq!(
+            compiler_supported(),
+            engine.as_any().is::<CompilerModuleEngine>()
+        );
+        assert_eq!(
+            !compiler_supported(),
+            engine.as_any().is::<InterpModuleEngine>()
+        );
+    }
+
+    #[test]
+    fn close_on_context_done_auto_runtime_still_uses_compiler_when_supported() {
+        let runtime =
+            Runtime::with_config(RuntimeConfig::new_auto().with_close_on_context_done(true));
+        let compiled = runtime
+            .compile(&[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f,
+                0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00,
+                0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x41, 0x01, 0x6a, 0x0b,
+            ])
+            .unwrap();
+        let module = runtime.instantiate(&compiled, ModuleConfig::new()).unwrap();
+        let store = runtime.inner.store.lock().expect("runtime store poisoned");
+        let engine = store
+            .module_engine(module.store_module_id().expect("guest module id"))
+            .expect("module engine should exist");
+
+        assert_eq!(
+            compiler_supported(),
+            engine.as_any().is::<CompilerModuleEngine>()
+        );
+        assert_eq!(
+            !compiler_supported(),
+            engine.as_any().is::<InterpModuleEngine>()
+        );
+    }
+
+    #[test]
+    fn compiler_runtime_is_selectable_through_public_config() {
+        if !compiler_supported() {
+            return;
+        }
+
+        let runtime = Runtime::with_config(RuntimeConfig::new_compiler());
+        let compiled = runtime
+            .compile(&[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f,
+                0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00,
+                0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x41, 0x01, 0x6a, 0x0b,
+            ])
+            .unwrap();
+        let module = runtime.instantiate(&compiled, ModuleConfig::new()).unwrap();
+        let store = runtime.inner.store.lock().expect("runtime store poisoned");
+        let engine = store
+            .module_engine(module.store_module_id().expect("guest module id"))
+            .expect("module engine should exist");
+
+        assert!(engine.as_any().is::<CompilerModuleEngine>());
+        assert_eq!(
+            1,
+            engine
+                .as_any()
+                .downcast_ref::<CompilerModuleEngine>()
+                .expect("compiler engine")
+                .parent()
+                .function_offsets
+                .len()
+        );
+    }
+
+    #[test]
+    fn close_on_context_done_compiler_runtime_remains_compiler() {
+        if !compiler_supported() {
+            return;
+        }
+
+        let runtime =
+            Runtime::with_config(RuntimeConfig::new_compiler().with_close_on_context_done(true));
+        let compiled = runtime
+            .compile(&[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f,
+                0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00,
+                0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x41, 0x01, 0x6a, 0x0b,
+            ])
+            .unwrap();
+        let module = runtime.instantiate(&compiled, ModuleConfig::new()).unwrap();
+        let store = runtime.inner.store.lock().expect("runtime store poisoned");
+        let engine = store
+            .module_engine(module.store_module_id().expect("guest module id"))
+            .and_then(|engine| engine.as_any().downcast_ref::<CompilerModuleEngine>())
+            .expect("compiler module engine should exist");
+
+        assert!(engine.parent().ensure_termination);
+    }
+
+    #[test]
+    fn compiler_secure_mode_enables_memory_isolation_when_supported() {
+        if !compiler_supported() {
+            return;
+        }
+
+        let runtime = Runtime::with_config(RuntimeConfig::new_compiler().with_secure_mode(true));
+        let compiled = runtime
+            .compile(&[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f,
+                0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00,
+                0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x41, 0x01, 0x6a, 0x0b,
+            ])
+            .unwrap();
+        let module = runtime.instantiate(&compiled, ModuleConfig::new()).unwrap();
+        let store = runtime.inner.store.lock().expect("runtime store poisoned");
+        let engine: &CompilerModuleEngine = store
+            .module_engine(module.store_module_id().expect("guest module id"))
+            .and_then(|engine| engine.as_any().downcast_ref::<CompilerModuleEngine>())
+            .expect("compiler module engine should exist");
+        let expected_memory_isolation = cfg!(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ));
+
+        assert_eq!(
+            expected_memory_isolation,
+            engine.parent().memory_isolation_enabled
+        );
+    }
+
+    #[test]
+    fn compiler_guest_execution_executes_through_public_runtime() {
+        if !compiler_supported() {
+            return;
+        }
+
+        let runtime = Runtime::with_config(RuntimeConfig::new_compiler());
+        let compiled = runtime
+            .compile(&[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f,
+                0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00,
+                0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x41, 0x01, 0x6a, 0x0b,
+            ])
+            .unwrap();
+        let module = runtime.instantiate(&compiled, ModuleConfig::new()).unwrap();
+        let store = runtime.inner.store.lock().expect("runtime store poisoned");
+        let engine = store
+            .module_engine(module.store_module_id().expect("guest module id"))
+            .and_then(|engine| engine.as_any().downcast_ref::<CompilerModuleEngine>())
+            .expect("compiler module engine should exist");
+        let mut direct = engine.clone().new_compiler_function(0);
+        assert_ne!(
+            0,
+            direct.executable_ptr(),
+            "direct call engine lost executable"
+        );
+        drop(store);
+        assert_eq!(vec![42], direct.call(&mut [41]).unwrap().to_vec());
+        assert_eq!(
+            vec![42],
+            module
+                .exported_function("run")
+                .unwrap()
+                .call(&[41])
+                .unwrap()
+        );
     }
 
     #[test]
@@ -1856,6 +2746,26 @@ mod tests {
     }
 
     #[test]
+    fn mutable_exported_globals_round_trip_through_public_api() {
+        let runtime = Runtime::new();
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x06, 0x06, 0x01, 0x7e, 0x01, 0x42,
+            0x2a, 0x0b, 0x07, 0x0a, 0x01, 0x06, b'g', b'l', b'o', b'b', b'a', b'l', 0x03, 0x00,
+        ];
+        let compiled = runtime.compile(&bytes).unwrap();
+        let module = runtime.instantiate(&compiled, ModuleConfig::new()).unwrap();
+        let global = module.exported_global("global").unwrap();
+
+        assert!(global.is_mutable());
+        assert_eq!(GlobalValue::I64(42), global.get());
+
+        global.set(GlobalValue::I64(2));
+
+        assert_eq!(GlobalValue::I64(2), global.get());
+        assert_eq!(GlobalValue::I64(2), module.global(0).get());
+    }
+
+    #[test]
     fn compiled_module_close_prevents_instantiation() {
         let runtime = Runtime::new();
         let compiled = runtime.compile(b"\0asm\x01\0\0\0").unwrap();
@@ -1949,6 +2859,83 @@ mod tests {
 
         module.close_with_exit_code(&instantiate_ctx, 7).unwrap();
         assert_eq!(7, exit_code.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn close_on_context_done_cancels_running_guest_loop() {
+        for config in close_on_context_done_runtime_configs() {
+            let runtime = Runtime::with_config(config);
+            let compiled = runtime.compile(LOOP_EXPORT_WASM).unwrap();
+            let module = runtime.instantiate(&compiled, ModuleConfig::new()).unwrap();
+            let run = module.exported_function("run").unwrap();
+            let (ctx, cancel) = Context::default().with_cancel();
+            let fallback_module = module.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(500));
+                let _ = fallback_module.close_with_exit_code(&Context::default(), 99);
+            });
+
+            let handle = thread::spawn(move || run.call_with_context(&ctx, &[]));
+            thread::sleep(Duration::from_millis(20));
+            cancel.cancel();
+
+            let err = handle
+                .join()
+                .expect("loop call thread should not panic")
+                .unwrap_err();
+            assert_eq!(Some(EXIT_CODE_CONTEXT_CANCELED), err.exit_code());
+            assert!(module.is_closed());
+            assert_eq!(EXIT_CODE_CONTEXT_CANCELED, module.exit_code());
+        }
+    }
+
+    #[test]
+    fn close_on_context_done_honors_deadlines() {
+        for config in close_on_context_done_runtime_configs() {
+            let runtime = Runtime::with_config(config);
+            let compiled = runtime.compile(LOOP_EXPORT_WASM).unwrap();
+            let module = runtime.instantiate(&compiled, ModuleConfig::new()).unwrap();
+            let run = module.exported_function("run").unwrap();
+            let ctx = Context::default().with_timeout(Duration::from_millis(20));
+            let fallback_module = module.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(500));
+                let _ = fallback_module.close_with_exit_code(&Context::default(), 98);
+            });
+
+            let err = thread::spawn(move || run.call_with_context(&ctx, &[]))
+                .join()
+                .expect("loop call thread should not panic")
+                .unwrap_err();
+            assert_eq!(Some(EXIT_CODE_DEADLINE_EXCEEDED), err.exit_code());
+            assert!(module.is_closed());
+            assert_eq!(EXIT_CODE_DEADLINE_EXCEEDED, module.exit_code());
+        }
+    }
+
+    #[test]
+    fn close_on_context_done_still_interrupts_on_explicit_module_close() {
+        for config in close_on_context_done_runtime_configs() {
+            let runtime = Runtime::with_config(config);
+            let compiled = runtime.compile(LOOP_EXPORT_WASM).unwrap();
+            let module = runtime.instantiate(&compiled, ModuleConfig::new()).unwrap();
+            let run = module.exported_function("run").unwrap();
+
+            let handle = thread::spawn({
+                let ctx = Context::default();
+                move || run.call_with_context(&ctx, &[])
+            });
+            thread::sleep(Duration::from_millis(20));
+            module.close_with_exit_code(&Context::default(), 7).unwrap();
+
+            let err = handle
+                .join()
+                .expect("loop call thread should not panic")
+                .unwrap_err();
+            assert_eq!(Some(7), err.exit_code());
+            assert!(module.is_closed());
+            assert_eq!(7, module.exit_code());
+        }
     }
 
     #[test]
@@ -2493,5 +3480,41 @@ mod tests {
             .unwrap();
         assert_eq!(vec![12], results);
         assert_eq!(10, sidechannel.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn compile_with_context_eagerly_compiles_with_requested_workers() {
+        if !compiler_supported() {
+            return;
+        }
+
+        let runtime = Runtime::with_config(RuntimeConfig::new_compiler());
+        let ctx = with_compilation_workers(&Context::default(), 4);
+        let compiled = runtime
+            .compile_with_context(&ctx, SIMPLE_EXPORT_WASM)
+            .unwrap();
+
+        let compiled_count = runtime
+            .inner
+            .store
+            .lock()
+            .expect("runtime store poisoned")
+            .engine
+            .compiled_module_count();
+        assert_eq!(1, compiled_count);
+
+        let module = runtime
+            .instantiate_with_context(&ctx, &compiled, ModuleConfig::new())
+            .unwrap();
+        assert!(module.exported_function("f").is_some());
+
+        let compiled_count = runtime
+            .inner
+            .store
+            .lock()
+            .expect("runtime store poisoned")
+            .engine
+            .compiled_module_count();
+        assert_eq!(1, compiled_count);
     }
 }

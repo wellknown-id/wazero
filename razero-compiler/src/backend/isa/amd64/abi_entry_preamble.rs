@@ -5,10 +5,12 @@ use crate::ssa::Signature;
 use super::abi::amd64_function_abi;
 use super::instr::{AluRmiROpcode, Amd64Instr};
 use super::machine::Amd64Machine;
-use super::machine_pro_epi_logue::{append_epilogue, append_prologue};
 use super::machine_vec::SseOpcode;
 use super::operands::{AddressMode, Operand};
-use super::reg::{vreg_for_real_reg, R12, R13, R14, R15, RAX, RDX, RSP, XMM15};
+use super::reg::{vreg_for_real_reg, R12, R13, R14, R15, RAX, RBP, RCX, RDX, RSP, XMM15};
+
+const EXECUTION_CONTEXT_OFFSET_ORIGINAL_FRAME_POINTER: u32 = 16;
+const EXECUTION_CONTEXT_OFFSET_ORIGINAL_STACK_POINTER: u32 = 24;
 
 fn stack_slot_size(ty: crate::ssa::Type) -> u32 {
     if ty.bits() == 128 {
@@ -37,11 +39,26 @@ pub fn compile_entry_preamble(sig: &Signature, use_host_stack: bool) -> Vec<u8> 
         crate::ssa::BasicBlockId(0),
     );
     crate::backend::machine::Machine::start_block(&mut machine, crate::ssa::BasicBlockId(0));
-    append_prologue(&mut machine);
     machine.push(Amd64Instr::mov_rr(
         vreg_for_real_reg(RAX),
         vreg_for_real_reg(RDX),
         true,
+    ));
+    machine.push(Amd64Instr::mov_rm(
+        vreg_for_real_reg(RBP),
+        Operand::mem(AddressMode::imm_reg(
+            EXECUTION_CONTEXT_OFFSET_ORIGINAL_FRAME_POINTER,
+            vreg_for_real_reg(RAX),
+        )),
+        8,
+    ));
+    machine.push(Amd64Instr::mov_rm(
+        vreg_for_real_reg(RSP),
+        Operand::mem(AddressMode::imm_reg(
+            EXECUTION_CONTEXT_OFFSET_ORIGINAL_STACK_POINTER,
+            vreg_for_real_reg(RAX),
+        )),
+        8,
     ));
     if !use_host_stack {
         machine.push(Amd64Instr::mov_rr(
@@ -60,14 +77,19 @@ pub fn compile_entry_preamble(sig: &Signature, use_host_stack: bool) -> Vec<u8> 
         ));
     }
     let mut param_result_offset = 0u32;
-    for arg in &abi.args {
+    for arg in abi.args.iter().skip(2) {
         let slice = Operand::mem(AddressMode::imm_reg(
             param_result_offset,
             vreg_for_real_reg(R12),
         ));
         match arg.kind {
             AbiArgKind::Reg if arg.ty.is_int() => {
-                machine.push(Amd64Instr::mov64_mr(slice, arg.reg));
+                if arg.ty.bits() == 64 {
+                    machine.push(Amd64Instr::mov64_mr(slice, arg.reg));
+                } else {
+                    machine.push(Amd64Instr::mov64_mr(slice, vreg_for_real_reg(RCX)));
+                    machine.push(Amd64Instr::mov_rr(vreg_for_real_reg(RCX), arg.reg, false));
+                }
             }
             AbiArgKind::Reg => {
                 machine.push(Amd64Instr::xmm_unary_rm_r(
@@ -77,9 +99,9 @@ pub fn compile_entry_preamble(sig: &Signature, use_host_stack: bool) -> Vec<u8> 
                 ));
             }
             AbiArgKind::Stack if arg.ty.is_int() => {
-                machine.push(Amd64Instr::mov64_mr(slice, vreg_for_real_reg(RDX)));
+                machine.push(Amd64Instr::mov64_mr(slice, vreg_for_real_reg(RCX)));
                 machine.push(Amd64Instr::mov_rm(
-                    vreg_for_real_reg(RDX),
+                    vreg_for_real_reg(RCX),
                     Operand::mem(AddressMode::imm_reg(
                         arg.offset as u32,
                         vreg_for_real_reg(RSP),
@@ -105,6 +127,14 @@ pub fn compile_entry_preamble(sig: &Signature, use_host_stack: bool) -> Vec<u8> 
         }
         param_result_offset += stack_slot_size(arg.ty);
     }
+    if !use_host_stack {
+        machine.push(Amd64Instr::alu_rmi_r(
+            AluRmiROpcode::Xor,
+            Operand::reg(vreg_for_real_reg(RBP)),
+            vreg_for_real_reg(RBP),
+            true,
+        ));
+    }
     machine.push(Amd64Instr::mov_rr(
         vreg_for_real_reg(RDX),
         vreg_for_real_reg(R15),
@@ -119,7 +149,12 @@ pub fn compile_entry_preamble(sig: &Signature, use_host_stack: bool) -> Vec<u8> 
         let slice = Operand::mem(AddressMode::imm_reg(result_offset, vreg_for_real_reg(R12)));
         match ret.kind {
             AbiArgKind::Reg if ret.ty.is_int() => {
-                machine.push(Amd64Instr::mov_rm(ret.reg, slice, 8));
+                if ret.ty.bits() == 64 {
+                    machine.push(Amd64Instr::mov_rm(ret.reg, slice, 8));
+                } else {
+                    machine.push(Amd64Instr::mov_rr(ret.reg, vreg_for_real_reg(RCX), false));
+                    machine.push(Amd64Instr::mov_rm(vreg_for_real_reg(RCX), slice, 8));
+                }
             }
             AbiArgKind::Reg => {
                 machine.push(Amd64Instr::xmm_mov_rm(
@@ -134,9 +169,9 @@ pub fn compile_entry_preamble(sig: &Signature, use_host_stack: bool) -> Vec<u8> 
                         ret.offset as u32,
                         vreg_for_real_reg(RSP),
                     )),
-                    vreg_for_real_reg(RDX),
+                    vreg_for_real_reg(RCX),
                 ));
-                machine.push(Amd64Instr::mov_rm(vreg_for_real_reg(RDX), slice, 8));
+                machine.push(Amd64Instr::mov_rm(vreg_for_real_reg(RCX), slice, 8));
             }
             AbiArgKind::Stack => {
                 machine.push(Amd64Instr::xmm_unary_rm_r(
@@ -156,7 +191,21 @@ pub fn compile_entry_preamble(sig: &Signature, use_host_stack: bool) -> Vec<u8> 
         }
         result_offset += stack_slot_size(ret.ty);
     }
-    append_epilogue(&mut machine);
+    machine.push(Amd64Instr::mov64_mr(
+        Operand::mem(AddressMode::imm_reg(
+            EXECUTION_CONTEXT_OFFSET_ORIGINAL_FRAME_POINTER,
+            vreg_for_real_reg(R15),
+        )),
+        vreg_for_real_reg(RBP),
+    ));
+    machine.push(Amd64Instr::mov64_mr(
+        Operand::mem(AddressMode::imm_reg(
+            EXECUTION_CONTEXT_OFFSET_ORIGINAL_STACK_POINTER,
+            vreg_for_real_reg(R15),
+        )),
+        vreg_for_real_reg(RSP),
+    ));
+    machine.push(Amd64Instr::ret());
     machine
         .encode_all()
         .unwrap_or_else(|e: BackendError| panic!("{e}"))

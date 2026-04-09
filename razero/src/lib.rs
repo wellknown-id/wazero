@@ -27,8 +27,8 @@ pub use assemblyscript::{
 };
 pub use builder::{HostFunction, HostFunctionBuilder, HostModuleBuilder};
 pub use cache::{CompilationCache, InMemoryCompilationCache};
-pub use config::{CompiledModule, ModuleConfig, RuntimeConfig};
-pub use ctx_keys::{Context, ContextKey};
+pub use config::{CompiledModule, ModuleConfig, RuntimeConfig, RuntimeEngineKind};
+pub use ctx_keys::{CancelHandle, Context, ContextDoneError, ContextKey};
 pub use experimental::{
     add_fuel, benchmark_function_listener, get_close_notifier, get_compilation_workers,
     get_fuel_controller, get_import_resolver, get_memory_allocator, get_snapshotter, get_yielder,
@@ -46,4 +46,5 @@ pub use experimental::{
 pub use filecache::FileCompilationCache;
 pub use logging::{LogLevel, Logger, NoopLogger};
 pub use runtime::Runtime;
+pub use runtime::{PrecompiledArtifact, PrecompiledArtifactError};
 pub use version::{version, VERSION};

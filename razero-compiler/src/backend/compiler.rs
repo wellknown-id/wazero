@@ -117,6 +117,7 @@ impl<M: Machine + 'static> Compiler<M> {
     }
 
     pub fn compile(&mut self) -> Result<CompilationOutput, BackendError> {
+        self.ssa_builder.run_passes();
         self.lower();
         self.reg_alloc();
         self.finalize()?;
@@ -187,8 +188,26 @@ impl<M: Machine + 'static> Compiler<M> {
         let blocks = self.reverse_post_order_blocks();
         for blk in blocks {
             let params = self.ssa_builder.block(blk).params.as_slice().to_vec();
+            let mut int_param_index = 0usize;
+            let mut float_param_index = 0usize;
             for param in params {
-                let vreg = self.allocate_vreg(param.ty());
+                let vreg = if blk.is_entry() {
+                    if param.ty().is_int() {
+                        if let Some(&real_reg) = self.arg_result_ints.get(int_param_index) {
+                            int_param_index += 1;
+                            VReg::from_real_reg(real_reg, RegType::Int)
+                        } else {
+                            self.allocate_vreg(param.ty())
+                        }
+                    } else if let Some(&real_reg) = self.arg_result_floats.get(float_param_index) {
+                        float_param_index += 1;
+                        VReg::from_real_reg(real_reg, RegType::Float)
+                    } else {
+                        self.allocate_vreg(param.ty())
+                    }
+                } else {
+                    self.allocate_vreg(param.ty())
+                };
                 self.ensure_ssa_value_slot(param);
                 self.ssa_value_to_vregs[param.id().0 as usize] = vreg;
                 self.ssa_type_of_vreg_id.resize(
@@ -202,13 +221,16 @@ impl<M: Machine + 'static> Compiler<M> {
             while let Some(instr_id) = cur {
                 let instr = self.ssa_builder.instruction(instr_id).clone();
                 let (ret, rest) = instr.returns();
-                if ret.valid() {
+                if ret.valid() && ret.ty().is_valid() {
                     let vreg = self.allocate_vreg(ret.ty());
                     self.ensure_ssa_value_slot(ret);
                     self.ssa_value_to_vregs[ret.id().0 as usize] = vreg;
                     self.ssa_type_of_vreg_id[vreg.id() as usize] = ret.ty();
                 }
                 for value in rest.iter() {
+                    if !value.ty().is_valid() {
+                        continue;
+                    }
                     let vreg = self.allocate_vreg(value.ty());
                     self.ensure_ssa_value_slot(value);
                     self.ssa_value_to_vregs[value.id().0 as usize] = vreg;
@@ -225,6 +247,9 @@ impl<M: Machine + 'static> Compiler<M> {
             .as_slice()
             .to_vec();
         for param in return_params {
+            if !param.ty().is_valid() {
+                continue;
+            }
             let vreg = self.allocate_vreg(param.ty());
             self.return_vregs.push(vreg);
             self.ssa_type_of_vreg_id[vreg.id() as usize] = param.ty();

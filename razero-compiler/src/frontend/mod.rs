@@ -52,7 +52,8 @@ pub struct Compiler<'a> {
     offset: Option<ModuleContextOffsetData>,
     signatures: Vec<Signature>,
     listener_signatures: Vec<(Signature, Signature)>,
-    _ensure_termination: bool,
+    check_module_exit_code_sig: Signature,
+    ensure_termination: bool,
     _fuel_enabled: bool,
     _memory_isolation_enabled: bool,
     wasm_local_to_variable: Vec<Variable>,
@@ -86,7 +87,12 @@ impl<'a> Compiler<'a> {
             offset,
             signatures: Vec::new(),
             listener_signatures: Vec::new(),
-            _ensure_termination: ensure_termination,
+            check_module_exit_code_sig: Signature::new(
+                SignatureId(0),
+                vec![EXECUTION_CONTEXT_PTR_TYP],
+                vec![],
+            ),
+            ensure_termination,
             _fuel_enabled: fuel_enabled,
             _memory_isolation_enabled: memory_isolation_enabled,
             wasm_local_to_variable: Vec::new(),
@@ -109,6 +115,11 @@ impl<'a> Compiler<'a> {
     fn declare_signatures(&mut self, listener_on: bool) {
         self.signatures.clear();
         self.listener_signatures.clear();
+        let base = self.module.type_section.len() as u32;
+        self.check_module_exit_code_sig =
+            Signature::new(SignatureId(base), vec![EXECUTION_CONTEXT_PTR_TYP], vec![]);
+        self.ssa_builder
+            .declare_signature(self.check_module_exit_code_sig.clone());
 
         for (index, wasm_sig) in self.module.type_section.iter().enumerate() {
             let mut sig = signature_for_wasm_function_type(wasm_sig);
@@ -118,9 +129,8 @@ impl<'a> Compiler<'a> {
 
             if listener_on {
                 let (mut before, mut after) = signature_for_listener(wasm_sig);
-                let base = self.module.type_section.len() as u32;
-                before.id = SignatureId(index as u32 + base);
-                after.id = SignatureId(index as u32 + base * 2);
+                before.id = SignatureId(index as u32 + base + 1);
+                after.id = SignatureId(index as u32 + (base + 1) * 2);
                 self.ssa_builder.declare_signature(before.clone());
                 self.ssa_builder.declare_signature(after.clone());
                 self.listener_signatures.push((before, after));
