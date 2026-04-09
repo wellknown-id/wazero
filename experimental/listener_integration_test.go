@@ -4766,6 +4766,80 @@ func TestFunctionListener_FuelObserverOrdering(t *testing.T) {
 	}
 }
 
+func TestFunctionListener_MultiFuelObserver_FuelExhausted(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
+
+			ctx := context.Background()
+			recorder := &orderedEventRecorder{}
+			listenerEvents := &recordingFunctionListener{}
+			instantiateCtx := experimental.WithFunctionListenerFactory(ctx, newFunctionListenerFactory(&orderedRecordingFunctionListener{
+				recorder: recorder,
+				events:   listenerEvents,
+			}))
+
+			rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg.WithFuel(3))
+			defer rt.Close(ctx)
+
+			mod := instantiateListenerGuestModule(t, instantiateCtx, rt, fuelLoopModuleBinary())
+
+			left := &orderedRecordingFuelObserver{
+				recorder:     recorder,
+				observations: &recordingFuelObserver{},
+			}
+			right := &orderedRecordingFuelObserver{
+				recorder:     recorder,
+				observations: &recordingFuelObserver{},
+			}
+
+			_, err := mod.ExportedFunction("run").Call(
+				experimental.WithFuelObserver(
+					ctx,
+					experimental.MultiFuelObserver(left, right),
+				),
+			)
+			require.ErrorIs(t, err, wasmruntime.ErrRuntimeFuelExhausted)
+
+			events := listenerEvents.snapshot()
+			assertListenerEvents(t, events, []expectedListenerEvent{
+				{phase: "before", function: "run"},
+				{phase: "abort", function: "run", errIs: wasmruntime.ErrRuntimeFuelExhausted},
+			})
+			assertAbortTrapCauseClassification(t, events, experimental.TrapCauseFuelExhausted, true)
+			assertBeforeCompletionPairing(t, events)
+			assertBeforeCompletionStackPairing(t, events)
+
+			want := []fuelObservationSnapshot{
+				{
+					Event:     experimental.FuelEventBudgeted,
+					Budget:    3,
+					Remaining: 3,
+				},
+				{
+					Event:     experimental.FuelEventExhausted,
+					Budget:    3,
+					Consumed:  snapshotFuelObservations(left.observations.snapshot())[1].Consumed,
+					Remaining: snapshotFuelObservations(left.observations.snapshot())[1].Remaining,
+				},
+			}
+			require.Equal(t, want, snapshotFuelObservations(left.observations.snapshot()))
+			require.Equal(t, want, snapshotFuelObservations(right.observations.snapshot()))
+
+			assertOrderedEvents(t, recorder.snapshot(), []string{
+				"fuel budgeted",
+				"fuel budgeted",
+				"listener before run",
+				"listener abort run (fuel_exhausted)",
+				"fuel exhausted",
+				"fuel exhausted",
+			})
+		})
+	}
+}
+
 func TestFunctionListener_FuelObserverAcrossYieldResume(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
