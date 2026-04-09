@@ -441,6 +441,20 @@ impl BackendMachine for Amd64Machine {
                     _ => unreachable!(),
                 }
             }
+            Opcode::Clz | Opcode::Ctz | Opcode::Popcnt => {
+                let dst = self.compiler().v_reg_of(instruction.return_());
+                let src = self.compiler().v_reg_of(instruction.v);
+                let is_64 = instruction.typ.bits() == 64;
+                let op = match instruction.opcode {
+                    Opcode::Clz => super::UnaryRmROpcode::Lzcnt,
+                    Opcode::Ctz => super::UnaryRmROpcode::Tzcnt,
+                    Opcode::Popcnt => super::UnaryRmROpcode::Popcnt,
+                    _ => unreachable!(),
+                };
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::unary_rm_r(op, Operand::reg(src), dst, is_64));
+            }
             Opcode::Load => {
                 let (ptr, offset, typ) = instruction.load_data();
                 let dst = self.compiler().v_reg_of(instruction.return_());

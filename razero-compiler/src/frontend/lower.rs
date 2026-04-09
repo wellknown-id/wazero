@@ -197,6 +197,9 @@ impl<'a> Compiler<'a> {
             OPCODE_I32_SHR_S | OPCODE_I64_SHR_S => self.lower_binary_generic(Opcode::Sshr),
             OPCODE_I32_ROTL | OPCODE_I64_ROTL => self.lower_binary_generic(Opcode::Rotl),
             OPCODE_I32_ROTR | OPCODE_I64_ROTR => self.lower_binary_generic(Opcode::Rotr),
+            OPCODE_I32_CLZ | OPCODE_I64_CLZ => self.lower_unary_generic(Opcode::Clz),
+            OPCODE_I32_CTZ | OPCODE_I64_CTZ => self.lower_unary_generic(Opcode::Ctz),
+            OPCODE_I32_POPCNT | OPCODE_I64_POPCNT => self.lower_unary_generic(Opcode::Popcnt),
             OPCODE_I32_EQZ => self.lower_eqz(Type::I32),
             OPCODE_I64_EQZ => self.lower_eqz(Type::I64),
             OPCODE_I32_EQ => self.lower_icmp(IntegerCmpCond::Equal),
@@ -612,6 +615,14 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    fn lower_unary_generic(&mut self, opcode: Opcode) {
+        if !self.lowering_state.unreachable {
+            let x = self.lowering_state.pop();
+            let value = self.emit_unary(opcode, x, x.ty());
+            self.lowering_state.push(value);
+        }
+    }
+
     fn lower_eqz(&mut self, ty: Type) {
         if !self.lowering_state.unreachable {
             let x = self.lowering_state.pop();
@@ -950,6 +961,14 @@ impl<'a> Compiler<'a> {
         instr.v = x;
         instr.v2 = y;
         instr.v3 = self.exec_ctx_ptr_value;
+        instr.typ = result_ty;
+        let id = self.ssa_builder.insert_instruction(instr);
+        self.ssa_builder.instruction(id).return_()
+    }
+
+    fn emit_unary(&mut self, opcode: Opcode, x: Value, result_ty: Type) -> Value {
+        let mut instr = self.ssa_builder.allocate_instruction().with_opcode(opcode);
+        instr.v = x;
         instr.typ = result_ty;
         let id = self.ssa_builder.insert_instruction(instr);
         self.ssa_builder.instruction(id).return_()
@@ -1779,6 +1798,72 @@ mod tests {
         assert_eq!(
             compiler.format(),
             "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32)\n\tv3:i64 = UExtend v2\n\tv4:i64 = Iconst 4\n\tv5:i64 = Iadd v3, v4\n\tv6:i64 = Uload32 module_ctx, 0x10\n\tv7:i32 = Icmp v6, v5\n\tExitIfTrueWithCode v7, exec_ctx, memory_out_of_bounds\n\tv8:i64 = Load module_ctx, 0x8\n\tv9:i64 = Iadd v8, v3\n\tv10:i64 = Uload32 v9, 0x0\n\tJump blk_ret, v10\n"
+        );
+    }
+
+    #[test]
+    fn lowers_i32_clz() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_I32_CLZ, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32)\n\tv3:i32 = Clz v2\n\tJump blk_ret, v3\n"
+        );
+    }
+
+    #[test]
+    fn lowers_i64_ctz() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I64], &[ValueType::I64])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_I64_CTZ, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i64)\n\tv3:i64 = Ctz v2\n\tJump blk_ret, v3\n"
+        );
+    }
+
+    #[test]
+    fn lowers_i32_popcnt() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_I32_POPCNT, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32)\n\tv3:i32 = Popcnt v2\n\tJump blk_ret, v3\n"
         );
     }
 
