@@ -116,6 +116,12 @@ type (
 
 		// TimeProvider is the module-scoped default for host-visible time.
 		TimeProvider experimental.TimeProvider
+
+		// HostCallPolicy is the module-scoped default for imported host calls.
+		HostCallPolicy experimental.HostCallPolicy
+
+		// YieldPolicy is the module-scoped default for host-driven yields.
+		YieldPolicy experimental.YieldPolicy
 	}
 
 	// DataInstance holds bytes corresponding to the data segment in a module.

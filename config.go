@@ -205,6 +205,32 @@ type RuntimeConfig interface {
 	// A nil provider disables the runtime default and preserves current
 	// behavior unless a call context provides one explicitly.
 	WithTimeProvider(experimental.TimeProvider) RuntimeConfig
+
+	// WithHostCallPolicy sets the default host-call policy for modules
+	// instantiated by this runtime.
+	//
+	// The configured policy is surfaced to imported host function calls when the
+	// call context does not already carry one via experimental.WithHostCallPolicy.
+	// An explicit call-scoped policy therefore takes precedence. Embedders that
+	// want to further narrow a runtime default can compose both policies in the
+	// call-scoped policy they attach.
+	//
+	// A nil policy disables the runtime default and preserves current behavior
+	// unless a call context provides one explicitly.
+	WithHostCallPolicy(experimental.HostCallPolicy) RuntimeConfig
+
+	// WithYieldPolicy sets the default yield policy for modules instantiated by
+	// this runtime.
+	//
+	// The configured policy is surfaced to host-function yields when the call
+	// context does not already carry one via experimental.WithYieldPolicy. An
+	// explicit call-scoped policy therefore takes precedence. Embedders that
+	// want to further narrow a runtime default can compose both policies in the
+	// call-scoped policy they attach.
+	//
+	// A nil policy disables the runtime default and preserves current behavior
+	// unless a call context provides one explicitly.
+	WithYieldPolicy(experimental.YieldPolicy) RuntimeConfig
 }
 
 // NewRuntimeConfig returns a RuntimeConfig using the compiler if it is supported in this environment,
@@ -230,6 +256,8 @@ type runtimeConfig struct {
 	secureMode            bool
 	fuel                  int64
 	timeProvider          experimental.TimeProvider
+	hostCallPolicy        experimental.HostCallPolicy
+	yieldPolicy           experimental.YieldPolicy
 }
 
 // engineLessConfig helps avoid copy/pasting the wrong defaults.
@@ -365,6 +393,20 @@ func (c *runtimeConfig) WithFuel(fuel int64) RuntimeConfig {
 func (c *runtimeConfig) WithTimeProvider(provider experimental.TimeProvider) RuntimeConfig {
 	ret := c.clone()
 	ret.timeProvider = provider
+	return ret
+}
+
+// WithHostCallPolicy implements RuntimeConfig.WithHostCallPolicy.
+func (c *runtimeConfig) WithHostCallPolicy(policy experimental.HostCallPolicy) RuntimeConfig {
+	ret := c.clone()
+	ret.hostCallPolicy = experimental.GetHostCallPolicy(experimental.WithHostCallPolicy(context.Background(), policy))
+	return ret
+}
+
+// WithYieldPolicy implements RuntimeConfig.WithYieldPolicy.
+func (c *runtimeConfig) WithYieldPolicy(policy experimental.YieldPolicy) RuntimeConfig {
+	ret := c.clone()
+	ret.yieldPolicy = experimental.GetYieldPolicy(experimental.WithYieldPolicy(context.Background(), policy))
 	return ret
 }
 

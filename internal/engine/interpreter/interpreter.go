@@ -1005,9 +1005,7 @@ func (ce *callEngine) callFunction(ctx context.Context, m *wasm.ModuleInstance, 
 }
 
 func (ce *callEngine) callGoFunc(ctx context.Context, m *wasm.ModuleInstance, f *function, stack []uint64) {
-	if experimental.GetTimeProvider(ctx) == nil && m.TimeProvider != nil {
-		ctx = experimental.WithTimeProvider(ctx, m.TimeProvider)
-	}
+	ctx = wasm.ApplyCallContextDefaults(ctx, m)
 	if policy := experimental.GetHostCallPolicy(ctx); policy != nil && !policy.AllowHostCall(ctx, m, f.definition()) {
 		panic(wasmruntime.ErrRuntimePolicyDenied)
 	}

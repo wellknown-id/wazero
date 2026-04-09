@@ -832,10 +832,7 @@ func (c *callEngine) withHostYielder(ctx context.Context, caller api.Module, ind
 }
 
 func hostCallContext(ctx context.Context, caller *wasm.ModuleInstance) context.Context {
-	if caller != nil && experimental.GetTimeProvider(ctx) == nil && caller.TimeProvider != nil {
-		ctx = experimental.WithTimeProvider(ctx, caller.TimeProvider)
-	}
-	return ctx
+	return wasm.ApplyCallContextDefaults(ctx, caller)
 }
 
 const callStackCeiling = uintptr(50000000) // in uint64 (8 bytes) == 400000000 bytes in total == 400mb.

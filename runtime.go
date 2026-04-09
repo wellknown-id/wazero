@@ -188,6 +188,8 @@ func NewRuntimeWithConfig(ctx context.Context, rConfig RuntimeConfig) Runtime {
 		secureMode:            config.secureMode,
 		fuel:                  config.fuel,
 		timeProvider:          config.timeProvider,
+		hostCallPolicy:        config.hostCallPolicy,
+		yieldPolicy:           config.yieldPolicy,
 	}
 }
 
@@ -213,6 +215,8 @@ type runtime struct {
 	secureMode        bool
 	fuel              int64
 	timeProvider      experimentalapi.TimeProvider
+	hostCallPolicy    experimentalapi.HostCallPolicy
+	yieldPolicy       experimentalapi.YieldPolicy
 }
 
 // Module implements Runtime.Module.
@@ -327,6 +331,12 @@ func (r *runtime) InstantiateModule(
 			ctx = experimentalapi.WithMemoryAllocator(ctx, secmem.GuardPageAllocator{})
 		}
 	}
+	if experimentalapi.GetHostCallPolicy(ctx) == nil && r.hostCallPolicy != nil {
+		ctx = experimentalapi.WithHostCallPolicy(ctx, r.hostCallPolicy)
+	}
+	if experimentalapi.GetYieldPolicy(ctx) == nil && r.yieldPolicy != nil {
+		ctx = experimentalapi.WithYieldPolicy(ctx, r.yieldPolicy)
+	}
 
 	name := config.name
 	if !config.nameSet && code.module.NameSection != nil && code.module.NameSection.ModuleName != "" {
@@ -348,6 +358,12 @@ func (r *runtime) InstantiateModule(
 	}
 	if r.timeProvider != nil {
 		mod.(*wasm.ModuleInstance).TimeProvider = r.timeProvider
+	}
+	if r.hostCallPolicy != nil {
+		mod.(*wasm.ModuleInstance).HostCallPolicy = r.hostCallPolicy
+	}
+	if r.yieldPolicy != nil {
+		mod.(*wasm.ModuleInstance).YieldPolicy = r.yieldPolicy
 	}
 
 	// Attach the code closer so that anything afterward closes the compiled

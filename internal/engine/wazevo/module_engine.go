@@ -403,9 +403,7 @@ func (f *hostFunction) CallWithStack(ctx context.Context, stack []uint64) (err e
 			notifyTrapObserver(ctx, f.lookedUpModule, err)
 		}
 	}()
-	if f.lookedUpModule != nil && experimental.GetTimeProvider(ctx) == nil && f.lookedUpModule.TimeProvider != nil {
-		ctx = experimental.WithTimeProvider(ctx, f.lookedUpModule.TimeProvider)
-	}
+	ctx = wasm.ApplyCallContextDefaults(ctx, f.lookedUpModule)
 	if f.enforcePolicy {
 		if policy := experimental.GetHostCallPolicy(ctx); policy != nil && !policy.AllowHostCall(ctx, f.lookedUpModule, f.def) {
 			err = wasmruntime.ErrRuntimePolicyDenied

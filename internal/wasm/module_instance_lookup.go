@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
 	"github.com/tetratelabs/wazero/internal/internalapi"
 )
 
@@ -67,9 +66,7 @@ func (l *lookedUpGoFunction) Call(ctx context.Context, params ...uint64) ([]uint
 
 // CallWithStack implements api.Function.
 func (l *lookedUpGoFunction) CallWithStack(ctx context.Context, stack []uint64) error {
-	if l.lookedUpModule != nil && experimental.GetTimeProvider(ctx) == nil && l.lookedUpModule.TimeProvider != nil {
-		ctx = experimental.WithTimeProvider(ctx, l.lookedUpModule.TimeProvider)
-	}
+	ctx = ApplyCallContextDefaults(ctx, l.lookedUpModule)
 	// The Go host function always needs to access caller's module, in this case the one holding the table.
 	l.g.Call(ctx, l.lookedUpModule, stack)
 	return nil

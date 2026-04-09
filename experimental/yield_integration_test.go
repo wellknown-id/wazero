@@ -980,6 +980,62 @@ func TestYieldPolicy_HostCallPolicyTakesPrecedence(t *testing.T) {
 	}
 }
 
+func TestYieldPolicy_RuntimeDefaultDeniesYieldAndNotifiesTrapObserver(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			mod, rt, ctx := setupYieldTest(t, ec.cfg.WithYieldPolicy(experimental.YieldPolicyFunc(
+				func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+					require.NotNil(t, caller)
+					require.Equal(t, "example.async_work", hostFunction.DebugName())
+					return false
+				},
+			)))
+			defer rt.Close(ctx)
+
+			observer := &recordingTrapObserver{}
+			_, err := mod.ExportedFunction("run").Call(
+				experimental.WithTrapObserver(experimental.WithYielder(ctx), observer),
+			)
+			require.True(t, errors.Is(err, wasmruntime.ErrRuntimePolicyDenied), "expected ErrRuntimePolicyDenied, got %v", err)
+
+			observation := observer.single(t)
+			require.Equal(t, experimental.TrapCausePolicyDenied, observation.Cause)
+			require.True(t, errors.Is(observation.Err, wasmruntime.ErrRuntimePolicyDenied))
+			require.Equal(t, mod.Name(), observation.Module.Name())
+		})
+	}
+}
+
+func TestYieldPolicy_CallContextOverridesRuntimeDefault(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			mod, rt, ctx := setupYieldTest(t, ec.cfg.WithYieldPolicy(experimental.YieldPolicyFunc(
+				func(context.Context, api.Module, api.FunctionDefinition) bool { return false },
+			)))
+			defer rt.Close(ctx)
+
+			consulted := 0
+			callCtx := experimental.WithYieldPolicy(
+				experimental.WithYielder(ctx),
+				experimental.YieldPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+					consulted++
+					require.NotNil(t, caller)
+					require.Equal(t, "example.async_work", hostFunction.DebugName())
+					return true
+				}),
+			)
+
+			_, err := mod.ExportedFunction("run").Call(callCtx)
+			resumer := requireYieldError(t, err).Resumer()
+
+			results, err := resumer.Resume(experimental.WithYielder(ctx), []uint64{42})
+			require.NoError(t, err)
+			require.Equal(t, []uint64{142}, results)
+			require.Equal(t, 1, consulted)
+		})
+	}
+}
+
 func TestYieldPolicy_ResumeUsesResumedContext(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
