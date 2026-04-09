@@ -357,6 +357,46 @@ func TestMultiFuelObserver_YieldResumeUsesResumedObserver(t *testing.T) {
 	}
 }
 
+func TestMultiFuelObserver_FuelExhausted(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
+
+			ctx := context.Background()
+			rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg.WithFuel(3))
+			defer rt.Close(ctx)
+
+			mod, err := rt.InstantiateWithConfig(ctx, fuelLoopModuleBinary(), wazero.NewModuleConfig().WithName("fuel-loop"))
+			require.NoError(t, err)
+
+			left := &recordingFuelObserver{}
+			right := &recordingFuelObserver{}
+			_, err = mod.ExportedFunction("run").Call(
+				experimental.WithFuelObserver(ctx, experimental.MultiFuelObserver(left, right)),
+			)
+			require.ErrorIs(t, err, wasmruntime.ErrRuntimeFuelExhausted)
+
+			want := []fuelObservationSnapshot{
+				{
+					Event:     experimental.FuelEventBudgeted,
+					Budget:    3,
+					Remaining: 3,
+				},
+				{
+					Event:     experimental.FuelEventExhausted,
+					Budget:    3,
+					Consumed:  snapshotFuelObservations(left.snapshot())[1].Consumed,
+					Remaining: snapshotFuelObservations(left.snapshot())[1].Remaining,
+				},
+			}
+			require.Equal(t, want, snapshotFuelObservations(left.snapshot()))
+			require.Equal(t, want, snapshotFuelObservations(right.snapshot()))
+		})
+	}
+}
+
 func TestMultiTrapObserver_YieldResumeUsesResumedObserver(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
