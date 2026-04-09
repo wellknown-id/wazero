@@ -1518,6 +1518,83 @@ func TestFunctionListener_TrapObserverOrdering(t *testing.T) {
 	}
 }
 
+func TestFunctionListener_MultiTrapObserver_FuelExhausted(t *testing.T) {
+	if !platform.CompilerSupported() {
+		t.Skip("compiler is not supported on this host")
+	}
+
+	ctx := context.Background()
+	recorder := &orderedEventRecorder{}
+	leftEvents := &recordingFunctionListener{}
+	rightEvents := &recordingFunctionListener{}
+	instantiateCtx := experimental.WithFunctionListenerFactory(ctx, experimental.MultiFunctionListenerFactory(
+		newFunctionListenerFactory(&namedOrderedRecordingFunctionListener{
+			name:     "listener left",
+			recorder: recorder,
+			events:   leftEvents,
+		}),
+		newFunctionListenerFactory(&namedOrderedRecordingFunctionListener{
+			name:     "listener right",
+			recorder: recorder,
+			events:   rightEvents,
+		}),
+	))
+
+	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfigCompiler().WithFuel(1))
+	defer rt.Close(ctx)
+
+	mod, err := rt.InstantiateWithConfig(instantiateCtx, trapObserverFuelLoopBinary(), wazero.NewModuleConfig().WithName("fuel-guest"))
+	require.NoError(t, err)
+
+	trapLeft := &recordingTrapObserver{}
+	trapRight := &recordingTrapObserver{}
+	_, err = mod.ExportedFunction("run").Call(
+		experimental.WithTrapObserver(
+			ctx,
+			experimental.MultiTrapObserver(
+				experimental.TrapObserverFunc(func(ctx context.Context, observation experimental.TrapObservation) {
+					trapLeft.ObserveTrap(ctx, observation)
+					recorder.add("trap left %s", observation.Cause)
+				}),
+				experimental.TrapObserverFunc(func(ctx context.Context, observation experimental.TrapObservation) {
+					trapRight.ObserveTrap(ctx, observation)
+					recorder.add("trap right %s", observation.Cause)
+				}),
+			),
+		),
+	)
+	require.ErrorIs(t, err, wasmruntime.ErrRuntimeFuelExhausted)
+
+	cause, ok := experimental.TrapCauseOf(err)
+	require.True(t, ok)
+	require.Equal(t, experimental.TrapCauseFuelExhausted, cause)
+
+	wantEvents := []expectedListenerEvent{
+		{phase: "before", function: "run"},
+		{phase: "abort", function: "run", errIs: wasmruntime.ErrRuntimeFuelExhausted},
+	}
+	for _, events := range [][]listenerEvent{leftEvents.snapshot(), rightEvents.snapshot()} {
+		assertListenerEvents(t, events, wantEvents)
+		assertAbortTrapCauseClassification(t, events, experimental.TrapCauseFuelExhausted, true)
+		assertBeforeCompletionPairing(t, events)
+		assertBeforeCompletionStackPairing(t, events)
+	}
+
+	requireEquivalentTrapObservation(t, trapObservationSnapshot{
+		Cause:      experimental.TrapCauseFuelExhausted,
+		ModuleName: mod.Name(),
+	}, wasmruntime.ErrRuntimeFuelExhausted, trapLeft, trapRight)
+
+	assertOrderedEvents(t, recorder.snapshot(), []string{
+		"listener left before run",
+		"listener right before run",
+		"listener left abort run (fuel_exhausted)",
+		"listener right abort run (fuel_exhausted)",
+		"trap left fuel_exhausted",
+		"trap right fuel_exhausted",
+	})
+}
+
 func TestFunctionListener_PolicyObserverOrdering(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
