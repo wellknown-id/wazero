@@ -607,6 +607,67 @@ func TestMultiTrapObserver_YieldResumeUsesResumedObserver(t *testing.T) {
 	}
 }
 
+func TestMultiHostCallPolicyObserver_PolicyDeniedOrdering(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
+
+			ctx := context.Background()
+			rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg)
+			defer rt.Close(ctx)
+
+			hostCalled := false
+			_, err := rt.NewHostModuleBuilder("env").
+				NewFunctionBuilder().
+				WithFunc(func() { hostCalled = true }).
+				Export("check").
+				Instantiate(ctx)
+			require.NoError(t, err)
+
+			mod, err := rt.InstantiateWithConfig(ctx, trapObserverTestModuleBinary(), wazero.NewModuleConfig().WithName("guest"))
+			require.NoError(t, err)
+
+			left := &recordingHostCallPolicyObserver{}
+			right := &recordingHostCallPolicyObserver{}
+			var order []string
+			callCtx := experimental.WithHostCallPolicyObserver(
+				experimental.WithHostCallPolicy(ctx, experimental.HostCallPolicyFunc(
+					func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+						require.Equal(t, "guest", caller.Name())
+						require.Equal(t, "env.check", hostFunction.DebugName())
+						return false
+					},
+				)),
+				experimental.MultiHostCallPolicyObserver(
+					experimental.HostCallPolicyObserverFunc(func(ctx context.Context, observation experimental.HostCallPolicyObservation) {
+						left.ObserveHostCallPolicy(ctx, observation)
+						order = append(order, "left "+string(observation.Event))
+					}),
+					experimental.HostCallPolicyObserverFunc(func(ctx context.Context, observation experimental.HostCallPolicyObservation) {
+						right.ObserveHostCallPolicy(ctx, observation)
+						order = append(order, "right "+string(observation.Event))
+					}),
+				),
+			)
+
+			_, err = mod.ExportedFunction("run").Call(callCtx)
+			require.ErrorIs(t, err, wasmruntime.ErrRuntimePolicyDenied)
+			require.False(t, hostCalled)
+			require.Equal(t, []string{"left denied", "right denied"}, order)
+
+			for _, observer := range []*recordingHostCallPolicyObserver{left, right} {
+				observations := observer.snapshot()
+				require.Equal(t, 1, len(observations))
+				require.Equal(t, experimental.HostCallPolicyEventDenied, observations[0].Event)
+				require.Equal(t, "guest", observations[0].Module.Name())
+				require.Equal(t, "env.check", observations[0].HostFunction.DebugName())
+			}
+		})
+	}
+}
+
 func TestMultiHostCallPolicyObserver_PolicyDeniedAlsoNotifiesMultiTrapObserver(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
