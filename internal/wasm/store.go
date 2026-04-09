@@ -397,13 +397,20 @@ func (m *ModuleInstance) resolveImports(ctx context.Context, module *Module) (er
 	// Check if ctx contains an ImportResolver.
 	resolverCfg := experimental.GetImportResolverConfig(ctx)
 	var resolveImport experimental.ImportResolver
+	var acl *experimental.ImportACL
 	failClosed := false
 	if resolverCfg != nil {
 		resolveImport = resolverCfg.Resolver
+		acl = resolverCfg.ACL
 		failClosed = resolverCfg.FailClosed
 	}
 
 	for moduleName, imports := range module.ImportPerModule {
+		if acl != nil {
+			if err = acl.CheckImport(moduleName); err != nil {
+				return err
+			}
+		}
 		var importedModule *ModuleInstance
 		if resolveImport != nil {
 			if v := resolveImport(moduleName); v != nil {

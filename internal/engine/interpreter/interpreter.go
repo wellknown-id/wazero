@@ -14,6 +14,7 @@ import (
 
 	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/experimental"
+	"github.com/tetratelabs/wazero/internal/engine/yieldstate"
 	"github.com/tetratelabs/wazero/internal/expctxkeys"
 	"github.com/tetratelabs/wazero/internal/filecache"
 	"github.com/tetratelabs/wazero/internal/internalapi"
@@ -359,9 +360,7 @@ type interpreterResumer struct {
 	// ce is the call engine this resumer belongs to.
 	ce *callEngine
 
-	// cancelled tracks whether Cancel has been called.
-	cancelled atomic.Bool
-	used      atomic.Bool
+	lifecycle yieldstate.Lifecycle
 
 	expectedHostResults int
 	yieldCount          uint64
@@ -376,27 +375,23 @@ func (r *interpreterResumer) Resume(ctx context.Context, hostResults []uint64) (
 	if ctx == nil {
 		return nil, errors.New("cannot resume: context is nil")
 	}
-	if r.cancelled.Load() {
-		return nil, errors.New("cannot resume: resumer has been cancelled")
-	}
-	if err := r.moduleInstance.FailIfClosed(); err != nil {
-		if r.cancelled.CompareAndSwap(false, true) {
-			r.stack = nil
-			r.frames = nil
-			r.ce.yieldState.Store(yieldStateIdle)
-		}
-		return nil, err
-	}
 	if len(hostResults) != r.expectedHostResults {
 		return nil, fmt.Errorf("cannot resume: expected %d host results, but got %d", r.expectedHostResults, len(hostResults))
 	}
-	if !r.used.CompareAndSwap(false, true) {
-		panic("BUG: Resume called more than once on interpreterResumer")
+	if err := r.lifecycle.BeginResume(); err != nil {
+		return nil, err
 	}
+	defer r.lifecycle.FinishResume()
 
 	// Ensure only one goroutine can resume at a time.
 	if !r.ce.yieldState.CompareAndSwap(yieldStateSuspended, yieldStateResuming) {
 		panic("BUG: concurrent or invalid Resume call on interpreterResumer")
+	}
+	if err := r.moduleInstance.FailIfClosed(); err != nil {
+		r.stack = nil
+		r.frames = nil
+		r.ce.yieldState.Store(yieldStateIdle)
+		return nil, err
 	}
 	notifyYieldObserver(ctx, r.yieldObserverCtx, r.yieldObserver, r.moduleInstance, experimental.YieldEventResumed, r.yieldCount, r.expectedHostResults, r.yieldClock, r.yieldedAtNanos)
 
@@ -502,10 +497,7 @@ func (r *interpreterResumer) Resume(ctx context.Context, hostResults []uint64) (
 
 // Cancel implements experimental.Resumer.
 func (r *interpreterResumer) Cancel() {
-	if r.used.Load() {
-		return
-	}
-	if r.cancelled.CompareAndSwap(false, true) {
+	if r.lifecycle.Cancel() {
 		r.stack = nil
 		r.frames = nil
 		r.ce.yieldState.Store(yieldStateIdle)

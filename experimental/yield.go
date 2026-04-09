@@ -68,6 +68,8 @@ type Yielder interface {
 //     again, Resume returns a new *YieldError containing the next Resumer.
 //   - Validation failures before resumption (for example, nil ctx or wrong
 //     host result arity) leave the Resumer usable.
+//   - Once resumption starts, the current Resumer is spent even if the resumed
+//     execution traps, returns a module-close error, or yields again.
 //   - If the suspended module is closed before Resume, Resume returns the
 //     module close error and the Resumer becomes unusable.
 type Resumer interface {
@@ -84,10 +86,10 @@ type Resumer interface {
 	// case a new Resumer is available via the returned error.
 	//
 	// Returns an error if called with a nil context, after Cancel, after the
-	// suspended module has been closed, or with the wrong number of hostResults.
-	// These validation failures do not consume the Resumer.
-	//
-	// Panics if called concurrently or more than once.
+	// suspended module has been closed, with the wrong number of hostResults,
+	// concurrently with an in-flight Resume, or after the Resumer has already
+	// been used. Validation failures before resumption starts do not consume
+	// the Resumer.
 	Resume(ctx context.Context, hostResults []uint64) ([]uint64, error)
 
 	// Cancel releases the captured execution state without resuming.

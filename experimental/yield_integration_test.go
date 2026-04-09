@@ -118,6 +118,31 @@ func (f *contextCheckingYieldingHostFunc) Call(ctx context.Context, _ api.Module
 	stack[0] = 2
 }
 
+type blockingResumeHostFunc struct {
+	t             *testing.T
+	resumeStarted chan struct{}
+	releaseResume chan struct{}
+	calls         int
+}
+
+func (f *blockingResumeHostFunc) Call(ctx context.Context, _ api.Module, stack []uint64) {
+	f.calls++
+	switch f.calls {
+	case 1:
+		yielder := experimental.GetYielder(ctx)
+		if yielder == nil {
+			f.t.Fatal("expected yielder in context")
+		}
+		yielder.Yield()
+	case 2:
+		close(f.resumeStarted)
+		<-f.releaseResume
+		stack[0] = 2
+	default:
+		f.t.Fatalf("unexpected host call %d", f.calls)
+	}
+}
+
 func setupYieldTest(t *testing.T, cfg wazero.RuntimeConfig) (api.Module, wazero.Runtime, context.Context) {
 	return setupYieldTestWithHost(t, cfg, &yieldingHostFunc{t: t})
 }
@@ -369,11 +394,27 @@ func TestYield_ReyieldUsesFreshResumer(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, []uint64{42}, results)
 
-			panicErr := require.CapturePanic(func() {
-				_, _ = firstResumer.Resume(experimental.WithYielder(ctx), []uint64{1})
-			})
-			require.Error(t, panicErr)
-			require.Contains(t, panicErr.Error(), "Resume called more than once")
+			_, err = firstResumer.Resume(experimental.WithYielder(ctx), []uint64{1})
+			require.EqualError(t, err, "cannot resume: resumer has already been used")
+		})
+	}
+}
+
+func TestYield_ResumeSpentResumerReturnsError(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			mod, rt, ctx := setupYieldTest(t, ec.cfg)
+			defer rt.Close(ctx)
+
+			_, err := mod.ExportedFunction("run").Call(experimental.WithYielder(ctx))
+			resumer := requireYieldError(t, err).Resumer()
+
+			results, err := resumer.Resume(experimental.WithYielder(ctx), []uint64{42})
+			require.NoError(t, err)
+			require.Equal(t, []uint64{142}, results)
+
+			_, err = resumer.Resume(experimental.WithYielder(ctx), []uint64{42})
+			require.EqualError(t, err, "cannot resume: resumer has already been used")
 		})
 	}
 }
@@ -529,52 +570,46 @@ func TestYield_ResumeDoesNotLeakInitialTimeProviderOverride(t *testing.T) {
 	}
 }
 
-func TestYield_ConcurrentResumePanicsSecondCaller(t *testing.T) {
+func TestYield_ConcurrentResumeReturnsStateError(t *testing.T) {
 	type resumeOutcome struct {
-		results  []uint64
-		err      error
-		panicErr error
+		results []uint64
+		err     error
 	}
 
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
-			mod, rt, ctx := setupYieldTest(t, ec.cfg)
+			host := &blockingResumeHostFunc{
+				t:             t,
+				resumeStarted: make(chan struct{}),
+				releaseResume: make(chan struct{}),
+			}
+			mod, rt, ctx := setupYieldTestWithHost(t, ec.cfg, host)
 			defer rt.Close(ctx)
 
-			_, err := mod.ExportedFunction("run").Call(experimental.WithYielder(ctx))
+			_, err := mod.ExportedFunction("run_twice").Call(experimental.WithYielder(ctx))
 			resumer := requireYieldError(t, err).Resumer()
 
-			start := make(chan struct{})
 			outcomes := make(chan resumeOutcome, 2)
 
-			for i := 0; i < 2; i++ {
-				go func() {
-					<-start
-					var outcome resumeOutcome
-					outcome.panicErr = require.CapturePanic(func() {
-						outcome.results, outcome.err = resumer.Resume(experimental.WithYielder(ctx), []uint64{7})
-					})
-					outcomes <- outcome
-				}()
-			}
+			go func() {
+				results, err := resumer.Resume(experimental.WithYielder(ctx), []uint64{40})
+				outcomes <- resumeOutcome{results: results, err: err}
+			}()
 
-			close(start)
-			first := <-outcomes
+			<-host.resumeStarted
+
+			go func() {
+				results, err := resumer.Resume(experimental.WithYielder(ctx), []uint64{7})
+				outcomes <- resumeOutcome{results: results, err: err}
+			}()
+
 			second := <-outcomes
+			require.EqualError(t, second.err, "cannot resume: resumer is already being resumed")
 
-			var panicOutcome, successOutcome resumeOutcome
-			switch {
-			case first.panicErr != nil && second.panicErr == nil:
-				panicOutcome, successOutcome = first, second
-			case second.panicErr != nil && first.panicErr == nil:
-				panicOutcome, successOutcome = second, first
-			default:
-				t.Fatalf("expected one panic and one success, got first=%+v second=%+v", first, second)
-			}
-
-			require.Contains(t, panicOutcome.panicErr.Error(), "Resume called more than once")
-			require.NoError(t, successOutcome.err)
-			require.Equal(t, []uint64{107}, successOutcome.results)
+			close(host.releaseResume)
+			first := <-outcomes
+			require.NoError(t, first.err)
+			require.Equal(t, []uint64{42}, first.results)
 		})
 	}
 }

@@ -3,6 +3,7 @@ package experimental_test
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/tetratelabs/wazero"
@@ -37,6 +38,45 @@ func TestImportResolverConfig_NilDoesNothing(t *testing.T) {
 	}
 }
 
+func TestWithImportResolverACL_NilDoesNothing(t *testing.T) {
+	ctx := context.Background()
+
+	if result := experimental.WithImportResolverACL(ctx, nil); result != ctx {
+		t.Fatal("WithImportResolverACL(ctx, nil) should return the same context")
+	}
+
+	if result := experimental.WithImportResolverACL(ctx, experimental.NewImportACL()); result != ctx {
+		t.Fatal("WithImportResolverACL should ignore empty ACLs")
+	}
+}
+
+func TestImportResolverConfig_ACLOnlyRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	acl := experimental.NewImportACL().DenyModules("env")
+	cfgCtx := experimental.WithImportResolverConfig(ctx, experimental.ImportResolverConfig{
+		ACL: acl,
+	})
+
+	got := experimental.GetImportResolverConfig(cfgCtx)
+	require.NotNil(t, got)
+	require.True(t, got.ACL == acl)
+	require.True(t, experimental.GetImportResolver(cfgCtx) == nil)
+}
+
+func TestWithImportResolverACL_PreservesExistingResolver(t *testing.T) {
+	ctx := context.Background()
+	resolver := experimental.ImportResolver(func(string) api.Module { return nil })
+	acl := experimental.NewImportACL().AllowModules("env")
+
+	got := experimental.GetImportResolverConfig(experimental.WithImportResolverACL(
+		experimental.WithImportResolver(ctx, resolver),
+		acl,
+	))
+	require.NotNil(t, got)
+	require.True(t, reflect.ValueOf(got.Resolver).Pointer() == reflect.ValueOf(resolver).Pointer())
+	require.True(t, got.ACL == acl)
+}
+
 func TestImportResolver(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -58,6 +98,49 @@ func TestImportResolver(t *testing.T) {
 				})
 			},
 			wantResolvedCalls: 1,
+		},
+		{
+			name:             "acl allows fallback by exact name",
+			registerStoreEnv: true,
+			configureContext: func(ctx context.Context, _ api.Module) context.Context {
+				return experimental.WithImportResolverACL(ctx, experimental.NewImportACL().AllowModules("env"))
+			},
+			wantStoreCalls: 1,
+		},
+		{
+			name:             "fail closed blocks store fallback without resolver",
+			registerStoreEnv: true,
+			configureContext: func(ctx context.Context, _ api.Module) context.Context {
+				return experimental.WithImportResolverConfig(ctx, experimental.ImportResolverConfig{
+					ACL:        experimental.NewImportACL().AllowModules("env"),
+					FailClosed: true,
+				})
+			},
+			wantErrSubstring: "module[env] unresolved by import resolver",
+		},
+		{
+			name:             "acl denies store import by exact name",
+			registerStoreEnv: true,
+			configureContext: func(ctx context.Context, _ api.Module) context.Context {
+				return experimental.WithImportResolverACL(ctx, experimental.NewImportACL().DenyModules("env"))
+			},
+			wantErrSubstring: "module[env] denied by import ACL",
+		},
+		{
+			name:             "acl allowlist blocks unlisted import",
+			registerStoreEnv: true,
+			configureContext: func(ctx context.Context, _ api.Module) context.Context {
+				return experimental.WithImportResolverACL(ctx, experimental.NewImportACL().AllowModules("wasi_snapshot_preview1"))
+			},
+			wantErrSubstring: "module[env] not allowed by import ACL",
+		},
+		{
+			name:             "acl allows prefix match",
+			registerStoreEnv: true,
+			configureContext: func(ctx context.Context, _ api.Module) context.Context {
+				return experimental.WithImportResolverACL(ctx, experimental.NewImportACL().AllowModulePrefixes("en"))
+			},
+			wantStoreCalls: 1,
 		},
 		{
 			name:             "denial",
