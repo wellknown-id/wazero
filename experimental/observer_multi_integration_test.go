@@ -466,6 +466,54 @@ func TestMultiYieldObserverWithMultiHostCallPolicyObserver_YieldResumeLifecycle(
 	}
 }
 
+func TestMultiYieldObserverWithMultiTrapObserver_YieldResumeLifecycle(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			provider := newObservingTimeProvider()
+			mod, rt, ctx := setupYieldTest(t, ec.cfg.WithTimeProvider(provider))
+			defer rt.Close(ctx)
+
+			yieldLeft := &recordingYieldObserver{}
+			yieldRight := &recordingYieldObserver{}
+			trapLeft := &recordingTrapObserver{}
+			trapRight := &recordingTrapObserver{}
+			callCtx := experimental.WithYieldObserver(
+				experimental.WithTrapObserver(
+					experimental.WithYielder(ctx),
+					experimental.MultiTrapObserver(trapLeft, trapRight),
+				),
+				experimental.MultiYieldObserver(yieldLeft, yieldRight),
+			)
+
+			_, err := mod.ExportedFunction("run").Call(callCtx)
+			resumer := requireYieldError(t, err).Resumer()
+
+			results, err := resumer.Resume(callCtx, []uint64{42})
+			require.NoError(t, err)
+			require.Equal(t, []uint64{142}, results)
+
+			wantYield := []yieldObservationSnapshot{
+				{
+					Event:               experimental.YieldEventYielded,
+					YieldCount:          1,
+					ExpectedHostResults: 1,
+					SuspendedNanos:      0,
+				},
+				{
+					Event:               experimental.YieldEventResumed,
+					YieldCount:          1,
+					ExpectedHostResults: 1,
+					SuspendedNanos:      1_000_000,
+				},
+			}
+			require.Equal(t, wantYield, snapshotYieldObservations(yieldLeft.snapshot()))
+			require.Equal(t, wantYield, snapshotYieldObservations(yieldRight.snapshot()))
+			require.Zero(t, trapLeft.count())
+			require.Zero(t, trapRight.count())
+		})
+	}
+}
+
 func TestMultiYieldObserver_ReyieldUsesResumedObserver(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
