@@ -100,10 +100,10 @@ Harden the runtime by remaining completely unopinionated about system functional
 
 Turn prototypes into an experimental runtime that can be evaluated seriously.
 
-- [50%:bbe2d375] Add targeted tests for memory fault recovery, fuel exhaustion, async resumption, and policy enforcement.
+- [85%:16b42271] Add targeted tests for memory fault recovery, fuel exhaustion, async resumption, and policy enforcement.
 - [10%:dedf9a6c] Expand fuzzing and negative testing around host interfaces and trap paths.
 - [75%:1baa1d65] Document platform limitations, performance tradeoffs, and security assumptions.
-- [25%:dedf9a6c] Add observability hooks for trap causes, fuel usage, yield counts, and policy denials.
+- [70%:16b42271] Add observability hooks for trap causes, fuel usage, yield counts, and policy denials.
 - [95%:dedf9a6c] Keep the secure mode opt-in until behavior and compatibility are well understood.
 
 ### 7. Rust-port AOT packaging and native distribution
