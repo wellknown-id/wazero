@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -452,6 +453,200 @@ func TestFunctionListener_AbortTrapPaths(t *testing.T) {
 					require.False(t, ok, "host panic abort was misclassified as a trap: %v", event.err)
 				}
 			}
+		})
+	}
+}
+
+func TestFunctionListener_TrapObserverOrdering(t *testing.T) {
+	testCases := []struct {
+		name            string
+		cfg             func() wazero.RuntimeConfig
+		supported       func() bool
+		moduleBinary    func(t *testing.T) []byte
+		exportName      string
+		setupHost       func(t *testing.T, ctx context.Context, rt wazero.Runtime)
+		callCtx         func(context.Context) context.Context
+		wantErr         error
+		wantCause       experimental.TrapCause
+		wantSubsequence []string
+	}{
+		{
+			name:         "interpreter/unreachable",
+			cfg:          wazero.NewRuntimeConfigInterpreter,
+			supported:    func() bool { return true },
+			moduleBinary: func(t *testing.T) []byte { return trapRuntimeUnreachableBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeUnreachable,
+			wantCause:    experimental.TrapCauseUnreachable,
+			wantSubsequence: []string{
+				"listener before run",
+				"listener abort run (unreachable)",
+				"trap unreachable",
+			},
+		},
+		{
+			name:         "interpreter/memory-oob",
+			cfg:          wazero.NewRuntimeConfigInterpreter,
+			supported:    func() bool { return true },
+			moduleBinary: func(t *testing.T) []byte { return trapRuntimeOutOfBoundsLoadBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess,
+			wantCause:    experimental.TrapCauseOutOfBoundsMemoryAccess,
+			wantSubsequence: []string{
+				"listener before run",
+				"listener abort run (out_of_bounds_memory_access)",
+				"trap out_of_bounds_memory_access",
+			},
+		},
+		{
+			name:         "interpreter/policy-denied",
+			cfg:          wazero.NewRuntimeConfigInterpreter,
+			supported:    func() bool { return true },
+			moduleBinary: func(t *testing.T) []byte { return trapObserverTestModuleBinary() },
+			exportName:   "run",
+			setupHost: func(t *testing.T, ctx context.Context, rt wazero.Runtime) {
+				instantiateListenerHostModule(t, ctx, rt, func() {})
+			},
+			callCtx: func(ctx context.Context) context.Context {
+				return experimental.WithHostCallPolicy(ctx, experimental.HostCallPolicyFunc(
+					func(context.Context, api.Module, api.FunctionDefinition) bool { return false },
+				))
+			},
+			wantErr:   wasmruntime.ErrRuntimePolicyDenied,
+			wantCause: experimental.TrapCausePolicyDenied,
+			wantSubsequence: []string{
+				"listener before run",
+				"listener abort run (policy_denied)",
+				"trap policy_denied",
+			},
+		},
+		{
+			name:         "compiler/unreachable",
+			cfg:          wazero.NewRuntimeConfigCompiler,
+			supported:    platform.CompilerSupported,
+			moduleBinary: func(t *testing.T) []byte { return trapRuntimeUnreachableBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeUnreachable,
+			wantCause:    experimental.TrapCauseUnreachable,
+			wantSubsequence: []string{
+				"listener before run",
+				"listener abort run (unreachable)",
+				"trap unreachable",
+			},
+		},
+		{
+			name:         "compiler/policy-denied",
+			cfg:          wazero.NewRuntimeConfigCompiler,
+			supported:    platform.CompilerSupported,
+			moduleBinary: func(t *testing.T) []byte { return trapObserverTestModuleBinary() },
+			exportName:   "run",
+			setupHost: func(t *testing.T, ctx context.Context, rt wazero.Runtime) {
+				instantiateListenerHostModule(t, ctx, rt, func() {})
+			},
+			callCtx: func(ctx context.Context) context.Context {
+				return experimental.WithHostCallPolicy(ctx, experimental.HostCallPolicyFunc(
+					func(context.Context, api.Module, api.FunctionDefinition) bool { return false },
+				))
+			},
+			wantErr:   wasmruntime.ErrRuntimePolicyDenied,
+			wantCause: experimental.TrapCausePolicyDenied,
+			wantSubsequence: []string{
+				"listener before run",
+				"listener abort check (policy_denied)",
+				"listener abort run (policy_denied)",
+				"trap policy_denied",
+			},
+		},
+		{
+			name:         "compiler/fuel-exhausted",
+			cfg:          func() wazero.RuntimeConfig { return wazero.NewRuntimeConfigCompiler().WithFuel(1) },
+			supported:    platform.CompilerSupported,
+			moduleBinary: func(t *testing.T) []byte { return trapObserverFuelLoopBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeFuelExhausted,
+			wantCause:    experimental.TrapCauseFuelExhausted,
+			wantSubsequence: []string{
+				"listener before run",
+				"listener abort run (fuel_exhausted)",
+				"trap fuel_exhausted",
+			},
+		},
+		{
+			name:         "compiler/memory-fault",
+			cfg:          func() wazero.RuntimeConfig { return wazero.NewRuntimeConfigCompiler().WithSecureMode(true) },
+			supported:    supportsGuardedMemoryFaultTrap,
+			moduleBinary: trapRuntimeMemoryFaultFixture,
+			exportName:   "oob",
+			wantErr:      wasmruntime.ErrRuntimeMemoryFault,
+			wantCause:    experimental.TrapCauseMemoryFault,
+			wantSubsequence: []string{
+				"listener before oob",
+				"listener abort oob (memory_fault)",
+				"trap memory_fault",
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !tc.supported() {
+				t.Skip("trap path is not supported on this host")
+			}
+
+			ctx := context.Background()
+			recorder := &orderedEventRecorder{}
+			trapObserver := &recordingTrapObserver{}
+			instantiateCtx := experimental.WithFunctionListenerFactory(ctx, newFunctionListenerFactory(&orderedFunctionListener{recorder: recorder}))
+
+			rt := wazero.NewRuntimeWithConfig(ctx, tc.cfg())
+			defer rt.Close(ctx)
+
+			if tc.setupHost != nil {
+				tc.setupHost(t, instantiateCtx, rt)
+			}
+
+			mod := instantiateListenerGuestModule(t, instantiateCtx, rt, tc.moduleBinary(t))
+
+			callCtx := experimental.WithTrapObserver(ctx, experimental.TrapObserverFunc(func(ctx context.Context, observation experimental.TrapObservation) {
+				trapObserver.ObserveTrap(ctx, observation)
+				recorder.add("trap %s", observation.Cause)
+			}))
+			if tc.callCtx != nil {
+				callCtx = tc.callCtx(callCtx)
+			}
+
+			_, err := mod.ExportedFunction(tc.exportName).Call(callCtx)
+			require.ErrorIs(t, err, tc.wantErr)
+
+			cause, ok := experimental.TrapCauseOf(err)
+			require.True(t, ok)
+			require.Equal(t, tc.wantCause, cause)
+
+			observation := trapObserver.single(t)
+			require.Equal(t, tc.wantCause, observation.Cause)
+			require.ErrorIs(t, observation.Err, tc.wantErr)
+			require.Equal(t, "guest", observation.Module.Name())
+
+			events := recorder.snapshot()
+			assertOrderedSubsequence(t, events, tc.wantSubsequence)
+
+			trapEvent := fmt.Sprintf("trap %s", tc.wantCause)
+			trapCount, trapIndex, abortCount := 0, -1, 0
+			for i, event := range events {
+				if event == trapEvent {
+					trapCount++
+					trapIndex = i
+					continue
+				}
+				if strings.HasPrefix(event, "listener abort ") {
+					abortCount++
+					require.True(t, trapIndex == -1, "listener abort observed after trap event: %v", events)
+				}
+			}
+
+			require.Equal(t, 1, trapCount)
+			require.True(t, trapIndex >= 0)
+			require.True(t, abortCount > 0)
 		})
 	}
 }
