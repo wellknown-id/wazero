@@ -388,6 +388,84 @@ func TestMultiYieldObserverWithMultiYieldPolicyObserver_YieldResumeLifecycle(t *
 	}
 }
 
+func TestMultiYieldObserverWithMultiHostCallPolicyObserver_YieldResumeLifecycle(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			provider := newObservingTimeProvider()
+			mod, rt, ctx := setupYieldTest(t, ec.cfg.WithTimeProvider(provider))
+			defer rt.Close(ctx)
+
+			yieldLeft := &recordingYieldObserver{}
+			yieldRight := &recordingYieldObserver{}
+			policyLeft := &recordingHostCallPolicyObserver{}
+			policyRight := &recordingHostCallPolicyObserver{}
+			callCtx := experimental.WithYieldObserver(
+				experimental.WithHostCallPolicyObserver(
+					experimental.WithHostCallPolicy(
+						experimental.WithYielder(ctx),
+						experimental.HostCallPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+							require.Equal(t, mod.Name(), caller.Name())
+							require.Equal(t, "example.async_work", hostFunction.DebugName())
+							return true
+						}),
+					),
+					experimental.MultiHostCallPolicyObserver(policyLeft, policyRight),
+				),
+				experimental.MultiYieldObserver(yieldLeft, yieldRight),
+			)
+
+			_, err := mod.ExportedFunction("run_twice").Call(callCtx)
+			firstResumer := requireYieldError(t, err).Resumer()
+
+			_, err = firstResumer.Resume(callCtx, []uint64{40})
+			secondResumer := requireYieldError(t, err).Resumer()
+
+			results, err := secondResumer.Resume(callCtx, []uint64{2})
+			require.NoError(t, err)
+			require.Equal(t, []uint64{42}, results)
+
+			wantYield := []yieldObservationSnapshot{
+				{
+					Event:               experimental.YieldEventYielded,
+					YieldCount:          1,
+					ExpectedHostResults: 1,
+					SuspendedNanos:      0,
+				},
+				{
+					Event:               experimental.YieldEventResumed,
+					YieldCount:          1,
+					ExpectedHostResults: 1,
+					SuspendedNanos:      1_000_000,
+				},
+				{
+					Event:               experimental.YieldEventYielded,
+					YieldCount:          2,
+					ExpectedHostResults: 1,
+					SuspendedNanos:      0,
+				},
+				{
+					Event:               experimental.YieldEventResumed,
+					YieldCount:          2,
+					ExpectedHostResults: 1,
+					SuspendedNanos:      1_000_000,
+				},
+			}
+			require.Equal(t, wantYield, snapshotYieldObservations(yieldLeft.snapshot()))
+			require.Equal(t, wantYield, snapshotYieldObservations(yieldRight.snapshot()))
+
+			for _, observations := range [][]experimental.HostCallPolicyObservation{policyLeft.snapshot(), policyRight.snapshot()} {
+				require.Equal(t, 2, len(observations))
+				require.Equal(t, experimental.HostCallPolicyEventAllowed, observations[0].Event)
+				require.Equal(t, mod.Name(), observations[0].Module.Name())
+				require.Equal(t, "example.async_work", observations[0].HostFunction.DebugName())
+				require.Equal(t, experimental.HostCallPolicyEventAllowed, observations[1].Event)
+				require.Equal(t, mod.Name(), observations[1].Module.Name())
+				require.Equal(t, "example.async_work", observations[1].HostFunction.DebugName())
+			}
+		})
+	}
+}
+
 func TestMultiYieldObserver_ReyieldUsesResumedObserver(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
