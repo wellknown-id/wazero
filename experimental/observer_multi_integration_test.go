@@ -3,6 +3,8 @@ package experimental_test
 import (
 	"context"
 	"errors"
+	"os"
+	"runtime"
 	"testing"
 
 	"github.com/tetratelabs/wazero"
@@ -41,6 +43,17 @@ func snapshotFuelObservations(observations []experimental.FuelObservation) []fue
 		}
 	}
 	return snapshots
+}
+
+func requireEquivalentTrapObservation(t *testing.T, want trapObservationSnapshot, wantErr error, observers ...*recordingTrapObserver) {
+	t.Helper()
+
+	wantSnapshots := []trapObservationSnapshot{want}
+	for _, observer := range observers {
+		require.Equal(t, wantSnapshots, snapshotTrapObservations(observer))
+		observation := observer.single(t)
+		require.True(t, errors.Is(observation.Err, wantErr))
+	}
 }
 
 func TestMultiYieldObserver_ReyieldUsesResumedObserver(t *testing.T) {
@@ -222,14 +235,66 @@ func TestMultiHostCallPolicyObserver_PolicyDeniedAlsoNotifiesMultiTrapObserver(t
 				require.Equal(t, "env.check", observations[0].HostFunction.DebugName())
 			}
 
-			for _, observer := range []*recordingTrapObserver{trapLeft, trapRight} {
-				observation := observer.single(t)
-				require.Equal(t, experimental.TrapCausePolicyDenied, observation.Cause)
-				require.True(t, errors.Is(observation.Err, wasmruntime.ErrRuntimePolicyDenied))
-				require.Equal(t, "guest", observation.Module.Name())
-			}
+			requireEquivalentTrapObservation(t, trapObservationSnapshot{
+				Cause:        experimental.TrapCausePolicyDenied,
+				ModuleName:   "guest",
+				PolicyDenied: true,
+			}, wasmruntime.ErrRuntimePolicyDenied, trapLeft, trapRight)
 		})
 	}
+}
+
+func TestMultiTrapObserver_FuelExhausted(t *testing.T) {
+	if !platform.CompilerSupported() {
+		t.Skip("compiler is not supported on this host")
+	}
+
+	ctx := context.Background()
+	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfigCompiler().WithFuel(1))
+	defer rt.Close(ctx)
+
+	mod, err := rt.InstantiateWithConfig(ctx, trapObserverFuelLoopBinary(), wazero.NewModuleConfig().WithName("fuel-guest"))
+	require.NoError(t, err)
+
+	left := &recordingTrapObserver{}
+	right := &recordingTrapObserver{}
+	_, err = mod.ExportedFunction("run").Call(
+		experimental.WithTrapObserver(ctx, experimental.MultiTrapObserver(left, right)),
+	)
+	require.ErrorIs(t, err, wasmruntime.ErrRuntimeFuelExhausted)
+
+	requireEquivalentTrapObservation(t, trapObservationSnapshot{
+		Cause:      experimental.TrapCauseFuelExhausted,
+		ModuleName: "fuel-guest",
+	}, wasmruntime.ErrRuntimeFuelExhausted, left, right)
+}
+
+func TestMultiTrapObserver_MemoryFault(t *testing.T) {
+	if !platform.CompilerSupported() || runtime.GOOS != "linux" || (runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64") {
+		t.Skip("memory fault trap path is only expected on supported compiler targets")
+	}
+
+	ctx := context.Background()
+	bin, err := os.ReadFile("../testdata/oob_load.wasm")
+	require.NoError(t, err)
+
+	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfigCompiler().WithSecureMode(true))
+	defer rt.Close(ctx)
+
+	mod, err := rt.InstantiateWithConfig(ctx, bin, wazero.NewModuleConfig().WithName("secure-guest"))
+	require.NoError(t, err)
+
+	left := &recordingTrapObserver{}
+	right := &recordingTrapObserver{}
+	_, err = mod.ExportedFunction("oob").Call(
+		experimental.WithTrapObserver(ctx, experimental.MultiTrapObserver(left, right)),
+	)
+	require.ErrorIs(t, err, wasmruntime.ErrRuntimeMemoryFault)
+
+	requireEquivalentTrapObservation(t, trapObservationSnapshot{
+		Cause:      experimental.TrapCauseMemoryFault,
+		ModuleName: "secure-guest",
+	}, wasmruntime.ErrRuntimeMemoryFault, left, right)
 }
 
 func TestMultiYieldPolicyObserver_ResumeUsesResumedObserver(t *testing.T) {
