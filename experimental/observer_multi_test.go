@@ -4,6 +4,8 @@ import (
 	"context"
 	"slices"
 	"testing"
+
+	"github.com/tetratelabs/wazero/api"
 )
 
 func TestMultiTrapObserver(t *testing.T) {
@@ -33,6 +35,136 @@ func TestMultiTrapObserver(t *testing.T) {
 
 	if !slices.Equal(calls, []string{"first", "second"}) {
 		t.Fatalf("MultiTrapObserver calls = %v, want [first second]", calls)
+	}
+}
+
+func TestMultiHostCallPolicy(t *testing.T) {
+	ctx := context.Background()
+
+	var nilFunc HostCallPolicyFunc
+	var nilPtr *stubHostCallPolicy
+
+	if got := MultiHostCallPolicy(nil, nilFunc, nilPtr); got != nil {
+		t.Fatal("MultiHostCallPolicy should return nil when all policies are nil")
+	}
+
+	single := &stubHostCallPolicy{}
+	if got := MultiHostCallPolicy(nil, single, nilPtr); got != single {
+		t.Fatal("MultiHostCallPolicy should return the sole non-nil policy")
+	}
+
+	var calls []string
+	policy := MultiHostCallPolicy(
+		nil,
+		nilFunc,
+		nilPtr,
+		HostCallPolicyFunc(func(context.Context, api.Module, api.FunctionDefinition) bool {
+			calls = append(calls, "first")
+			return true
+		}),
+		HostCallPolicyFunc(func(context.Context, api.Module, api.FunctionDefinition) bool {
+			calls = append(calls, "second")
+			return true
+		}),
+	)
+	if !policy.AllowHostCall(ctx, nil, nil) {
+		t.Fatal("MultiHostCallPolicy should allow when all policies allow")
+	}
+
+	if !slices.Equal(calls, []string{"first", "second"}) {
+		t.Fatalf("MultiHostCallPolicy calls = %v, want [first second]", calls)
+	}
+}
+
+func TestMultiHostCallPolicy_ShortCircuitDeny(t *testing.T) {
+	ctx := context.Background()
+
+	var calls []string
+	policy := MultiHostCallPolicy(
+		HostCallPolicyFunc(func(context.Context, api.Module, api.FunctionDefinition) bool {
+			calls = append(calls, "first")
+			return true
+		}),
+		HostCallPolicyFunc(func(context.Context, api.Module, api.FunctionDefinition) bool {
+			calls = append(calls, "second")
+			return false
+		}),
+		HostCallPolicyFunc(func(context.Context, api.Module, api.FunctionDefinition) bool {
+			calls = append(calls, "third")
+			return true
+		}),
+	)
+	if policy.AllowHostCall(ctx, nil, nil) {
+		t.Fatal("MultiHostCallPolicy should deny when any policy denies")
+	}
+
+	if !slices.Equal(calls, []string{"first", "second"}) {
+		t.Fatalf("MultiHostCallPolicy calls = %v, want [first second]", calls)
+	}
+}
+
+func TestMultiYieldPolicy(t *testing.T) {
+	ctx := context.Background()
+
+	var nilFunc YieldPolicyFunc
+	var nilPtr *stubYieldPolicy
+
+	if got := MultiYieldPolicy(nil, nilFunc, nilPtr); got != nil {
+		t.Fatal("MultiYieldPolicy should return nil when all policies are nil")
+	}
+
+	single := &stubYieldPolicy{}
+	if got := MultiYieldPolicy(nil, single, nilPtr); got != single {
+		t.Fatal("MultiYieldPolicy should return the sole non-nil policy")
+	}
+
+	var calls []string
+	policy := MultiYieldPolicy(
+		nil,
+		nilFunc,
+		nilPtr,
+		YieldPolicyFunc(func(context.Context, api.Module, api.FunctionDefinition) bool {
+			calls = append(calls, "first")
+			return true
+		}),
+		YieldPolicyFunc(func(context.Context, api.Module, api.FunctionDefinition) bool {
+			calls = append(calls, "second")
+			return true
+		}),
+	)
+	if !policy.AllowYield(ctx, nil, nil) {
+		t.Fatal("MultiYieldPolicy should allow when all policies allow")
+	}
+
+	if !slices.Equal(calls, []string{"first", "second"}) {
+		t.Fatalf("MultiYieldPolicy calls = %v, want [first second]", calls)
+	}
+}
+
+func TestMultiYieldPolicy_ShortCircuitDeny(t *testing.T) {
+	ctx := context.Background()
+
+	var calls []string
+	policy := MultiYieldPolicy(
+		YieldPolicyFunc(func(context.Context, api.Module, api.FunctionDefinition) bool {
+			calls = append(calls, "first")
+			return true
+		}),
+		YieldPolicyFunc(func(context.Context, api.Module, api.FunctionDefinition) bool {
+			calls = append(calls, "second")
+			return false
+		}),
+		YieldPolicyFunc(func(context.Context, api.Module, api.FunctionDefinition) bool {
+			calls = append(calls, "third")
+			return true
+		}),
+	)
+	if policy.AllowYield(ctx, nil, nil) {
+		t.Fatal("MultiYieldPolicy should deny when any policy denies")
+	}
+
+	if !slices.Equal(calls, []string{"first", "second"}) {
+		t.Fatalf("MultiYieldPolicy calls = %v, want [first second]", calls)
 	}
 }
 

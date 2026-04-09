@@ -418,6 +418,80 @@ func TestMultiHostCallPolicyObserver_PolicyDeniedAlsoNotifiesMultiTrapObserver(t
 	}
 }
 
+func TestMultiHostCallPolicy_ComposesAllowAndDenyFlows(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
+
+			ctx := context.Background()
+			rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg)
+			defer rt.Close(ctx)
+
+			hostCalls := 0
+			_, err := rt.NewHostModuleBuilder("env").
+				NewFunctionBuilder().
+				WithFunc(func() { hostCalls++ }).
+				Export("check").
+				Instantiate(ctx)
+			require.NoError(t, err)
+
+			mod, err := rt.InstantiateWithConfig(ctx, trapObserverTestModuleBinary(), wazero.NewModuleConfig().WithName("guest"))
+			require.NoError(t, err)
+
+			_, err = mod.ExportedFunction("run").Call(
+				experimental.WithHostCallPolicy(
+					ctx,
+					experimental.MultiHostCallPolicy(
+						experimental.HostCallPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+							require.Equal(t, "guest", caller.Name())
+							require.Equal(t, "env.check", hostFunction.DebugName())
+							return true
+						}),
+						experimental.HostCallPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+							require.Equal(t, "guest", caller.Name())
+							require.Equal(t, "env.check", hostFunction.DebugName())
+							return true
+						}),
+					),
+				),
+			)
+			require.NoError(t, err)
+			require.Equal(t, 1, hostCalls)
+
+			trapObserver := &recordingTrapObserver{}
+			_, err = mod.ExportedFunction("run").Call(
+				experimental.WithTrapObserver(
+					experimental.WithHostCallPolicy(
+						ctx,
+						experimental.MultiHostCallPolicy(
+							experimental.HostCallPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+								require.Equal(t, "guest", caller.Name())
+								require.Equal(t, "env.check", hostFunction.DebugName())
+								return true
+							}),
+							experimental.HostCallPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+								require.Equal(t, "guest", caller.Name())
+								require.Equal(t, "env.check", hostFunction.DebugName())
+								return false
+							}),
+						),
+					),
+					trapObserver,
+				),
+			)
+			require.ErrorIs(t, err, wasmruntime.ErrRuntimePolicyDenied)
+			require.Equal(t, 1, hostCalls)
+
+			observation := trapObserver.single(t)
+			require.Equal(t, experimental.TrapCausePolicyDenied, observation.Cause)
+			require.True(t, errors.Is(observation.Err, wasmruntime.ErrRuntimePolicyDenied))
+			require.Equal(t, "guest", observation.Module.Name())
+		})
+	}
+}
+
 func TestMultiTrapObserver_FuelExhausted(t *testing.T) {
 	if !platform.CompilerSupported() {
 		t.Skip("compiler is not supported on this host")
@@ -469,6 +543,74 @@ func TestMultiTrapObserver_MemoryFault(t *testing.T) {
 		Cause:      experimental.TrapCauseMemoryFault,
 		ModuleName: "secure-guest",
 	}, wasmruntime.ErrRuntimeMemoryFault, left, right)
+}
+
+func TestMultiYieldPolicy_ComposesAllowAndDenyFlows(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			mod, rt, ctx := setupYieldTest(t, ec.cfg)
+			defer rt.Close(ctx)
+
+			allowConsulted := 0
+			_, err := mod.ExportedFunction("run").Call(
+				experimental.WithYieldPolicy(
+					experimental.WithYielder(ctx),
+					experimental.MultiYieldPolicy(
+						experimental.YieldPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+							allowConsulted++
+							require.Equal(t, mod.Name(), caller.Name())
+							require.Equal(t, "example.async_work", hostFunction.DebugName())
+							return true
+						}),
+						experimental.YieldPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+							allowConsulted++
+							require.Equal(t, mod.Name(), caller.Name())
+							require.Equal(t, "example.async_work", hostFunction.DebugName())
+							return true
+						}),
+					),
+				),
+			)
+			resumer := requireYieldError(t, err).Resumer()
+
+			results, err := resumer.Resume(experimental.WithYielder(ctx), []uint64{42})
+			require.NoError(t, err)
+			require.Equal(t, []uint64{142}, results)
+			require.Equal(t, 2, allowConsulted)
+
+			denyConsulted := 0
+			trapObserver := &recordingTrapObserver{}
+			_, err = mod.ExportedFunction("run").Call(
+				experimental.WithTrapObserver(
+					experimental.WithYieldPolicy(
+						experimental.WithYielder(ctx),
+						experimental.MultiYieldPolicy(
+							experimental.YieldPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+								denyConsulted++
+								require.Equal(t, mod.Name(), caller.Name())
+								require.Equal(t, "example.async_work", hostFunction.DebugName())
+								return true
+							}),
+							experimental.YieldPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+								denyConsulted++
+								require.Equal(t, mod.Name(), caller.Name())
+								require.Equal(t, "example.async_work", hostFunction.DebugName())
+								return false
+							}),
+						),
+					),
+					trapObserver,
+				),
+			)
+			require.ErrorIs(t, err, wasmruntime.ErrRuntimePolicyDenied)
+			require.Equal(t, 2, denyConsulted)
+
+			observation := trapObserver.single(t)
+			require.Equal(t, experimental.TrapCausePolicyDenied, observation.Cause)
+			require.True(t, errors.Is(observation.Err, wasmruntime.ErrRuntimePolicyDenied))
+			require.Equal(t, mod.Name(), observation.Module.Name())
+		})
+	}
 }
 
 func TestMultiYieldPolicyObserver_ResumeUsesResumedObserver(t *testing.T) {

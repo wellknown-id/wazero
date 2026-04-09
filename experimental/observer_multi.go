@@ -1,6 +1,60 @@
 package experimental
 
-import "context"
+import (
+	"context"
+
+	"github.com/tetratelabs/wazero/api"
+)
+
+// MultiHostCallPolicy constructs a HostCallPolicy which consults each non-nil
+// policy in order and denies on the first false result.
+func MultiHostCallPolicy(policies ...HostCallPolicy) HostCallPolicy {
+	filtered := compactObservers(policies, isNilHostCallPolicy)
+	switch len(filtered) {
+	case 0:
+		return nil
+	case 1:
+		return filtered[0]
+	default:
+		return multiHostCallPolicy(filtered)
+	}
+}
+
+type multiHostCallPolicy []HostCallPolicy
+
+func (multi multiHostCallPolicy) AllowHostCall(ctx context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+	for _, policy := range multi {
+		if !policy.AllowHostCall(ctx, caller, hostFunction) {
+			return false
+		}
+	}
+	return true
+}
+
+// MultiYieldPolicy constructs a YieldPolicy which consults each non-nil policy
+// in order and denies on the first false result.
+func MultiYieldPolicy(policies ...YieldPolicy) YieldPolicy {
+	filtered := compactObservers(policies, isNilYieldPolicy)
+	switch len(filtered) {
+	case 0:
+		return nil
+	case 1:
+		return filtered[0]
+	default:
+		return multiYieldPolicy(filtered)
+	}
+}
+
+type multiYieldPolicy []YieldPolicy
+
+func (multi multiYieldPolicy) AllowYield(ctx context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+	for _, policy := range multi {
+		if !policy.AllowYield(ctx, caller, hostFunction) {
+			return false
+		}
+	}
+	return true
+}
 
 // MultiTrapObserver constructs a TrapObserver which invokes each non-nil
 // observer in order.
