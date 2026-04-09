@@ -251,6 +251,9 @@ impl CompilerModuleEngine {
             .shared_functions
             .memory_notify_ptr()
             .unwrap_or(0);
+        if self.parent.fuel_enabled {
+            call_engine.exec_ctx.fuel = self.parent.fuel;
+        }
         call_engine
     }
 
@@ -648,5 +651,27 @@ mod tests {
         let mut stack = [41u64];
         let results = handle.call(&mut stack).unwrap();
         assert_eq!(results, &[42]);
+    }
+
+    #[test]
+    fn local_function_initializes_execution_context_fuel_when_enabled() {
+        let module = Module {
+            type_section: vec![FunctionType::default()],
+            function_section: vec![0],
+            code_section: vec![Code::default()],
+            ..Module::default()
+        };
+        let mut parent = (*compiled_module_for(&module)).clone();
+        parent.fuel_enabled = true;
+        parent.fuel = 7;
+        let parent = Arc::new(parent);
+        let mut instance = ModuleInstance::default();
+        instance.source = module;
+        let mut engine = CompilerModuleEngine::new(parent, instance);
+        engine.init_opaque();
+
+        let handle = engine.new_compiler_function(0);
+
+        assert_eq!(handle.exec_ctx.fuel, 7);
     }
 }

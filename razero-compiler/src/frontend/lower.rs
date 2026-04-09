@@ -2,7 +2,9 @@ use crate::frontend::{function_index_to_func_ref, Compiler, ControlFrame, Contro
 use crate::ssa::{
     BasicBlock, FloatCmpCond, IntegerCmpCond, Opcode, SourceOffset, Type, Value, Values,
 };
-use crate::wazevoapi::offsetdata::EXECUTION_CONTEXT_OFFSET_CALLER_MODULE_CONTEXT_PTR;
+use crate::wazevoapi::offsetdata::{
+    EXECUTION_CONTEXT_OFFSET_CALLER_MODULE_CONTEXT_PTR, EXECUTION_CONTEXT_OFFSET_FUEL,
+};
 use crate::wazevoapi::{
     ExitCode, FUNCTION_INSTANCE_EXECUTABLE_OFFSET,
     FUNCTION_INSTANCE_MODULE_CONTEXT_OPAQUE_PTR_OFFSET, FUNCTION_INSTANCE_TYPE_ID_OFFSET,
@@ -279,7 +281,7 @@ impl<'a> Compiler<'a> {
                     let args = self.n_peek_dup(block_type.params.len());
                     self.insert_jump_to_block(args, loop_header);
                     self.switch_to(original_len, loop_header);
-                    self.insert_termination_check();
+                    self.insert_loop_header_checks();
                 }
             }
             OPCODE_IF => {
@@ -826,6 +828,46 @@ impl<'a> Compiler<'a> {
         self.ssa_builder.instruction(id).return_()
     }
 
+    fn insert_loop_header_checks(&mut self) {
+        self.insert_loop_fuel_check();
+        self.insert_termination_check();
+    }
+
+    fn insert_loop_fuel_check(&mut self) {
+        if !self.fuel_enabled {
+            return;
+        }
+
+        let remaining = self.emit_load(
+            self.exec_ctx_ptr_value,
+            EXECUTION_CONTEXT_OFFSET_FUEL.u32(),
+            Type::I64,
+        );
+        let decrement = self.emit_iconst64(1);
+        let decremented = self.emit_binary(
+            Opcode::Isub,
+            remaining,
+            decrement,
+            Type::I64,
+        );
+        self.emit_store(
+            decremented,
+            self.exec_ctx_ptr_value,
+            EXECUTION_CONTEXT_OFFSET_FUEL.u32(),
+        );
+        let zero = self.emit_iconst64(0);
+        let exhausted = self.emit_icmp(
+            decremented,
+            zero,
+            IntegerCmpCond::SignedLessThan,
+        );
+        self.emit_exit_if_true_with_code(
+            self.exec_ctx_ptr_value,
+            exhausted,
+            ExitCode::FUEL_EXHAUSTED,
+        );
+    }
+
     fn insert_termination_check(&mut self) {
         if !self.ensure_termination {
             return;
@@ -1016,6 +1058,18 @@ mod tests {
         module: &Module,
         ensure_termination: bool,
     ) -> Compiler<'_> {
+        compiler_for_with_flags(module, ensure_termination, false)
+    }
+
+    fn compiler_for_with_fuel_enabled(module: &Module, fuel_enabled: bool) -> Compiler<'_> {
+        compiler_for_with_flags(module, false, fuel_enabled)
+    }
+
+    fn compiler_for_with_flags(
+        module: &Module,
+        ensure_termination: bool,
+        fuel_enabled: bool,
+    ) -> Compiler<'_> {
         Compiler::new(
             module,
             Builder::new(),
@@ -1023,7 +1077,7 @@ mod tests {
             ensure_termination,
             false,
             false,
-            false,
+            fuel_enabled,
             false,
         )
     }
@@ -1179,6 +1233,31 @@ mod tests {
         assert!(formatted.contains(&format!("Load exec_ctx, {offset:#x}")));
         assert!(formatted.contains("CallIndirect sig1,"));
         assert!(formatted.contains("exec_ctx"));
+    }
+
+    #[test]
+    fn lowers_loop_header_fuel_check_when_fuel_is_enabled() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOOP, 0x40, OPCODE_BR, 0, OPCODE_END, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for_with_fuel_enabled(&module, true);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        let formatted = compiler.format();
+        let fuel_offset = EXECUTION_CONTEXT_OFFSET_FUEL.u32();
+        assert!(formatted.contains(&format!("Load exec_ctx, {fuel_offset:#x}")));
+        assert!(formatted.contains("Store v"));
+        assert!(formatted.contains(&format!(", exec_ctx, {fuel_offset:#x}")));
+        assert!(formatted.contains("ExitIfTrueWithCode"));
+        assert!(formatted.contains("fuel_exhausted"));
     }
 
     #[test]
