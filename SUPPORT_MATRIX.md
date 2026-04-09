@@ -100,6 +100,8 @@ allowed host function later calls `Yield()`.
 - If the ACL permits the import, `Resolver` runs next.
 - Store fallback happens only when `Resolver` is nil or returns nil and
   `FailClosed` is false.
+- `WithImportResolverObserver` reports ACL allow/deny decisions, resolver hits,
+  store fallback, and fail-closed denial during instantiation.
 - `WithImportResolverACL` preserves an existing resolver while adding ACL state.
   `WithImportResolverConfig` replaces the whole import-resolution config for
   that derived context.

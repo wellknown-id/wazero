@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/tetratelabs/wazero"
@@ -201,6 +202,133 @@ func TestImportResolver(t *testing.T) {
 
 			require.Equal(t, tc.wantStoreCalls, storeCalls)
 			require.Equal(t, tc.wantResolvedCalls, resolvedCalls)
+		})
+	}
+}
+
+type recordingImportResolverObserver struct {
+	mu           sync.Mutex
+	observations []experimental.ImportResolverObservation
+}
+
+func (r *recordingImportResolverObserver) ObserveImportResolution(_ context.Context, observation experimental.ImportResolverObservation) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.observations = append(r.observations, observation)
+}
+
+func (r *recordingImportResolverObserver) snapshot() []experimental.ImportResolverObservation {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]experimental.ImportResolverObservation, len(r.observations))
+	copy(out, r.observations)
+	return out
+}
+
+func TestImportResolverObserver(t *testing.T) {
+	tests := []struct {
+		name             string
+		registerStoreEnv bool
+		configureContext func(context.Context, api.Module) context.Context
+		wantEvents       []experimental.ImportResolverEvent
+		wantErrSubstring string
+		wantResolvedName string
+	}{
+		{
+			name:             "acl allow then resolver success",
+			registerStoreEnv: false,
+			configureContext: func(ctx context.Context, resolved api.Module) context.Context {
+				return experimental.WithImportResolverConfig(ctx, experimental.ImportResolverConfig{
+					ACL: experimental.NewImportACL().AllowModules("env"),
+					Resolver: func(name string) api.Module {
+						if name == "env" {
+							return resolved
+						}
+						return nil
+					},
+				})
+			},
+			wantEvents:       []experimental.ImportResolverEvent{experimental.ImportResolverEventACLAllowed, experimental.ImportResolverEventResolverResolved},
+			wantResolvedName: "resolved-env",
+		},
+		{
+			name:             "acl deny",
+			registerStoreEnv: true,
+			configureContext: func(ctx context.Context, _ api.Module) context.Context {
+				return experimental.WithImportResolverConfig(ctx, experimental.ImportResolverConfig{
+					ACL: experimental.NewImportACL().DenyModules("env"),
+					Resolver: func(string) api.Module {
+						t.Fatal("resolver should not run after ACL denial")
+						return nil
+					},
+				})
+			},
+			wantEvents:       []experimental.ImportResolverEvent{experimental.ImportResolverEventACLDenied},
+			wantErrSubstring: "module[env] denied by import ACL",
+		},
+		{
+			name:             "store fallback",
+			registerStoreEnv: true,
+			configureContext: func(ctx context.Context, _ api.Module) context.Context {
+				return experimental.WithImportResolverACL(ctx, experimental.NewImportACL().AllowModules("env"))
+			},
+			wantEvents:       []experimental.ImportResolverEvent{experimental.ImportResolverEventACLAllowed, experimental.ImportResolverEventStoreFallback},
+			wantResolvedName: "env",
+		},
+		{
+			name:             "fail closed denial",
+			registerStoreEnv: true,
+			configureContext: func(ctx context.Context, _ api.Module) context.Context {
+				return experimental.WithImportResolverConfig(ctx, experimental.ImportResolverConfig{
+					ACL:        experimental.NewImportACL().AllowModules("env"),
+					FailClosed: true,
+				})
+			},
+			wantEvents:       []experimental.ImportResolverEvent{experimental.ImportResolverEventACLAllowed, experimental.ImportResolverEventFailClosedDenied},
+			wantErrSubstring: "module[env] unresolved by import resolver",
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+
+			r := wazero.NewRuntime(ctx)
+			defer r.Close(ctx)
+
+			if tc.registerStoreEnv {
+				_, err := instantiateStartModule(ctx, r, "env", func(context.Context) {})
+				require.NoError(t, err)
+			}
+
+			resolved, err := instantiateStartModule(ctx, r, "resolved-env", func(context.Context) {})
+			require.NoError(t, err)
+
+			modMain, err := r.CompileModule(ctx, testImportResolverModule())
+			require.NoError(t, err)
+
+			observer := &recordingImportResolverObserver{}
+			callCtx := experimental.WithImportResolverObserver(tc.configureContext(ctx, resolved), observer)
+			_, err = r.InstantiateModule(callCtx, modMain, wazero.NewModuleConfig().WithName("guest"))
+			if tc.wantErrSubstring != "" {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tc.wantErrSubstring)
+			} else {
+				require.NoError(t, err)
+			}
+
+			observations := observer.snapshot()
+			require.Equal(t, len(tc.wantEvents), len(observations))
+			for i, wantEvent := range tc.wantEvents {
+				require.Equal(t, wantEvent, observations[i].Event)
+				require.Equal(t, "guest", observations[i].Module.Name())
+				require.Equal(t, "env", observations[i].ImportModule)
+			}
+			if tc.wantResolvedName != "" {
+				require.NotNil(t, observations[len(observations)-1].ResolvedModule)
+				require.Equal(t, tc.wantResolvedName, observations[len(observations)-1].ResolvedModule.Name())
+			}
 		})
 	}
 }

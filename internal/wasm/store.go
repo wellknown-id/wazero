@@ -414,23 +414,28 @@ func (m *ModuleInstance) resolveImports(ctx context.Context, module *Module) (er
 	for moduleName, imports := range module.ImportPerModule {
 		if acl != nil {
 			if err = acl.CheckImport(moduleName); err != nil {
+				notifyImportResolverObserver(ctx, m, moduleName, nil, experimental.ImportResolverEventACLDenied)
 				return err
 			}
+			notifyImportResolverObserver(ctx, m, moduleName, nil, experimental.ImportResolverEventACLAllowed)
 		}
 		var importedModule *ModuleInstance
 		if resolveImport != nil {
 			if v := resolveImport(moduleName); v != nil {
 				importedModule = v.(*ModuleInstance)
+				notifyImportResolverObserver(ctx, m, moduleName, importedModule, experimental.ImportResolverEventResolverResolved)
 			}
 		}
 		if importedModule == nil {
 			if failClosed {
+				notifyImportResolverObserver(ctx, m, moduleName, nil, experimental.ImportResolverEventFailClosedDenied)
 				return fmt.Errorf("module[%s] unresolved by import resolver", moduleName)
 			}
 			importedModule, err = m.s.module(moduleName)
 			if err != nil {
 				return err
 			}
+			notifyImportResolverObserver(ctx, m, moduleName, importedModule, experimental.ImportResolverEventStoreFallback)
 		}
 
 		for _, i := range imports {
@@ -517,6 +522,25 @@ func (m *ModuleInstance) resolveImports(ctx context.Context, module *Module) (er
 		}
 	}
 	return
+}
+
+func notifyImportResolverObserver(
+	ctx context.Context,
+	module *ModuleInstance,
+	importModule string,
+	resolvedModule api.Module,
+	event experimental.ImportResolverEvent,
+) {
+	observer := experimental.GetImportResolverObserver(ctx)
+	if observer == nil {
+		return
+	}
+	observer.ObserveImportResolution(ctx, experimental.ImportResolverObservation{
+		Module:         module,
+		ImportModule:   importModule,
+		ResolvedModule: resolvedModule,
+		Event:          event,
+	})
 }
 
 func errorMinSizeMismatch(i *Import, expected, actual uint32) error {
