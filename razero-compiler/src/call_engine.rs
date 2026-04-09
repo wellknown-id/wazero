@@ -315,10 +315,13 @@ impl CallEngine {
                 ExitCode::UNREACHABLE => {
                     return Err(CallEngineError::Runtime(wasmruntime::UNREACHABLE));
                 }
-                ExitCode::MEMORY_OUT_OF_BOUNDS | ExitCode::MEMORY_FAULT => {
+                ExitCode::MEMORY_OUT_OF_BOUNDS => {
                     return Err(CallEngineError::Runtime(
                         wasmruntime::OUT_OF_BOUNDS_MEMORY_ACCESS,
                     ));
+                }
+                ExitCode::MEMORY_FAULT => {
+                    return Err(CallEngineError::Runtime(wasmruntime::MEMORY_FAULT));
                 }
                 ExitCode::TABLE_OUT_OF_BOUNDS | ExitCode::INDIRECT_CALL_NULL_POINTER => {
                     return Err(CallEngineError::Runtime(wasmruntime::INVALID_TABLE_ACCESS));
@@ -842,6 +845,10 @@ mod tests {
             err,
             CallEngineError::Runtime(wasmruntime::OUT_OF_BOUNDS_MEMORY_ACCESS)
         );
+
+        call_engine.exec_ctx.exit_code = ExitCode::MEMORY_FAULT;
+        let err = call_engine.run_exit_code_loop(&mut []).unwrap_err();
+        assert_eq!(err, CallEngineError::Runtime(wasmruntime::MEMORY_FAULT));
     }
 
     #[test]
