@@ -74,6 +74,40 @@ func (r *recordingFuelObserver) snapshot() []experimental.FuelObservation {
 	return out
 }
 
+type fuelAdjustingYieldingHostFunc struct {
+	t                    *testing.T
+	expectedFuelObserver experimental.FuelObserver
+	adjustment           int64
+	calls                int
+	beforeAdjustment     int64
+	afterAdjustment      int64
+}
+
+func (f *fuelAdjustingYieldingHostFunc) Call(ctx context.Context, _ api.Module, stack []uint64) {
+	f.calls++
+	switch f.calls {
+	case 1:
+		yielder := experimental.GetYielder(ctx)
+		if yielder == nil {
+			f.t.Fatal("expected yielder in context")
+		}
+		yielder.Yield()
+	case 2:
+		if got := experimental.GetFuelObserver(ctx); got != f.expectedFuelObserver {
+			f.t.Fatalf("fuel observer = %#v, want %#v", got, f.expectedFuelObserver)
+		}
+		var err error
+		f.beforeAdjustment, err = experimental.RemainingFuel(ctx)
+		require.NoError(f.t, err)
+		require.NoError(f.t, experimental.AddFuel(ctx, f.adjustment))
+		f.afterAdjustment, err = experimental.RemainingFuel(ctx)
+		require.NoError(f.t, err)
+		stack[0] = 2
+	default:
+		f.t.Fatalf("unexpected host call %d", f.calls)
+	}
+}
+
 func TestWithFuel_InterpreterExposesFuelAccessor(t *testing.T) {
 	ctx := context.Background()
 	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfigInterpreter().WithFuel(5))
@@ -332,6 +366,142 @@ func TestFuelObserver_Exhaustion(t *testing.T) {
 			require.True(t, observations[1].Consumed >= observations[1].Budget)
 			require.True(t, observations[1].Remaining <= 0)
 			require.Equal(t, "fuel-loop", observations[1].Module.Name())
+		})
+	}
+}
+
+func TestFuelObserver_YieldResumeLifecycle(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			ctx := context.Background()
+			mod, rt, _ := setupYieldTest(t, ec.cfg)
+			defer rt.Close(ctx)
+
+			observer := &recordingFuelObserver{}
+			ctrl := experimental.NewSimpleFuelController(20)
+			callCtx := experimental.WithFuelObserver(
+				experimental.WithFuelController(
+					experimental.WithYielder(ctx),
+					ctrl,
+				),
+				observer,
+			)
+
+			_, err := mod.ExportedFunction("run").Call(callCtx)
+			resumer := requireYieldError(t, err).Resumer()
+
+			observations := observer.snapshot()
+			require.Equal(t, 1, len(observations))
+			require.Equal(t, experimental.FuelEventBudgeted, observations[0].Event)
+			require.Equal(t, int64(20), observations[0].Budget)
+			require.Equal(t, int64(20), observations[0].Remaining)
+
+			results, err := resumer.Resume(experimental.WithYielder(ctx), []uint64{42})
+			require.NoError(t, err)
+			require.Equal(t, []uint64{142}, results)
+
+			observations = observer.snapshot()
+			require.Equal(t, 2, len(observations))
+			require.Equal(t, experimental.FuelEventConsumed, observations[1].Event)
+			require.Equal(t, int64(20), observations[1].Budget)
+			require.Equal(t, observations[1].Consumed, ctrl.TotalConsumed())
+			require.Equal(t, observations[1].Budget-observations[1].Consumed, observations[1].Remaining)
+		})
+	}
+}
+
+func TestFuelObserver_YieldResumeUsesResumedObserver(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			ctx := context.Background()
+			host := &fuelAdjustingYieldingHostFunc{t: t, adjustment: 5}
+			mod, rt, _ := setupYieldTestWithHost(t, ec.cfg, host)
+			defer rt.Close(ctx)
+
+			initialObserver := &recordingFuelObserver{}
+			ctrl := experimental.NewSimpleFuelController(20)
+			_, err := mod.ExportedFunction("run_twice").Call(
+				experimental.WithFuelObserver(
+					experimental.WithFuelController(
+						experimental.WithYielder(ctx),
+						ctrl,
+					),
+					initialObserver,
+				),
+			)
+			firstResumer := requireYieldError(t, err).Resumer()
+
+			resumeObserver := &recordingFuelObserver{}
+			host.expectedFuelObserver = resumeObserver
+			results, err := firstResumer.Resume(
+				experimental.WithFuelObserver(experimental.WithYielder(ctx), resumeObserver),
+				[]uint64{40},
+			)
+			require.NoError(t, err)
+			require.Equal(t, []uint64{42}, results)
+			require.Equal(t, host.beforeAdjustment+int64(5), host.afterAdjustment)
+
+			initialObservations := initialObserver.snapshot()
+			require.Equal(t, 1, len(initialObservations))
+			require.Equal(t, experimental.FuelEventBudgeted, initialObservations[0].Event)
+			require.Equal(t, int64(20), initialObservations[0].Budget)
+
+			resumeObservations := resumeObserver.snapshot()
+			require.Equal(t, 2, len(resumeObservations))
+			require.Equal(t, experimental.FuelEventRecharged, resumeObservations[0].Event)
+			require.Equal(t, int64(5), resumeObservations[0].Delta)
+			require.Equal(t, host.afterAdjustment, resumeObservations[0].Remaining)
+			require.Equal(t, experimental.FuelEventConsumed, resumeObservations[1].Event)
+			require.Equal(t, int64(25), resumeObservations[1].Budget)
+			require.Equal(t, resumeObservations[1].Consumed, ctrl.TotalConsumed())
+		})
+	}
+}
+
+func TestFuelObserver_YieldReyieldUsesResumedObserver(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			ctx := context.Background()
+			mod, rt, _ := setupYieldTest(t, ec.cfg)
+			defer rt.Close(ctx)
+
+			initialObserver := &recordingFuelObserver{}
+			ctrl := experimental.NewSimpleFuelController(20)
+			_, err := mod.ExportedFunction("run_twice").Call(
+				experimental.WithFuelObserver(
+					experimental.WithFuelController(
+						experimental.WithYielder(ctx),
+						ctrl,
+					),
+					initialObserver,
+				),
+			)
+			firstResumer := requireYieldError(t, err).Resumer()
+
+			resumeObserver := &recordingFuelObserver{}
+			_, err = firstResumer.Resume(
+				experimental.WithFuelObserver(experimental.WithYielder(ctx), resumeObserver),
+				[]uint64{40},
+			)
+			secondYield := requireYieldError(t, err)
+
+			require.Zero(t, len(resumeObserver.snapshot()))
+
+			results, err := secondYield.Resumer().Resume(experimental.WithYielder(ctx), []uint64{2})
+			require.NoError(t, err)
+			require.Equal(t, []uint64{42}, results)
+
+			initialObservations := initialObserver.snapshot()
+			require.Equal(t, 1, len(initialObservations))
+			require.Equal(t, experimental.FuelEventBudgeted, initialObservations[0].Event)
+			require.Equal(t, int64(20), initialObservations[0].Budget)
+
+			resumeObservations := resumeObserver.snapshot()
+			require.Equal(t, 1, len(resumeObservations))
+			require.Equal(t, experimental.FuelEventConsumed, resumeObservations[0].Event)
+			require.Equal(t, int64(20), resumeObservations[0].Budget)
+			require.Equal(t, resumeObservations[0].Consumed, ctrl.TotalConsumed())
+			require.Equal(t, resumeObservations[0].Budget-resumeObservations[0].Consumed, resumeObservations[0].Remaining)
 		})
 	}
 }
