@@ -365,7 +365,12 @@ impl BackendMachine for Amd64Machine {
                     instruction.u1,
                 ));
             }
-            Opcode::Iadd | Opcode::Isub | Opcode::Imul => {
+            Opcode::Iadd
+            | Opcode::Isub
+            | Opcode::Imul
+            | Opcode::Band
+            | Opcode::Bor
+            | Opcode::Bxor => {
                 let dst = self.compiler().v_reg_of(instruction.return_());
                 let lhs = self.compiler().v_reg_of(instruction.v);
                 let rhs = self.compiler().v_reg_of(instruction.v2);
@@ -373,13 +378,16 @@ impl BackendMachine for Amd64Machine {
                 let op = match instruction.opcode {
                     Opcode::Iadd => super::AluRmiROpcode::Add,
                     Opcode::Isub => super::AluRmiROpcode::Sub,
+                    Opcode::Band => super::AluRmiROpcode::And,
+                    Opcode::Bor => super::AluRmiROpcode::Or,
+                    Opcode::Bxor => super::AluRmiROpcode::Xor,
                     Opcode::Imul => super::AluRmiROpcode::Mul,
                     _ => unreachable!(),
                 };
                 let lhs_def = self.compiler().value_definition(instruction.v);
                 let rhs_def = self.compiler().value_definition(instruction.v2);
                 match instruction.opcode {
-                    Opcode::Iadd | Opcode::Imul => {
+                    Opcode::Iadd | Opcode::Imul | Opcode::Band | Opcode::Bor | Opcode::Bxor => {
                         if self.compiler().match_instr(rhs_def, Opcode::Iconst) {
                             let imm = self
                                 .compiler()
@@ -898,5 +906,47 @@ mod tests {
 
         let bytes = m.encode_all().unwrap();
         assert_eq!(bytes, vec![0xC3, 0xE9, 0xFA, 0xFF, 0xFF, 0xFF]);
+    }
+
+    fn lower_int_binary_opcode(opcode: Opcode) -> String {
+        let mut m = Amd64Machine::new();
+        m.start_lowering_function(BasicBlockId(0));
+        m.start_block(BasicBlockId(0));
+
+        let mut compiler = Box::new(TestCompilerContext::default());
+        compiler.regs = vec![
+            VReg::from_real_reg(1, RegType::Int),
+            VReg::from_real_reg(2, RegType::Int),
+            VReg::from_real_reg(4, RegType::Int),
+        ];
+        let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
+        m.set_compiler(ptr);
+
+        let mut instruction = crate::ssa::Instruction::new().with_opcode(opcode);
+        instruction.v = Value(0).with_type(Type::I64);
+        instruction.v2 = Value(1).with_type(Type::I64);
+        instruction.r_value = Value(2).with_type(Type::I64);
+        instruction.typ = Type::I64;
+
+        m.lower_instr(&instruction);
+        m.format()
+    }
+
+    #[test]
+    fn lowers_band_to_amd64_and() {
+        let formatted = lower_int_binary_opcode(Opcode::Band);
+        assert!(formatted.contains("and "));
+    }
+
+    #[test]
+    fn lowers_bor_to_amd64_or() {
+        let formatted = lower_int_binary_opcode(Opcode::Bor);
+        assert!(formatted.contains("or "));
+    }
+
+    #[test]
+    fn lowers_bxor_to_amd64_xor() {
+        let formatted = lower_int_binary_opcode(Opcode::Bxor);
+        assert!(formatted.contains("xor "));
     }
 }
