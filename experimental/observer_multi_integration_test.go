@@ -1195,6 +1195,55 @@ func TestMultiTrapObserver_FuelExhausted(t *testing.T) {
 	}, wasmruntime.ErrRuntimeFuelExhausted, left, right)
 }
 
+func TestMultiTrapObserver_FuelExhaustedOrdering(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
+			if ec.name != "compiler" {
+				t.Skip("fuel exhaustion trap path is compiler-specific")
+			}
+
+			ctx := context.Background()
+			rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg.WithFuel(1))
+			defer rt.Close(ctx)
+
+			mod, err := rt.InstantiateWithConfig(ctx, trapObserverFuelLoopBinary(), wazero.NewModuleConfig().WithName("fuel-guest"))
+			require.NoError(t, err)
+
+			left := &recordingTrapObserver{}
+			right := &recordingTrapObserver{}
+			var order []string
+			_, err = mod.ExportedFunction("run").Call(
+				experimental.WithTrapObserver(
+					ctx,
+					experimental.MultiTrapObserver(
+						experimental.TrapObserverFunc(func(ctx context.Context, observation experimental.TrapObservation) {
+							left.ObserveTrap(ctx, observation)
+							order = append(order, "left "+string(observation.Cause))
+						}),
+						experimental.TrapObserverFunc(func(ctx context.Context, observation experimental.TrapObservation) {
+							right.ObserveTrap(ctx, observation)
+							order = append(order, "right "+string(observation.Cause))
+						}),
+					),
+				),
+			)
+			require.ErrorIs(t, err, wasmruntime.ErrRuntimeFuelExhausted)
+
+			requireEquivalentTrapObservation(t, trapObservationSnapshot{
+				Cause:      experimental.TrapCauseFuelExhausted,
+				ModuleName: "fuel-guest",
+			}, wasmruntime.ErrRuntimeFuelExhausted, left, right)
+			require.Equal(t, []string{
+				"left fuel_exhausted",
+				"right fuel_exhausted",
+			}, order)
+		})
+	}
+}
+
 func TestMultiTrapObserver_MemoryFault(t *testing.T) {
 	if !platform.CompilerSupported() || runtime.GOOS != "linux" || (runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64") {
 		t.Skip("memory fault trap path is only expected on supported compiler targets")
