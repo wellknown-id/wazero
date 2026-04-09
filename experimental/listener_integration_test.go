@@ -3,6 +3,7 @@ package experimental_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -47,6 +48,44 @@ func (r *recordingFunctionListener) snapshot() []listenerEvent {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]listenerEvent(nil), r.events...)
+}
+
+type orderedEventRecorder struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (r *orderedEventRecorder) add(format string, args ...any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, fmt.Sprintf(format, args...))
+}
+
+func (r *orderedEventRecorder) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.events...)
+}
+
+type orderedFunctionListener struct {
+	recorder *orderedEventRecorder
+}
+
+func (l *orderedFunctionListener) Before(_ context.Context, _ api.Module, def api.FunctionDefinition, _ []uint64, _ experimental.StackIterator) {
+	l.recorder.add("listener before %s", listenerFunctionName(def))
+}
+
+func (l *orderedFunctionListener) After(_ context.Context, _ api.Module, def api.FunctionDefinition, _ []uint64) {
+	l.recorder.add("listener after %s", listenerFunctionName(def))
+}
+
+func (l *orderedFunctionListener) Abort(_ context.Context, _ api.Module, def api.FunctionDefinition, err error) {
+	cause, ok := experimental.TrapCauseOf(err)
+	if ok {
+		l.recorder.add("listener abort %s (%s)", listenerFunctionName(def), cause)
+		return
+	}
+	l.recorder.add("listener abort %s", listenerFunctionName(def))
 }
 
 func listenerFunctionName(def api.FunctionDefinition) string {
@@ -146,6 +185,22 @@ func assertBeforeCompletionPairingExcept(t *testing.T, events []listenerEvent, a
 		}
 		require.True(t, current.after == 0 || current.abort == 0, "function %s completed with both after and abort", function)
 	}
+}
+
+func assertOrderedEvents(t *testing.T, got, want []string) {
+	t.Helper()
+	require.Equal(t, want, got)
+}
+
+func assertOrderedSubsequence(t *testing.T, got, want []string) {
+	t.Helper()
+	index := 0
+	for _, event := range got {
+		if index < len(want) && event == want[index] {
+			index++
+		}
+	}
+	require.Equal(t, len(want), index, "got events %v, want subsequence %v", got, want)
 }
 
 func TestFunctionListener_BeforeAfterAndAbortPairing(t *testing.T) {
@@ -397,6 +452,152 @@ func TestFunctionListener_AbortTrapPaths(t *testing.T) {
 					require.False(t, ok, "host panic abort was misclassified as a trap: %v", event.err)
 				}
 			}
+		})
+	}
+}
+
+func TestFunctionListener_PolicyObserverOrdering(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
+
+			ctx := context.Background()
+			recorder := &orderedEventRecorder{}
+			instantiateCtx := experimental.WithFunctionListenerFactory(ctx, newFunctionListenerFactory(&orderedFunctionListener{recorder: recorder}))
+
+			rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg)
+			defer rt.Close(ctx)
+
+			instantiateListenerHostModule(t, instantiateCtx, rt, func() {})
+			mod := instantiateListenerGuestModule(t, instantiateCtx, rt, trapObserverTestModuleBinary())
+
+			callCtx := experimental.WithTrapObserver(
+				experimental.WithHostCallPolicyObserver(
+					experimental.WithHostCallPolicy(ctx, experimental.HostCallPolicyFunc(
+						func(context.Context, api.Module, api.FunctionDefinition) bool { return false },
+					)),
+					experimental.HostCallPolicyObserverFunc(func(_ context.Context, observation experimental.HostCallPolicyObservation) {
+						recorder.add("policy %s %s", observation.Event, observation.HostFunction.DebugName())
+					}),
+				),
+				experimental.TrapObserverFunc(func(_ context.Context, observation experimental.TrapObservation) {
+					recorder.add("trap %s", observation.Cause)
+				}),
+			)
+
+			_, err := mod.ExportedFunction("run").Call(callCtx)
+			require.ErrorIs(t, err, wasmruntime.ErrRuntimePolicyDenied)
+
+			want := []string{
+				"listener before run",
+				"policy denied env.check",
+				"listener abort run (policy_denied)",
+				"trap policy_denied",
+			}
+			if ec.name == "compiler" {
+				want = []string{
+					"listener before run",
+					"policy denied env.check",
+					"listener abort check (policy_denied)",
+					"listener abort run (policy_denied)",
+					"trap policy_denied",
+				}
+			}
+			assertOrderedEvents(t, recorder.snapshot(), want)
+		})
+	}
+}
+
+func TestFunctionListener_YieldObserverOrdering(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
+
+			ctx := context.Background()
+			recorder := &orderedEventRecorder{}
+			instantiateCtx := experimental.WithFunctionListenerFactory(ctx, newFunctionListenerFactory(&orderedFunctionListener{recorder: recorder}))
+
+			rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg)
+			defer rt.Close(ctx)
+
+			_, err := rt.NewHostModuleBuilder("example").
+				NewFunctionBuilder().
+				WithGoModuleFunction(&yieldingHostFunc{t: t}, nil, []api.ValueType{api.ValueTypeI32}).
+				Export("async_work").
+				Instantiate(instantiateCtx)
+			require.NoError(t, err)
+
+			mod, err := rt.InstantiateWithConfig(instantiateCtx, yieldWasm, wazero.NewModuleConfig().WithName("guest"))
+			require.NoError(t, err)
+
+			callCtx := experimental.WithYieldObserver(
+				experimental.WithYielder(ctx),
+				experimental.YieldObserverFunc(func(_ context.Context, observation experimental.YieldObservation) {
+					recorder.add("yield %s #%d", observation.Event, observation.YieldCount)
+				}),
+			)
+
+			_, err = mod.ExportedFunction("run").Call(callCtx)
+			yieldErr := requireYieldError(t, err)
+
+			results, err := yieldErr.Resumer().Resume(
+				experimental.WithYieldObserver(
+					experimental.WithYielder(ctx),
+					experimental.YieldObserverFunc(func(_ context.Context, observation experimental.YieldObservation) {
+						recorder.add("yield %s #%d", observation.Event, observation.YieldCount)
+					}),
+				),
+				[]uint64{42},
+			)
+			require.NoError(t, err)
+			require.Equal(t, []uint64{142}, results)
+
+			assertOrderedEvents(t, recorder.snapshot(), []string{
+				"listener before run",
+				"listener before async_work",
+				"yield yielded #1",
+				"yield resumed #1",
+				"listener after async_work",
+				"listener after run",
+			})
+		})
+	}
+}
+
+func TestFunctionListener_FuelObserverOrdering(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
+
+			ctx := context.Background()
+			recorder := &orderedEventRecorder{}
+			instantiateCtx := experimental.WithFunctionListenerFactory(ctx, newFunctionListenerFactory(&orderedFunctionListener{recorder: recorder}))
+
+			rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg.WithFuel(3))
+			defer rt.Close(ctx)
+
+			mod := instantiateListenerGuestModule(t, instantiateCtx, rt, fuelLoopModuleBinary())
+
+			_, err := mod.ExportedFunction("run").Call(experimental.WithFuelObserver(
+				ctx,
+				experimental.FuelObserverFunc(func(_ context.Context, observation experimental.FuelObservation) {
+					recorder.add("fuel %s", observation.Event)
+				}),
+			))
+			require.ErrorIs(t, err, wasmruntime.ErrRuntimeFuelExhausted)
+
+			assertOrderedSubsequence(t, recorder.snapshot(), []string{
+				"fuel budgeted",
+				"listener before run",
+				"listener abort run (fuel_exhausted)",
+				"fuel exhausted",
+			})
 		})
 	}
 }

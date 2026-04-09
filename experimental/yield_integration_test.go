@@ -736,7 +736,45 @@ func TestYield_CallWhileSuspendedRejected(t *testing.T) {
 			resumer := requireYieldError(t, err).Resumer()
 
 			_, err = fn.Call(experimental.WithYielder(ctx))
-			require.EqualError(t, err, "cannot call: function has suspended execution; resume or cancel the outstanding Resumer first")
+			require.EqualError(t, err, "cannot call: module has suspended execution; resume or cancel the outstanding Resumer first")
+
+			results, err := resumer.Resume(experimental.WithYielder(ctx), []uint64{42})
+			require.NoError(t, err)
+			require.Equal(t, []uint64{142}, results)
+		})
+	}
+}
+
+func TestYield_FreshFunctionHandleWhileSuspendedRejected(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			mod, rt, ctx := setupYieldTest(t, ec.cfg)
+			defer rt.Close(ctx)
+
+			_, err := mod.ExportedFunction("run").Call(experimental.WithYielder(ctx))
+			resumer := requireYieldError(t, err).Resumer()
+
+			_, err = mod.ExportedFunction("run").Call(experimental.WithYielder(ctx))
+			require.EqualError(t, err, "cannot call: module has suspended execution; resume or cancel the outstanding Resumer first")
+
+			results, err := resumer.Resume(experimental.WithYielder(ctx), []uint64{42})
+			require.NoError(t, err)
+			require.Equal(t, []uint64{142}, results)
+		})
+	}
+}
+
+func TestYield_OtherExportWhileSuspendedRejected(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			mod, rt, ctx := setupYieldTest(t, ec.cfg)
+			defer rt.Close(ctx)
+
+			_, err := mod.ExportedFunction("run").Call(experimental.WithYielder(ctx))
+			resumer := requireYieldError(t, err).Resumer()
+
+			_, err = mod.ExportedFunction("run_twice").Call(experimental.WithYielder(ctx))
+			require.EqualError(t, err, "cannot call: module has suspended execution; resume or cancel the outstanding Resumer first")
 
 			results, err := resumer.Resume(experimental.WithYielder(ctx), []uint64{42})
 			require.NoError(t, err)
@@ -1297,7 +1335,7 @@ func TestYieldObserver_ReyieldAndValidation(t *testing.T) {
 
 			observer := &recordingYieldObserver{}
 
-			_, err := mod.ExportedFunction("run").Call(
+			_, err := mod.ExportedFunction("run_twice").Call(
 				experimental.WithYieldObserver(experimental.WithYielder(ctx), observer),
 			)
 			resumer := requireYieldError(t, err).Resumer()
@@ -1306,12 +1344,7 @@ func TestYieldObserver_ReyieldAndValidation(t *testing.T) {
 			require.EqualError(t, err, "cannot resume: expected 1 host results, but got 0")
 			require.Equal(t, 1, len(observer.snapshot()))
 
-			_, err = mod.ExportedFunction("run_twice").Call(
-				experimental.WithYieldObserver(experimental.WithYielder(ctx), observer),
-			)
-			firstResumer := requireYieldError(t, err).Resumer()
-
-			_, err = firstResumer.Resume(experimental.WithYielder(ctx), []uint64{40})
+			_, err = resumer.Resume(experimental.WithYielder(ctx), []uint64{40})
 			secondYield := requireYieldError(t, err)
 
 			results, err := secondYield.Resumer().Resume(experimental.WithYielder(ctx), []uint64{2})
@@ -1319,16 +1352,14 @@ func TestYieldObserver_ReyieldAndValidation(t *testing.T) {
 			require.Equal(t, []uint64{42}, results)
 
 			observations := observer.snapshot()
-			require.Equal(t, 5, len(observations))
+			require.Equal(t, 4, len(observations))
 			require.Equal(t, experimental.YieldEventYielded, observations[0].Event)
-			require.Equal(t, experimental.YieldEventYielded, observations[1].Event)
+			require.Equal(t, experimental.YieldEventResumed, observations[1].Event)
 			require.Equal(t, uint64(1), observations[1].YieldCount)
-			require.Equal(t, experimental.YieldEventResumed, observations[2].Event)
-			require.Equal(t, uint64(1), observations[2].YieldCount)
-			require.Equal(t, experimental.YieldEventYielded, observations[3].Event)
+			require.Equal(t, experimental.YieldEventYielded, observations[2].Event)
+			require.Equal(t, uint64(2), observations[2].YieldCount)
+			require.Equal(t, experimental.YieldEventResumed, observations[3].Event)
 			require.Equal(t, uint64(2), observations[3].YieldCount)
-			require.Equal(t, experimental.YieldEventResumed, observations[4].Event)
-			require.Equal(t, uint64(2), observations[4].YieldCount)
 		})
 	}
 }

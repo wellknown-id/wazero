@@ -101,6 +101,11 @@ type (
 		// See /RATIONALE.md
 		Closed atomic.Uint64
 
+		// suspendState tracks whether this module currently has a yielded execution
+		// that must be resumed or cancelled before any exported function may be
+		// called again.
+		suspendState atomic.Uint32
+
 		// CodeCloser is non-nil when the code should be closed after this module.
 		CodeCloser api.Closer
 

@@ -114,3 +114,29 @@ func FuzzYieldConcurrentResumeState(f *testing.F) {
 		require.EqualError(t, err, "cannot resume: resumer has already been used")
 	})
 }
+
+func FuzzYieldSuspendedModuleRejectsReentry(f *testing.F) {
+	f.Add(uint8(0), uint8(0))
+	f.Add(uint8(1), uint8(1))
+	f.Add(uint8(0), uint8(2))
+
+	f.Fuzz(func(t *testing.T, mode, exportChoice uint8) {
+		ec := engineConfigs()[int(mode)%len(engineConfigs())]
+		mod, rt, ctx := setupYieldTest(t, ec.cfg)
+		defer rt.Close(ctx)
+
+		_, err := mod.ExportedFunction("run").Call(experimental.WithYielder(ctx))
+		resumer := requireYieldError(t, err).Resumer()
+
+		exportName := "run"
+		if exportChoice%2 == 1 {
+			exportName = "run_twice"
+		}
+		_, err = mod.ExportedFunction(exportName).Call(experimental.WithYielder(ctx))
+		require.EqualError(t, err, "cannot call: module has suspended execution; resume or cancel the outstanding Resumer first")
+
+		results, err := resumer.Resume(experimental.WithYielder(ctx), []uint64{42})
+		require.NoError(t, err)
+		require.Equal(t, []uint64{142}, results)
+	})
+}

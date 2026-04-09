@@ -164,6 +164,9 @@ type callEngine struct {
 	resumePC uint64
 	// resumeBase, when resumePC is set, overrides the frame's base.
 	resumeBase int
+	// resumeAfter marks the frame created for a resumed execution so that its
+	// listener.After callback runs when that pre-yield frame eventually returns.
+	resumeAfter bool
 
 	// fuel is the remaining budget for the current execution when deterministic
 	// metering is enabled.
@@ -261,6 +264,9 @@ type callFrame struct {
 	// base index in the frame of this function, used to detect the count of
 	// values on the stack.
 	base int
+	// resumeAfter tracks frames that were active when execution yielded and
+	// therefore need their listener.After callback when they eventually return.
+	resumeAfter bool
 }
 
 type compiledFunction struct {
@@ -411,6 +417,11 @@ func (r *interpreterResumer) Resume(ctx context.Context, hostResults []uint64) (
 	if !r.ce.yieldState.CompareAndSwap(yieldStateSuspended, yieldStateResuming) {
 		panic("BUG: concurrent or invalid Resume call on interpreterResumer")
 	}
+	r.moduleInstance.BeginResume()
+	yieldedAgain := false
+	defer func() {
+		r.moduleInstance.FinishResume(yieldedAgain)
+	}()
 	if err := r.moduleInstance.FailIfClosed(); err != nil {
 		r.stack = nil
 		r.frames = nil
@@ -432,10 +443,15 @@ func (r *interpreterResumer) Resume(ctx context.Context, hostResults []uint64) (
 		ce.fuelObserverCtx = ctx
 	}
 
+	for i := range ce.frames {
+		ce.frames[i].resumeAfter = true
+	}
+
 	// At yield time, the frame stack has the host function's frame on top
 	// (pushed by callGoFunc but not popped due to the panic). Pop it.
 	if len(ce.frames) > 0 {
 		hostFrame := ce.frames[len(ce.frames)-1]
+		hostFrame.resumeAfter = false
 		ce.frames = ce.frames[:len(ce.frames)-1]
 
 		// callGoFuncWithStack grows the stack so that it holds max(paramLen, resultLen)
@@ -457,6 +473,10 @@ func (r *interpreterResumer) Resume(ctx context.Context, hostResults []uint64) (
 		// Write the host results.
 		if resultLen > 0 && len(hostResults) >= resultLen {
 			copy(ce.stack[resultBase:resultBase+resultLen], hostResults[:resultLen])
+		}
+
+		if lsn := hostFrame.f.parent.listener; lsn != nil {
+			lsn.After(ctx, r.moduleInstance, hostFrame.f.definition(), hostResults[:resultLen])
 		}
 
 		// Trim the stack to: resultBase + resultLen (what callGoFuncWithStack would leave).
@@ -499,6 +519,7 @@ func (r *interpreterResumer) Resume(ctx context.Context, hostResults []uint64) (
 				}
 				ce.stack, ce.frames = ce.stack[:0], ce.frames[:0]
 				ce.yieldState.Store(yieldStateSuspended)
+				yieldedAgain = true
 				notifyYieldObserver(ctx, ctx, newResumer.yieldObserver, m, experimental.YieldEventYielded, newResumer.yieldCount, newResumer.expectedHostResults, nil, 0)
 				err = experimental.NewYieldError(newResumer)
 				results = nil
@@ -522,6 +543,7 @@ func (r *interpreterResumer) Resume(ctx context.Context, hostResults []uint64) (
 	ce.popFrame()
 	ce.resumePC = resumePC
 	ce.resumeBase = resumeBase
+	ce.resumeAfter = topFrame.resumeAfter
 	ce.callNativeFunc(ctx, m, topFrame.f)
 
 	// Execution completed. Pop final results.
@@ -540,6 +562,7 @@ func (r *interpreterResumer) Cancel() {
 		r.stack = nil
 		r.frames = nil
 		r.ce.yieldState.Store(yieldStateIdle)
+		r.moduleInstance.CancelSuspend()
 		notifyYieldObserver(r.yieldObserverCtx, r.yieldObserverCtx, r.yieldObserver, r.moduleInstance, experimental.YieldEventCancelled, r.yieldCount, r.expectedHostResults, r.yieldClock, r.yieldedAtNanos)
 	}
 }
@@ -834,9 +857,12 @@ func (ce *callEngine) CallWithStack(ctx context.Context, stack []uint64) error {
 
 func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []uint64, err error) {
 	if ce.yieldState.Load() != yieldStateIdle {
-		return nil, errors.New("cannot call: function has suspended execution; resume or cancel the outstanding Resumer first")
+		return nil, ce.f.moduleInstance.FailIfSuspended()
 	}
 	m := ce.f.moduleInstance
+	if err := m.FailIfSuspended(); err != nil {
+		return nil, err
+	}
 	if experimental.GetTimeProvider(ctx) == nil && m.TimeProvider != nil {
 		ctx = experimental.WithTimeProvider(ctx, m.TimeProvider)
 	}
@@ -889,6 +915,7 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 				// Clear the call engine state so it isn't accidentally reused.
 				ce.stack, ce.frames = ce.stack[:0], ce.frames[:0]
 				ce.yieldState.Store(yieldStateSuspended)
+				m.MarkSuspended()
 				notifyYieldObserver(ctx, ctx, resumer.yieldObserver, m, experimental.YieldEventYielded, resumer.yieldCount, resumer.expectedHostResults, nil, 0)
 				err = experimental.NewYieldError(resumer)
 				return
@@ -1231,7 +1258,8 @@ func (ce *callEngine) callGoFunc(ctx context.Context, m *wasm.ModuleInstance, f 
 }
 
 func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance, f *function) {
-	frame := &callFrame{f: f, base: len(ce.stack)}
+	frame := &callFrame{f: f, base: len(ce.stack), resumeAfter: ce.resumeAfter}
+	ce.resumeAfter = false
 	moduleInst := f.moduleInstance
 	functions := moduleInst.Engine.(*moduleEngine).functions
 	memoryInst := moduleInst.MemoryInstance
@@ -4899,6 +4927,11 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 
 		default:
 			frame.pc++
+		}
+	}
+	if frame.resumeAfter {
+		if lsn := frame.f.parent.listener; lsn != nil {
+			lsn.After(ctx, m, frame.f.definition(), ce.peekValues(frame.f.funcType.ResultNumInUint64))
 		}
 	}
 	ce.popFrame()

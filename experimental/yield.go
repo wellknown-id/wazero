@@ -15,8 +15,8 @@ import (
 //   - Yield never returns to that host function; the call unwinds immediately.
 //   - Each yield produces exactly one Resumer for the suspended execution.
 //   - The embedder must eventually Resume or Cancel that Resumer.
-//   - While suspended, the yielding api.Function must not be called again until
-//     the outstanding Resumer has been resumed or cancelled.
+//   - While suspended, no exported function of the yielding module may be called
+//     again until the outstanding Resumer has been resumed or cancelled.
 //
 // When a host function needs to perform asynchronous work (e.g., a network
 // call, database query, or channel operation), it can call Yield() to suspend

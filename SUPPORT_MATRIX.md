@@ -55,12 +55,19 @@ These rules cover the currently shipped observer/policy/config surfaces:
   4. if `WithYielder` was enabled, expose a `Yielder` to the host function.
 - `HostCallPolicy` therefore runs before the host function executes and before
   any yield attempt. If it denies the call, `YieldPolicy` is never consulted.
+- `FunctionListener.Before` for an imported host function runs only after
+  `HostCallPolicy` allows that call. A denied host import therefore reports the
+  policy decision and aborts the caller listener. On the compiler path today,
+  stack unwinding can also emit an orphan `FunctionListener.Abort` for the
+  denied callee even though no matching `Before` ran.
 - `YieldPolicy` is checked only when the host function actually calls
   `Yielder.Yield()`. A denial terminates execution with
   `ErrRuntimePolicyDenied`.
 - `TrapObserver` fires only for recognized runtime traps (for example
   `policy_denied`, `fuel_exhausted`, memory faults). It does not report plain
   host panics, and `Resumer.Cancel()` is not a trap.
+- `FunctionListener.Abort` runs during stack unwinding before trap and terminal
+  fuel notifications are emitted.
 
 ```go
 callCtx := experimental.WithTrapObserver(
@@ -129,6 +136,9 @@ back to the instantiated-module store.
 - When a `FuelObserver` is present, lifecycle events are
   emitted in call order: `budgeted`, then any in-host `recharged` events from
   `AddFuel`, then terminal `consumed` or `exhausted`.
+- `FunctionListener.Before` for the guest call runs after the initial
+  `budgeted` notification, and `FunctionListener.Abort` / `After` happens
+  before the terminal `consumed` or `exhausted` fuel event.
 - For yielded executions, the fuel controller/budget is chosen when the Wasm
   call starts and is carried through later `Resume` calls for that suspended
   execution.

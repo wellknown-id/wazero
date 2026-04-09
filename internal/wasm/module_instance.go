@@ -8,6 +8,14 @@ import (
 	"github.com/tetratelabs/wazero/api"
 )
 
+var errModuleSuspended = errors.New("cannot call: module has suspended execution; resume or cancel the outstanding Resumer first")
+
+const (
+	moduleSuspendStateIdle uint32 = iota
+	moduleSuspendStateSuspended
+	moduleSuspendStateResuming
+)
+
 // FailIfClosed returns a api.ExitError if CloseWithExitCode was called.
 func (m *ModuleInstance) FailIfClosed() (err error) {
 	if closed := m.Closed.Load(); closed != 0 {
@@ -21,6 +29,50 @@ func (m *ModuleInstance) FailIfClosed() (err error) {
 		return api.NewExitError(uint32(closed >> 32)) // Unpack the high order bits as the exit code.
 	}
 	return nil
+}
+
+// FailIfSuspended returns an error if the module has a yielded execution that
+// has not yet been resumed or cancelled.
+func (m *ModuleInstance) FailIfSuspended() error {
+	if m.suspendState.Load() != moduleSuspendStateIdle {
+		return errModuleSuspended
+	}
+	return nil
+}
+
+// MarkSuspended records that the module now has an outstanding yielded
+// execution.
+func (m *ModuleInstance) MarkSuspended() {
+	if !m.suspendState.CompareAndSwap(moduleSuspendStateIdle, moduleSuspendStateSuspended) {
+		panic(fmt.Sprintf("BUG: invalid module suspension transition from %d to suspended", m.suspendState.Load()))
+	}
+}
+
+// BeginResume transitions a suspended module into resuming.
+func (m *ModuleInstance) BeginResume() {
+	if !m.suspendState.CompareAndSwap(moduleSuspendStateSuspended, moduleSuspendStateResuming) {
+		panic(fmt.Sprintf("BUG: invalid module suspension transition from %d to resuming", m.suspendState.Load()))
+	}
+}
+
+// FinishResume leaves the module suspended again if execution yielded, or idle
+// otherwise.
+func (m *ModuleInstance) FinishResume(yielded bool) {
+	next := moduleSuspendStateIdle
+	if yielded {
+		next = moduleSuspendStateSuspended
+	}
+	if !m.suspendState.CompareAndSwap(moduleSuspendStateResuming, next) {
+		panic(fmt.Sprintf("BUG: invalid module suspension transition from %d to %d", m.suspendState.Load(), next))
+	}
+}
+
+// CancelSuspend clears a suspended module after its outstanding resumer is
+// cancelled.
+func (m *ModuleInstance) CancelSuspend() {
+	if !m.suspendState.CompareAndSwap(moduleSuspendStateSuspended, moduleSuspendStateIdle) {
+		panic(fmt.Sprintf("BUG: invalid module suspension transition from %d to idle", m.suspendState.Load()))
+	}
 }
 
 // CloseModuleOnCanceledOrTimeout take a context `ctx`, which might be a Cancel or Timeout context,

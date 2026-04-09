@@ -208,11 +208,14 @@ func (c *callEngine) CallWithStack(ctx context.Context, paramResultStack []uint6
 
 // CallWithStack implements api.Function.
 func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint64) (err error) {
-	if c.yieldState.Load() != compilerYieldStateIdle {
-		return errors.New("cannot call: function has suspended execution; resume or cancel the outstanding Resumer first")
-	}
 	p := c.parent
 	m := p.module
+	if c.yieldState.Load() != compilerYieldStateIdle {
+		return m.FailIfSuspended()
+	}
+	if err := m.FailIfSuspended(); err != nil {
+		return err
+	}
 	if experimental.GetTimeProvider(ctx) == nil && m.TimeProvider != nil {
 		ctx = experimental.WithTimeProvider(ctx, m.TimeProvider)
 	}
@@ -323,6 +326,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 				yieldedAtNanos:      yieldNanotime(experimental.GetTimeProvider(ctx)),
 			}
 			c.yieldState.Store(compilerYieldStateSuspended)
+			m.MarkSuspended()
 			notifyYieldObserver(ctx, ctx, resumer.yieldObserver, m, experimental.YieldEventYielded, resumer.yieldCount, resumer.expectedHostResults, nil, 0)
 			err = experimental.NewYieldError(resumer)
 			return
@@ -1142,6 +1146,11 @@ func (r *compilerResumer) Resume(ctx context.Context, hostResults []uint64) (res
 	if !c.yieldState.CompareAndSwap(compilerYieldStateSuspended, compilerYieldStateResuming) {
 		panic("BUG: concurrent or invalid Resume call on compilerResumer")
 	}
+	r.module.BeginResume()
+	yieldedAgain := false
+	defer func() {
+		r.module.FinishResume(yieldedAgain)
+	}()
 	if err := r.module.FailIfClosed(); err != nil {
 		r.stack = nil
 		r.paramResultStack = nil
@@ -1154,6 +1163,9 @@ func (r *compilerResumer) Resume(ctx context.Context, hostResults []uint64) (res
 	spp := *(**uint64)(unsafe.Pointer(&r.sp))
 	view := goCallStackView(spp)
 	copy(view, hostResults)
+	if def, lsn := c.addFrame(wasmdebug.NewErrorBuilder(), uintptr(unsafe.Pointer(r.returnAddress))); lsn != nil {
+		lsn.After(ctx, r.module, def, hostResults)
+	}
 
 	c.stack = r.stack
 	c.stackTop = r.top
@@ -1225,6 +1237,7 @@ func (r *compilerResumer) Resume(ctx context.Context, hostResults []uint64) (res
 				yieldedAtNanos:      yieldNanotime(effectiveYieldClock(ctx, r.yieldClock)),
 			}
 			c.yieldState.Store(compilerYieldStateSuspended)
+			yieldedAgain = true
 			notifyYieldObserver(ctx, ctx, newResumer.yieldObserver, m, experimental.YieldEventYielded, newResumer.yieldCount, newResumer.expectedHostResults, nil, 0)
 			err = experimental.NewYieldError(newResumer)
 			results = nil
@@ -1345,6 +1358,33 @@ func (r *compilerResumer) Resume(ctx context.Context, hostResults []uint64) (res
 			c.execCtx.exitCode = wazevoapi.ExitCodeOK
 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
+		case wazevoapi.ExitCodeCallGoFunctionWithListener:
+			index := wazevoapi.GoFunctionIndexFromExitCode(ec)
+			callerModule := c.callerModuleInstance()
+			callCtx := hostCallContext(ctx, callerModule)
+			if !c.allowHostCall(callCtx, callerModule, index) {
+				c.execCtx.exitCode = wazevoapi.ExitCodePolicyDenied
+				continue
+			}
+			f := hostModuleGoFuncFromOpaque[api.GoFunction](index, c.execCtx.goFunctionCallCalleeModuleContextOpaque)
+			listeners := hostModuleListenersSliceFromOpaque(c.execCtx.goFunctionCallCalleeModuleContextOpaque)
+			s := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
+			listener := listeners[index]
+			def := c.hostFunctionDefinition(index)
+			listener.Before(callCtx, callerModule, def, s, c.stackIterator(true))
+			hostCtx := c.withHostYielder(callCtx, callerModule, index)
+			func() {
+				if yieldEnabled {
+					defer yieldRecoverFn(c)
+				} else if snapshotEnabled {
+					defer snapshotRecoverFn(c)
+				}
+				f.Call(hostCtx, s)
+			}()
+			listener.After(callCtx, callerModule, def, s)
+			c.execCtx.exitCode = wazevoapi.ExitCodeOK
+			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
+				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		case wazevoapi.ExitCodeCallGoModuleFunction:
 			index := wazevoapi.GoFunctionIndexFromExitCode(ec)
 			mod := c.callerModuleInstance()
@@ -1366,6 +1406,60 @@ func (r *compilerResumer) Resume(ctx context.Context, hostResults []uint64) (res
 			c.execCtx.exitCode = wazevoapi.ExitCodeOK
 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
+		case wazevoapi.ExitCodeCallGoModuleFunctionWithListener:
+			index := wazevoapi.GoFunctionIndexFromExitCode(ec)
+			callerModule := c.callerModuleInstance()
+			callCtx := hostCallContext(ctx, callerModule)
+			if !c.allowHostCall(callCtx, callerModule, index) {
+				c.execCtx.exitCode = wazevoapi.ExitCodePolicyDenied
+				continue
+			}
+			f := hostModuleGoFuncFromOpaque[api.GoModuleFunction](index, c.execCtx.goFunctionCallCalleeModuleContextOpaque)
+			listeners := hostModuleListenersSliceFromOpaque(c.execCtx.goFunctionCallCalleeModuleContextOpaque)
+			s := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
+			listener := listeners[index]
+			def := c.hostFunctionDefinition(index)
+			listener.Before(callCtx, callerModule, def, s, c.stackIterator(true))
+			hostCtx := c.withHostYielder(callCtx, callerModule, index)
+			func() {
+				if yieldEnabled {
+					defer yieldRecoverFn(c)
+				} else if snapshotEnabled {
+					defer snapshotRecoverFn(c)
+				}
+				f.Call(hostCtx, callerModule, s)
+			}()
+			listener.After(callCtx, callerModule, def, s)
+			c.execCtx.exitCode = wazevoapi.ExitCodeOK
+			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
+				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
+		case wazevoapi.ExitCodeCallListenerBefore:
+			stack := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
+			index := wasm.Index(stack[0])
+			mod := c.callerModuleInstance()
+			listener := mod.Engine.(*moduleEngine).listeners[index]
+			def := mod.Source.FunctionDefinition(index + mod.Source.ImportFunctionCount)
+			listener.Before(ctx, mod, def, stack[1:], c.stackIterator(false))
+			c.execCtx.exitCode = wazevoapi.ExitCodeOK
+			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
+				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
+		case wazevoapi.ExitCodeCallListenerAfter:
+			stack := goCallStackView(c.execCtx.stackPointerBeforeGoCall)
+			index := wasm.Index(stack[0])
+			mod := c.callerModuleInstance()
+			listener := mod.Engine.(*moduleEngine).listeners[index]
+			def := mod.Source.FunctionDefinition(index + mod.Source.ImportFunctionCount)
+			listener.After(ctx, mod, def, stack[1:])
+			c.execCtx.exitCode = wazevoapi.ExitCodeOK
+			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
+				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
+		case wazevoapi.ExitCodeCheckModuleExitCode:
+			if err := m.FailIfClosed(); err != nil {
+				panic(err)
+			}
+			c.execCtx.exitCode = wazevoapi.ExitCodeOK
+			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
+				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
 		default:
 			if trap, ok := runtimeTrapFromExitCode(ec & wazevoapi.ExitCodeMask); ok {
 				panic(trap)
@@ -1380,6 +1474,7 @@ func (r *compilerResumer) Cancel() {
 	if r.lifecycle.Cancel() {
 		r.stack = nil
 		r.ce.yieldState.Store(compilerYieldStateIdle)
+		r.module.CancelSuspend()
 		notifyYieldObserver(r.yieldObserverCtx, r.yieldObserverCtx, r.yieldObserver, r.module, experimental.YieldEventCancelled, r.yieldCount, r.expectedHostResults, r.yieldClock, r.yieldedAtNanos)
 	}
 }
