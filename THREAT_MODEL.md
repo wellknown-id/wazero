@@ -33,7 +33,7 @@ The wazero `Store`, `Engine`, compilation caches, and type registries are shared
 │        │ host calls       │                  │
 │  ┌─────▼──────────────────▼─────┐            │
 │  │        Host Functions        │  TRUSTED   │
-│  │     (WASI, custom imports)   │            │
+│  │ (embedder-supplied imports)  │            │
 │  └─────────────┬────────────────┘            │
 │                │                             │
 │  ┌─────────────▼────────────────┐            │
@@ -48,7 +48,7 @@ The wazero `Store`, `Engine`, compilation caches, and type registries are shared
 
 **Boundary 3 — Module ↔ Tables**: Indirect calls through `call_indirect` are type-checked at runtime using `FunctionTypeID` comparisons. A type mismatch traps the module.
 
-**Boundary 4 — Module ↔ WASI surface**: WASI host functions mediate access to the filesystem, network, clocks, and random number generation. In standard mode, these follow upstream wazero behaviour. Secure mode will progressively tighten these in later phases.
+**Boundary 4 — Module ↔ Embedder-provided host interfaces**: Filesystem, network, clock, random, and similar system-facing capabilities are not part of the core engine. They are only reachable when the embedder supplies host imports (for example, a WASI layer or custom host modules). The security boundary is therefore between untrusted Wasm and the embedder's trusted policy layer, not between the module and a built-in runtime-owned WASI subsystem.
 
 ## Threat categories
 
@@ -74,29 +74,29 @@ The wazero `Store`, `Engine`, compilation caches, and type registries are shared
 
 **Mitigation**: `WithMemoryLimitPages` caps the maximum pages per memory instance. When secure mode is using guard-page-backed linear memory, the entire max reservation is virtual, so uncommitted pages consume no physical RAM. Growing memory only commits additional pages via `mprotect` / `VirtualAlloc`.
 
-### T4 — WASI filesystem escape
+### T4 — Host filesystem policy escape
 
-**Attack**: A Wasm module uses WASI `path_open`, `fd_read`, `fd_write` etc. to read or write files outside its designated sandbox, or to traverse upward via `../` sequences.
+**Attack**: A Wasm module uses embedder-provided filesystem imports (including WASI-style `path_open`, `fd_read`, `fd_write`, etc.) to read or write files outside its designated sandbox, or to traverse upward via `../` sequences.
 
-**Current mitigation**: Upstream wazero's `FSConfig` and `sysfs.DirFS` restrict access to configured mount points. Path normalization is performed before OS operations.
+**Current mitigation**: The core runtime does not provide a built-in filesystem policy surface. Filesystem exposure exists only if the embedder installs a host module for it, so confinement depends on that host module's mount rules, path normalization, and fail-closed behavior.
 
-**Planned mitigation (Phase 4)**: Default-deny synthetic filesystem, explicit path allowlists, traversal protection hardening.
+**Architectural direction**: Keep filesystem policy outside the core runtime. Any default-deny filesystem, explicit allowlists, or traversal hardening should live in the embedder-supplied host layer.
 
-### T5 — WASI network escape
+### T5 — Host network policy escape
 
-**Attack**: A Wasm module uses socket APIs to connect to arbitrary network endpoints, exfiltrate data, or perform SSRF attacks.
+**Attack**: A Wasm module uses embedder-provided network imports to connect to arbitrary endpoints, exfiltrate data, or perform SSRF-style attacks.
 
-**Current mitigation**: Socket support is opt-in via `experimental/sock`. No sockets are available unless the host explicitly configures listeners.
+**Current mitigation**: The core runtime does not provide a built-in network surface. Network access exists only if the embedder explicitly wires in host imports for it, so egress controls are the embedder's responsibility.
 
-**Planned mitigation (Phase 4)**: Egress policy layer filtering by tenant, destination, and port.
+**Architectural direction**: Keep egress policy outside the core runtime. Destination filtering, per-tenant network policy, and listener exposure belong in the embedder-supplied host layer.
 
 ### T6 — Timing side channels
 
-**Attack**: A Wasm module uses high-resolution clocks (`clock_time_get` with `monotonic` clock) to perform timing-based side-channel attacks (e.g., cache timing, speculative execution probing).
+**Attack**: A Wasm module uses embedder-provided clock or timing imports (including WASI-style `clock_time_get`) to perform timing-based side-channel attacks (e.g., cache timing, speculative execution probing).
 
-**Current mitigation**: By default, wazero provides fake clock implementations that return deterministic values. Real clocks require explicit opt-in via `WithSysWalltime()` / `WithSysNanotime()`.
+**Current mitigation**: The core runtime does not provide a built-in clock policy surface. Timing resolution is therefore determined by whichever host imports the embedder exposes.
 
-**Planned mitigation (Phase 4)**: Configurable timer coarsening or jitter injection for WASI clock APIs in secure mode.
+**Architectural direction**: Keep timer policy outside the core runtime. Any clock coarsening, jitter injection, or deterministic/fake time source should live in the embedder-supplied host layer.
 
 ### T7 — Cross-module data leakage
 
@@ -122,9 +122,9 @@ platform, see [SUPPORT_MATRIX.md](SUPPORT_MATRIX.md).
 | Hardware fault to Wasm OOB trap path    | ✅                   | ✅ code path; native validation pending | ❌ software-checked path   | ❌ software-checked path   |
 | Context-based termination               | ✅                   | ✅                   | ✅                               | ✅                         |
 | Deterministic fuel metering             | ✅                   | ✅                   | ✅                               | ❌ interpreter unsupported |
-| WASI default-deny filesystem            | ❌ Phase 4           | ❌ Phase 4           | ❌ Phase 4                       | ❌ Phase 4                 |
-| WASI network egress policy              | ❌ Phase 4           | ❌ Phase 4           | ❌ Phase 4                       | ❌ Phase 4                 |
-| Clock coarsening                        | ❌ Phase 4           | ❌ Phase 4           | ❌ Phase 4                       | ❌ Phase 4                 |
+| Built-in filesystem policy layer        | n/a external host layer | n/a external host layer | n/a external host layer         | n/a external host layer   |
+| Built-in network egress policy          | n/a external host layer | n/a external host layer | n/a external host layer         | n/a external host layer   |
+| Built-in clock/timer policy             | n/a external host layer | n/a external host layer | n/a external host layer         | n/a external host layer   |
 | Async yield/resume                      | ❌ Phase 3           | ❌ Phase 3           | ❌ Phase 3                       | ❌ Phase 3                 |
 | Indirect call type checks               | ✅                   | ✅                   | ✅                               | ✅                         |
 
@@ -135,6 +135,7 @@ platform, see [SUPPORT_MATRIX.md](SUPPORT_MATRIX.md).
 3. Host functions provided by the embedder are correctly implemented and do not violate the memory safety guarantees of Go.
 4. The WebAssembly module is structurally valid (passes wazero's validation phase) before execution.
 5. The attack surface of the compilation cache (file-backed or in-memory) is limited to availability (filling disk), not integrity (compiled code is checksummed).
+6. Any filesystem, network, clock, random, or other system-facing imports are supplied externally by the embedder and are governed by embedder policy rather than by a built-in runtime subsystem.
 
 ## Out of scope for Phase 1
 

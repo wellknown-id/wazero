@@ -11,6 +11,10 @@ This document centralizes the current support status for Workstream 1 runtime fe
 It complements [THREAT_MODEL.md](THREAT_MODEL.md) and
 [ARM64-SECURE-MODE-VALIDATION.md](ARM64-SECURE-MODE-VALIDATION.md).
 
+This matrix covers core runtime behavior only. Filesystem, network, clock, and
+other system-facing host interfaces are expected to be supplied externally by
+the embedder rather than by a built-in runtime-owned WASI layer.
+
 ## Runtime mode selection
 
 | Runtime selection | Current behavior | Fallback / unsupported behavior |

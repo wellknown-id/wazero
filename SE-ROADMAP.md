@@ -102,7 +102,7 @@ Turn prototypes into an experimental runtime that can be evaluated seriously.
 
 - [50%:bbe2d375] Add targeted tests for memory fault recovery, fuel exhaustion, async resumption, and policy enforcement.
 - [10%:dedf9a6c] Expand fuzzing and negative testing around host interfaces and trap paths.
-- [70%:dedf9a6c] Document platform limitations, performance tradeoffs, and security assumptions.
+- [75%:1baa1d65] Document platform limitations, performance tradeoffs, and security assumptions.
 - [25%:dedf9a6c] Add observability hooks for trap causes, fuel usage, yield counts, and policy denials.
 - [95%:dedf9a6c] Keep the secure mode opt-in until behavior and compatibility are well understood.
 
