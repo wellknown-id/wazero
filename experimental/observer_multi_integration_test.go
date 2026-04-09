@@ -694,6 +694,49 @@ func TestMultiHostCallPolicyObserver_ResumeUsesResumedObserver(t *testing.T) {
 	}
 }
 
+func TestMultiHostCallPolicyObserver_YieldResumeLifecycle(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			mod, rt, ctx := setupYieldTest(t, ec.cfg)
+			defer rt.Close(ctx)
+
+			left := &recordingHostCallPolicyObserver{}
+			right := &recordingHostCallPolicyObserver{}
+			callCtx := experimental.WithHostCallPolicyObserver(
+				experimental.WithHostCallPolicy(
+					experimental.WithYielder(ctx),
+					experimental.HostCallPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+						require.Equal(t, mod.Name(), caller.Name())
+						require.Equal(t, "example.async_work", hostFunction.DebugName())
+						return true
+					}),
+				),
+				experimental.MultiHostCallPolicyObserver(left, right),
+			)
+
+			_, err := mod.ExportedFunction("run_twice").Call(callCtx)
+			firstResumer := requireYieldError(t, err).Resumer()
+
+			_, err = firstResumer.Resume(callCtx, []uint64{40})
+			secondResumer := requireYieldError(t, err).Resumer()
+
+			results, err := secondResumer.Resume(callCtx, []uint64{2})
+			require.NoError(t, err)
+			require.Equal(t, []uint64{42}, results)
+
+			for _, observations := range [][]experimental.HostCallPolicyObservation{left.snapshot(), right.snapshot()} {
+				require.Equal(t, 2, len(observations))
+				require.Equal(t, experimental.HostCallPolicyEventAllowed, observations[0].Event)
+				require.Equal(t, mod.Name(), observations[0].Module.Name())
+				require.Equal(t, "example.async_work", observations[0].HostFunction.DebugName())
+				require.Equal(t, experimental.HostCallPolicyEventAllowed, observations[1].Event)
+				require.Equal(t, mod.Name(), observations[1].Module.Name())
+				require.Equal(t, "example.async_work", observations[1].HostFunction.DebugName())
+			}
+		})
+	}
+}
+
 func TestMultiHostCallPolicy_ComposesAllowAndDenyFlows(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
