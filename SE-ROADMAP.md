@@ -1,6 +1,6 @@
 # razero roadmap
 
-`razero` is an experimental fork of wazero focused on running untrusted WebAssembly workloads in multi-tenant environments with stronger isolation and more deterministic resource controls.
+`razero` is an rust based experimental fork of go based wazero focused on running untrusted WebAssembly workloads in multi-tenant environments with stronger isolation and more deterministic resource controls.
 
 This document turns the rough specification into an initial roadmap. It is intentionally ambitious and should be treated as a staged research and implementation plan, not a promise of short-term delivery.
 
