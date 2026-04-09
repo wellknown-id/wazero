@@ -1736,6 +1736,51 @@ func TestMultiYieldPolicy_ComposesAllowAndDenyFlows(t *testing.T) {
 	}
 }
 
+func TestMultiYieldPolicyObserver_PolicyDeniedAlsoNotifiesMultiTrapObserver(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			mod, rt, ctx := setupYieldTest(t, ec.cfg)
+			defer rt.Close(ctx)
+
+			policyLeft := &recordingYieldPolicyObserver{}
+			policyRight := &recordingYieldPolicyObserver{}
+			trapLeft := &recordingTrapObserver{}
+			trapRight := &recordingTrapObserver{}
+			callCtx := experimental.WithTrapObserver(
+				experimental.WithYieldPolicyObserver(
+					experimental.WithYieldPolicy(
+						experimental.WithYielder(ctx),
+						experimental.YieldPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+							require.Equal(t, mod.Name(), caller.Name())
+							require.Equal(t, "example.async_work", hostFunction.DebugName())
+							return false
+						}),
+					),
+					experimental.MultiYieldPolicyObserver(policyLeft, policyRight),
+				),
+				experimental.MultiTrapObserver(trapLeft, trapRight),
+			)
+
+			_, err := mod.ExportedFunction("run").Call(callCtx)
+			require.ErrorIs(t, err, wasmruntime.ErrRuntimePolicyDenied)
+
+			for _, observer := range []*recordingYieldPolicyObserver{policyLeft, policyRight} {
+				observations := observer.snapshot()
+				require.Equal(t, 1, len(observations))
+				require.Equal(t, experimental.YieldPolicyEventDenied, observations[0].Event)
+				require.Equal(t, mod.Name(), observations[0].Module.Name())
+				require.Equal(t, "example.async_work", observations[0].HostFunction.DebugName())
+			}
+
+			requireEquivalentTrapObservation(t, trapObservationSnapshot{
+				Cause:        experimental.TrapCausePolicyDenied,
+				ModuleName:   mod.Name(),
+				PolicyDenied: true,
+			}, wasmruntime.ErrRuntimePolicyDenied, trapLeft, trapRight)
+		})
+	}
+}
+
 func TestMultiYieldPolicyObserver_ResumeUsesResumedObserver(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
