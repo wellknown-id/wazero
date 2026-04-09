@@ -5025,6 +5025,169 @@ func TestFunctionListener_MultiFuelObserverWithMultiHostCallPolicyObserver_Yield
 	}
 }
 
+func TestFunctionListener_MultiFuelObserver_YieldResumeUsesResumedObserver(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
+
+			ctx := context.Background()
+			recorder := &orderedEventRecorder{}
+			leftEvents := &recordingFunctionListener{}
+			rightEvents := &recordingFunctionListener{}
+			instantiateCtx := experimental.WithFunctionListenerFactory(ctx, experimental.MultiFunctionListenerFactory(
+				newFunctionListenerFactory(&namedOrderedRecordingFunctionListener{
+					name:     "listener left",
+					recorder: recorder,
+					events:   leftEvents,
+				}),
+				newFunctionListenerFactory(&namedOrderedRecordingFunctionListener{
+					name:     "listener right",
+					recorder: recorder,
+					events:   rightEvents,
+				}),
+			))
+
+			rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg)
+			defer rt.Close(ctx)
+
+			_, err := rt.NewHostModuleBuilder("example").
+				NewFunctionBuilder().
+				WithGoModuleFunction(&yieldingHostFunc{t: t}, nil, []api.ValueType{api.ValueTypeI32}).
+				Export("async_work").
+				Instantiate(instantiateCtx)
+			require.NoError(t, err)
+
+			mod, err := rt.InstantiateWithConfig(instantiateCtx, yieldWasm, wazero.NewModuleConfig().WithName("guest"))
+			require.NoError(t, err)
+
+			initialLeft := &namedOrderedRecordingFuelObserver{
+				name:         "fuel initial left",
+				recorder:     recorder,
+				observations: &recordingFuelObserver{},
+			}
+			initialRight := &namedOrderedRecordingFuelObserver{
+				name:         "fuel initial right",
+				recorder:     recorder,
+				observations: &recordingFuelObserver{},
+			}
+			ctrl := experimental.NewSimpleFuelController(20)
+
+			_, err = mod.ExportedFunction("run_twice").Call(
+				experimental.WithYieldObserver(
+					experimental.WithFuelObserver(
+						experimental.WithFuelController(
+							experimental.WithYielder(ctx),
+							ctrl,
+						),
+						experimental.MultiFuelObserver(initialLeft, initialRight),
+					),
+					experimental.YieldObserverFunc(func(_ context.Context, observation experimental.YieldObservation) {
+						recorder.add("yield %s #%d", observation.Event, observation.YieldCount)
+					}),
+				),
+			)
+			firstYield := requireYieldError(t, err)
+
+			resumeLeft := &namedOrderedRecordingFuelObserver{
+				name:         "fuel resume left",
+				recorder:     recorder,
+				observations: &recordingFuelObserver{},
+			}
+			resumeRight := &namedOrderedRecordingFuelObserver{
+				name:         "fuel resume right",
+				recorder:     recorder,
+				observations: &recordingFuelObserver{},
+			}
+
+			_, err = firstYield.Resumer().Resume(
+				experimental.WithYieldObserver(
+					experimental.WithFuelObserver(
+						experimental.WithYielder(ctx),
+						experimental.MultiFuelObserver(resumeLeft, resumeRight),
+					),
+					experimental.YieldObserverFunc(func(_ context.Context, observation experimental.YieldObservation) {
+						recorder.add("yield %s #%d", observation.Event, observation.YieldCount)
+					}),
+				),
+				[]uint64{40},
+			)
+			secondYield := requireYieldError(t, err)
+			require.Zero(t, len(resumeLeft.observations.snapshot()))
+			require.Zero(t, len(resumeRight.observations.snapshot()))
+
+			results, err := secondYield.Resumer().Resume(
+				experimental.WithYieldObserver(
+					experimental.WithYielder(ctx),
+					experimental.YieldObserverFunc(func(_ context.Context, observation experimental.YieldObservation) {
+						recorder.add("yield %s #%d", observation.Event, observation.YieldCount)
+					}),
+				),
+				[]uint64{2},
+			)
+			require.NoError(t, err)
+			require.Equal(t, []uint64{42}, results)
+
+			wantEvents := []expectedListenerEvent{
+				{phase: "before", function: "run_twice"},
+				{phase: "before", function: "async_work"},
+				{phase: "after", function: "async_work"},
+				{phase: "before", function: "async_work"},
+				{phase: "after", function: "async_work"},
+				{phase: "after", function: "run_twice"},
+			}
+			for _, events := range [][]listenerEvent{leftEvents.snapshot(), rightEvents.snapshot()} {
+				assertListenerEvents(t, events, wantEvents)
+				assertBeforeCompletionPairing(t, events)
+				assertBeforeCompletionStackPairing(t, events)
+			}
+
+			wantInitial := []fuelObservationSnapshot{{
+				Event:     experimental.FuelEventBudgeted,
+				Budget:    20,
+				Remaining: 20,
+			}}
+			for _, observer := range []*namedOrderedRecordingFuelObserver{initialLeft, initialRight} {
+				require.Equal(t, wantInitial, snapshotFuelObservations(observer.observations.snapshot()))
+			}
+
+			wantResumed := []fuelObservationSnapshot{{
+				Event:     experimental.FuelEventConsumed,
+				Budget:    20,
+				Consumed:  ctrl.TotalConsumed(),
+				Remaining: 20 - ctrl.TotalConsumed(),
+			}}
+			for _, observer := range []*namedOrderedRecordingFuelObserver{resumeLeft, resumeRight} {
+				require.Equal(t, wantResumed, snapshotFuelObservations(observer.observations.snapshot()))
+			}
+
+			assertOrderedEvents(t, recorder.snapshot(), []string{
+				"fuel initial left budgeted",
+				"fuel initial right budgeted",
+				"listener left before run_twice",
+				"listener right before run_twice",
+				"listener left before async_work",
+				"listener right before async_work",
+				"yield yielded #1",
+				"yield resumed #1",
+				"listener left after async_work",
+				"listener right after async_work",
+				"listener left before async_work",
+				"listener right before async_work",
+				"yield yielded #2",
+				"yield resumed #2",
+				"listener left after async_work",
+				"listener right after async_work",
+				"listener left after run_twice",
+				"listener right after run_twice",
+				"fuel resume left consumed",
+				"fuel resume right consumed",
+			})
+		})
+	}
+}
+
 func TestFunctionListener_FuelObserverAcrossYieldReyield(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
