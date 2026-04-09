@@ -358,6 +358,11 @@ type interpreterResumer struct {
 	used      atomic.Bool
 
 	expectedHostResults int
+	yieldCount          uint64
+	yieldObserver       experimental.YieldObserver
+	yieldObserverCtx    context.Context
+	yieldClock          experimental.TimeProvider
+	yieldedAtNanos      int64
 }
 
 // Resume implements experimental.Resumer.
@@ -387,6 +392,7 @@ func (r *interpreterResumer) Resume(ctx context.Context, hostResults []uint64) (
 	if !r.ce.yieldState.CompareAndSwap(yieldStateSuspended, yieldStateResuming) {
 		panic("BUG: concurrent or invalid Resume call on interpreterResumer")
 	}
+	notifyYieldObserver(ctx, r.yieldObserverCtx, r.yieldObserver, r.moduleInstance, experimental.YieldEventResumed, r.yieldCount, r.expectedHostResults, r.yieldClock, r.yieldedAtNanos)
 
 	// Restore the captured state into the call engine.
 	ce := r.ce
@@ -451,10 +457,16 @@ func (r *interpreterResumer) Resume(ctx context.Context, hostResults []uint64) (
 					f:                   r.f,
 					moduleInstance:      m,
 					ce:                  ce,
-					expectedHostResults: r.expectedHostResults,
+					expectedHostResults: ce.frames[len(ce.frames)-1].f.funcType.ResultNumInUint64,
+					yieldCount:          r.yieldCount + 1,
+					yieldObserver:       selectYieldObserver(ctx, r.yieldObserver),
+					yieldObserverCtx:    ctx,
+					yieldClock:          effectiveYieldClock(ctx, r.yieldClock),
+					yieldedAtNanos:      yieldNanotime(effectiveYieldClock(ctx, r.yieldClock)),
 				}
 				ce.stack, ce.frames = ce.stack[:0], ce.frames[:0]
 				ce.yieldState.Store(yieldStateSuspended)
+				notifyYieldObserver(ctx, ctx, newResumer.yieldObserver, m, experimental.YieldEventYielded, newResumer.yieldCount, newResumer.expectedHostResults, nil, 0)
 				err = experimental.NewYieldError(newResumer)
 				results = nil
 				return
@@ -497,6 +509,7 @@ func (r *interpreterResumer) Cancel() {
 		r.stack = nil
 		r.frames = nil
 		r.ce.yieldState.Store(yieldStateIdle)
+		notifyYieldObserver(r.yieldObserverCtx, r.yieldObserverCtx, r.yieldObserver, r.moduleInstance, experimental.YieldEventCancelled, r.yieldCount, r.expectedHostResults, r.yieldClock, r.yieldedAtNanos)
 	}
 }
 
@@ -832,10 +845,16 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 					moduleInstance:      m,
 					ce:                  ce,
 					expectedHostResults: ce.frames[len(ce.frames)-1].f.funcType.ResultNumInUint64,
+					yieldCount:          1,
+					yieldObserver:       experimental.GetYieldObserver(ctx),
+					yieldObserverCtx:    ctx,
+					yieldClock:          experimental.GetTimeProvider(ctx),
+					yieldedAtNanos:      yieldNanotime(experimental.GetTimeProvider(ctx)),
 				}
 				// Clear the call engine state so it isn't accidentally reused.
 				ce.stack, ce.frames = ce.stack[:0], ce.frames[:0]
 				ce.yieldState.Store(yieldStateSuspended)
+				notifyYieldObserver(ctx, ctx, resumer.yieldObserver, m, experimental.YieldEventYielded, resumer.yieldCount, resumer.expectedHostResults, nil, 0)
 				err = experimental.NewYieldError(resumer)
 				return
 			}
@@ -934,6 +953,56 @@ func notifyTrapObserver(ctx context.Context, mod api.Module, err error) {
 		Cause:  cause,
 		Err:    err,
 	})
+}
+
+func notifyYieldObserver(ctx, fallbackCtx context.Context, observer experimental.YieldObserver, mod api.Module, event experimental.YieldEvent, yieldCount uint64, expectedHostResults int, clock experimental.TimeProvider, yieldedAtNanos int64) {
+	observer, observeCtx := resolveYieldObserver(ctx, fallbackCtx, observer)
+	if observer == nil {
+		return
+	}
+	observation := experimental.YieldObservation{
+		Module:              mod,
+		Event:               event,
+		YieldCount:          yieldCount,
+		ExpectedHostResults: expectedHostResults,
+	}
+	if event != experimental.YieldEventYielded && clock != nil && yieldedAtNanos >= 0 {
+		if now := clock.Nanotime(); now >= yieldedAtNanos {
+			observation.SuspendedNanos = now - yieldedAtNanos
+		}
+	}
+	observer.ObserveYield(observeCtx, observation)
+}
+
+func resolveYieldObserver(ctx, fallbackCtx context.Context, fallback experimental.YieldObserver) (experimental.YieldObserver, context.Context) {
+	if observer := experimental.GetYieldObserver(ctx); observer != nil {
+		return observer, ctx
+	}
+	if fallback != nil {
+		return fallback, fallbackCtx
+	}
+	return nil, nil
+}
+
+func selectYieldObserver(ctx context.Context, fallback experimental.YieldObserver) experimental.YieldObserver {
+	if observer := experimental.GetYieldObserver(ctx); observer != nil {
+		return observer
+	}
+	return fallback
+}
+
+func effectiveYieldClock(ctx context.Context, fallback experimental.TimeProvider) experimental.TimeProvider {
+	if provider := experimental.GetTimeProvider(ctx); provider != nil {
+		return provider
+	}
+	return fallback
+}
+
+func yieldNanotime(provider experimental.TimeProvider) int64 {
+	if provider == nil {
+		return -1
+	}
+	return provider.Nanotime()
 }
 
 func (ce *callEngine) callFunction(ctx context.Context, m *wasm.ModuleInstance, f *function) {

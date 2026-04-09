@@ -6,6 +6,10 @@ import (
 	"testing"
 )
 
+type yieldObserver struct{}
+
+func (*yieldObserver) ObserveYield(context.Context, YieldObservation) {}
+
 func TestYieldError_Error(t *testing.T) {
 	ye := NewYieldError(nil)
 	if got := ye.Error(); got != "wasm execution yielded" {
@@ -48,5 +52,40 @@ func TestGetYielder_NotSet(t *testing.T) {
 	ctx := context.Background()
 	if got := GetYielder(ctx); got != nil {
 		t.Fatal("GetYielder on empty context should return nil")
+	}
+}
+
+func TestWithYieldObserver_NilDoesNothing(t *testing.T) {
+	ctx := context.Background()
+	if result := WithYieldObserver(ctx, nil); result != ctx {
+		t.Fatal("WithYieldObserver(ctx, nil) should return the same context")
+	}
+}
+
+func TestWithYieldObserver_TypedNilDoesNothing(t *testing.T) {
+	ctx := context.Background()
+
+	var funcObserver YieldObserverFunc
+	if result := WithYieldObserver(ctx, funcObserver); result != ctx {
+		t.Fatal("WithYieldObserver(ctx, typed-nil func) should return the same context")
+	}
+
+	var ptrObserver *yieldObserver
+	if result := WithYieldObserver(ctx, ptrObserver); result != ctx {
+		t.Fatal("WithYieldObserver(ctx, typed-nil pointer) should return the same context")
+	}
+}
+
+func TestWithYieldObserver_RoundTrip(t *testing.T) {
+	ctx := context.Background()
+	observer := YieldObserverFunc(func(context.Context, YieldObservation) {})
+	ctx = WithYieldObserver(ctx, observer)
+
+	got := GetYieldObserver(ctx)
+	if got == nil {
+		t.Fatal("GetYieldObserver should return non-nil")
+	}
+	if _, ok := got.(YieldObserverFunc); !ok {
+		t.Fatal("GetYieldObserver should return the registered observer type")
 	}
 }

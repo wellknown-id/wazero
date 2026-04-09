@@ -9,3 +9,6 @@ type EnableYielderKey struct{}
 // YielderKey is a context.Context key to access a Yielder from a host function.
 // It is only present if EnableYielderKey was set in the function invocation context.
 type YielderKey struct{}
+
+// YieldObserverKey is a context.Context key for the experimental yield observer.
+type YieldObserverKey struct{}
