@@ -1754,6 +1754,104 @@ func TestFunctionListener_MultiHostCallPolicyObserverOrderingWithMultiFunctionLi
 	}
 }
 
+func TestFunctionListener_MultiHostCallPolicy_ComposesAllowAndDenyFlows(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
+
+			ctx := context.Background()
+			recorder := &orderedEventRecorder{}
+			listenerEvents := &recordingFunctionListener{}
+			instantiateCtx := experimental.WithFunctionListenerFactory(ctx, newFunctionListenerFactory(&orderedRecordingFunctionListener{
+				recorder: recorder,
+				events:   listenerEvents,
+			}))
+
+			rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg)
+			defer rt.Close(ctx)
+
+			hostCalls := 0
+			instantiateListenerHostModule(t, instantiateCtx, rt, func() { hostCalls++ })
+			mod := instantiateListenerGuestModule(t, instantiateCtx, rt, trapObserverTestModuleBinary())
+
+			_, err := mod.ExportedFunction("run").Call(
+				experimental.WithHostCallPolicy(
+					ctx,
+					experimental.MultiHostCallPolicy(
+						experimental.HostCallPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+							require.Equal(t, "guest", caller.Name())
+							require.Equal(t, "env.check", hostFunction.DebugName())
+							return true
+						}),
+						experimental.HostCallPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+							require.Equal(t, "guest", caller.Name())
+							require.Equal(t, "env.check", hostFunction.DebugName())
+							return true
+						}),
+					),
+				),
+			)
+			require.NoError(t, err)
+			require.Equal(t, 1, hostCalls)
+
+			trapObserver := &recordingTrapObserver{}
+			_, err = mod.ExportedFunction("run").Call(
+				experimental.WithTrapObserver(
+					experimental.WithHostCallPolicy(
+						ctx,
+						experimental.MultiHostCallPolicy(
+							experimental.HostCallPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+								require.Equal(t, "guest", caller.Name())
+								require.Equal(t, "env.check", hostFunction.DebugName())
+								return true
+							}),
+							experimental.HostCallPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+								require.Equal(t, "guest", caller.Name())
+								require.Equal(t, "env.check", hostFunction.DebugName())
+								return false
+							}),
+						),
+					),
+					experimental.TrapObserverFunc(func(ctx context.Context, observation experimental.TrapObservation) {
+						trapObserver.ObserveTrap(ctx, observation)
+						recorder.add("trap %s", observation.Cause)
+					}),
+				),
+			)
+			require.ErrorIs(t, err, wasmruntime.ErrRuntimePolicyDenied)
+			require.Equal(t, 1, hostCalls)
+
+			events := listenerEvents.snapshot()
+			assertListenerEvents(t, events, []expectedListenerEvent{
+				{phase: "before", function: "run"},
+				{phase: "before", function: "check"},
+				{phase: "after", function: "check"},
+				{phase: "after", function: "run"},
+				{phase: "before", function: "run"},
+				{phase: "abort", function: "run", errIs: wasmruntime.ErrRuntimePolicyDenied},
+			})
+			assertAbortTrapCauseClassification(t, events, experimental.TrapCausePolicyDenied, true)
+
+			observation := trapObserver.single(t)
+			require.Equal(t, experimental.TrapCausePolicyDenied, observation.Cause)
+			require.ErrorIs(t, observation.Err, wasmruntime.ErrRuntimePolicyDenied)
+			require.Equal(t, mod.Name(), observation.Module.Name())
+
+			assertOrderedEvents(t, recorder.snapshot(), []string{
+				"listener before run",
+				"listener before check",
+				"listener after check",
+				"listener after run",
+				"listener before run",
+				"listener abort run (policy_denied)",
+				"trap policy_denied",
+			})
+		})
+	}
+}
+
 func TestFunctionListener_YieldPolicyDeniedTrapObserverOrdering(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
