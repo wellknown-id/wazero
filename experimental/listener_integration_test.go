@@ -114,6 +114,63 @@ func (l *orderedRecordingFunctionListener) Abort(ctx context.Context, mod api.Mo
 	l.recorder.add("listener abort %s", listenerFunctionName(def))
 }
 
+type stackSnapshot struct {
+	function string
+	frames   []string
+}
+
+type stackRecordingFunctionListener struct {
+	mu     sync.Mutex
+	events []listenerEvent
+	stacks []stackSnapshot
+}
+
+func (l *stackRecordingFunctionListener) Before(_ context.Context, _ api.Module, def api.FunctionDefinition, _ []uint64, stack experimental.StackIterator) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.events = append(l.events, listenerEvent{phase: "before", function: listenerFunctionName(def)})
+	l.stacks = append(l.stacks, stackSnapshot{function: listenerFunctionName(def), frames: snapshotStackIterator(stack)})
+}
+
+func (l *stackRecordingFunctionListener) After(_ context.Context, _ api.Module, def api.FunctionDefinition, _ []uint64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.events = append(l.events, listenerEvent{phase: "after", function: listenerFunctionName(def)})
+}
+
+func (l *stackRecordingFunctionListener) Abort(_ context.Context, _ api.Module, def api.FunctionDefinition, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.events = append(l.events, listenerEvent{phase: "abort", function: listenerFunctionName(def), err: err})
+}
+
+func (l *stackRecordingFunctionListener) snapshotEvents() []listenerEvent {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]listenerEvent(nil), l.events...)
+}
+
+func (l *stackRecordingFunctionListener) snapshotStacks() []stackSnapshot {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	snapshots := make([]stackSnapshot, len(l.stacks))
+	for i := range l.stacks {
+		snapshots[i] = stackSnapshot{
+			function: l.stacks[i].function,
+			frames:   append([]string(nil), l.stacks[i].frames...),
+		}
+	}
+	return snapshots
+}
+
+func snapshotStackIterator(stack experimental.StackIterator) []string {
+	var frames []string
+	for stack.Next() {
+		frames = append(frames, listenerFunctionName(stack.Function().Definition()))
+	}
+	return frames
+}
+
 func listenerFunctionName(def api.FunctionDefinition) string {
 	if exports := def.ExportNames(); len(exports) > 0 {
 		return exports[0]
@@ -280,6 +337,89 @@ func TestFunctionListener_BeforeAfterAndAbortPairing(t *testing.T) {
 			})
 			assertBeforeCompletionPairing(t, events)
 		})
+	}
+}
+
+func TestFunctionListener_MultiFunctionListenerFactoryStackIteratorIndependence(t *testing.T) {
+	testCases := []struct {
+		name       string
+		hostFunc   func()
+		wantErr    string
+		wantEvents []expectedListenerEvent
+	}{
+		{
+			name:     "completion",
+			hostFunc: func() {},
+			wantEvents: []expectedListenerEvent{
+				{phase: "before", function: "run"},
+				{phase: "before", function: "check"},
+				{phase: "after", function: "check"},
+				{phase: "after", function: "run"},
+			},
+		},
+		{
+			name:     "abort",
+			hostFunc: func() { panic("boom") },
+			wantErr:  "boom",
+			wantEvents: []expectedListenerEvent{
+				{phase: "before", function: "run"},
+				{phase: "before", function: "check"},
+				{phase: "abort", function: "check", errContains: "boom"},
+				{phase: "abort", function: "run", errContains: "boom"},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		for _, ec := range engineConfigs() {
+			t.Run(ec.name+"/"+tc.name, func(t *testing.T) {
+				if ec.name == "compiler" && !platform.CompilerSupported() {
+					t.Skip("compiler is not supported on this host")
+				}
+
+				ctx := context.Background()
+				first := &stackRecordingFunctionListener{}
+				second := &stackRecordingFunctionListener{}
+				instantiateCtx := experimental.WithFunctionListenerFactory(ctx, experimental.MultiFunctionListenerFactory(
+					newFunctionListenerFactory(first),
+					newFunctionListenerFactory(second),
+				))
+
+				rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg)
+				defer rt.Close(ctx)
+
+				instantiateListenerHostModule(t, instantiateCtx, rt, tc.hostFunc)
+				mod := instantiateListenerGuestModule(t, instantiateCtx, rt, trapObserverTestModuleBinary())
+
+				_, err := mod.ExportedFunction("run").Call(ctx)
+				if tc.wantErr == "" {
+					require.NoError(t, err)
+				} else {
+					require.Error(t, err)
+					require.Contains(t, err.Error(), tc.wantErr)
+				}
+
+				firstEvents := first.snapshotEvents()
+				secondEvents := second.snapshotEvents()
+				assertListenerEvents(t, firstEvents, tc.wantEvents)
+				assertListenerEvents(t, secondEvents, tc.wantEvents)
+				require.Equal(t, firstEvents, secondEvents)
+
+				assertBeforeCompletionPairing(t, firstEvents)
+				assertBeforeCompletionPairing(t, secondEvents)
+
+				firstStacks := first.snapshotStacks()
+				secondStacks := second.snapshotStacks()
+				require.Equal(t, firstStacks, secondStacks)
+				require.Equal(t, 2, len(firstStacks))
+				require.Equal(t, []stackSnapshot{
+					{function: "run", frames: []string{"run"}},
+				}, firstStacks[:1])
+				require.Equal(t, "check", firstStacks[1].function)
+				require.Equal(t, 2, len(firstStacks[1].frames))
+				require.Equal(t, "run", firstStacks[1].frames[len(firstStacks[1].frames)-1])
+			})
+		}
 	}
 }
 
