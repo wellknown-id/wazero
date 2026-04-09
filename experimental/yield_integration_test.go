@@ -66,6 +66,47 @@ func (r *recordingYieldObserver) snapshot() []experimental.YieldObservation {
 	return append([]experimental.YieldObservation(nil), r.observations...)
 }
 
+type yieldObservationSnapshot struct {
+	Event               experimental.YieldEvent
+	YieldCount          uint64
+	ExpectedHostResults int
+	SuspendedNanos      int64
+}
+
+func snapshotYieldObservations(observations []experimental.YieldObservation) []yieldObservationSnapshot {
+	snapshots := make([]yieldObservationSnapshot, len(observations))
+	for i, observation := range observations {
+		snapshots[i] = yieldObservationSnapshot{
+			Event:               observation.Event,
+			YieldCount:          observation.YieldCount,
+			ExpectedHostResults: observation.ExpectedHostResults,
+			SuspendedNanos:      observation.SuspendedNanos,
+		}
+	}
+	return snapshots
+}
+
+type trapObservationSnapshot struct {
+	Cause        experimental.TrapCause
+	ModuleName   string
+	PolicyDenied bool
+}
+
+func snapshotTrapObservations(observer *recordingTrapObserver) []trapObservationSnapshot {
+	observer.mu.Lock()
+	defer observer.mu.Unlock()
+
+	snapshots := make([]trapObservationSnapshot, len(observer.observations))
+	for i, observation := range observer.observations {
+		snapshots[i] = trapObservationSnapshot{
+			Cause:        observation.Cause,
+			ModuleName:   observation.Module.Name(),
+			PolicyDenied: errors.Is(observation.Err, wasmruntime.ErrRuntimePolicyDenied),
+		}
+	}
+	return snapshots
+}
+
 // yieldingHostFunc is a GoModuleFunction that yields execution.
 type yieldingHostFunc struct{ t *testing.T }
 
@@ -198,6 +239,243 @@ func requireYieldError(t *testing.T, err error) *experimental.YieldError {
 	require.True(t, errors.As(err, &yieldErr), "expected YieldError, got: %v", err)
 	require.NotNil(t, yieldErr.Resumer())
 	return yieldErr
+}
+
+func TestYieldParity_ObserverLifecycleAcrossReyield(t *testing.T) {
+	type paritySnapshot struct {
+		initial []yieldObservationSnapshot
+		resumed []yieldObservationSnapshot
+	}
+
+	results := map[string]paritySnapshot{}
+	for _, ec := range engineConfigs() {
+		provider := newObservingTimeProvider()
+		mod, rt, ctx := setupYieldTest(t, ec.cfg.WithTimeProvider(provider))
+
+		initialObserver := &recordingYieldObserver{}
+		_, err := mod.ExportedFunction("run_twice").Call(
+			experimental.WithYieldObserver(experimental.WithYielder(ctx), initialObserver),
+		)
+		firstResumer := requireYieldError(t, err).Resumer()
+
+		resumeObserver := &recordingYieldObserver{}
+		resumeProvider := newObservingTimeProvider()
+		_, err = firstResumer.Resume(
+			experimental.WithYieldObserver(
+				experimental.WithTimeProvider(experimental.WithYielder(ctx), resumeProvider),
+				resumeObserver,
+			),
+			[]uint64{40},
+		)
+		secondYield := requireYieldError(t, err)
+		secondYield.Resumer().Cancel()
+
+		results[ec.name] = paritySnapshot{
+			initial: snapshotYieldObservations(initialObserver.snapshot()),
+			resumed: snapshotYieldObservations(resumeObserver.snapshot()),
+		}
+
+		require.NoError(t, rt.Close(ctx))
+	}
+
+	require.Equal(t, results["interpreter"], results["compiler"])
+	require.Equal(t, []yieldObservationSnapshot{{
+		Event:               experimental.YieldEventYielded,
+		YieldCount:          1,
+		ExpectedHostResults: 1,
+		SuspendedNanos:      0,
+	}}, results["interpreter"].initial)
+	require.Equal(t, []yieldObservationSnapshot{
+		{
+			Event:               experimental.YieldEventResumed,
+			YieldCount:          1,
+			ExpectedHostResults: 1,
+			SuspendedNanos:      1_000_000,
+		},
+		{
+			Event:               experimental.YieldEventYielded,
+			YieldCount:          2,
+			ExpectedHostResults: 1,
+			SuspendedNanos:      0,
+		},
+		{
+			Event:               experimental.YieldEventCancelled,
+			YieldCount:          2,
+			ExpectedHostResults: 1,
+			SuspendedNanos:      1_000_000,
+		},
+	}, results["interpreter"].resumed)
+}
+
+func TestYieldParity_ResumePolicyDenial(t *testing.T) {
+	type paritySnapshot struct {
+		initial []yieldObservationSnapshot
+		resumed []yieldObservationSnapshot
+		traps   []trapObservationSnapshot
+	}
+
+	results := map[string]paritySnapshot{}
+	for _, ec := range engineConfigs() {
+		provider := newObservingTimeProvider()
+		mod, rt, ctx := setupYieldTest(t, ec.cfg.WithTimeProvider(provider))
+
+		initialObserver := &recordingYieldObserver{}
+		_, err := mod.ExportedFunction("run_twice").Call(
+			experimental.WithYieldObserver(experimental.WithYielder(ctx), initialObserver),
+		)
+		firstResumer := requireYieldError(t, err).Resumer()
+
+		resumeObserver := &recordingYieldObserver{}
+		trapObserver := &recordingTrapObserver{}
+		_, err = firstResumer.Resume(
+			experimental.WithTrapObserver(
+				experimental.WithYieldObserver(
+					experimental.WithYieldPolicy(
+						experimental.WithYielder(ctx),
+						experimental.YieldPolicyFunc(func(context.Context, api.Module, api.FunctionDefinition) bool {
+							return false
+						}),
+					),
+					resumeObserver,
+				),
+				trapObserver,
+			),
+			[]uint64{1},
+		)
+		require.True(t, errors.Is(err, wasmruntime.ErrRuntimePolicyDenied), "expected ErrRuntimePolicyDenied, got %v", err)
+
+		results[ec.name] = paritySnapshot{
+			initial: snapshotYieldObservations(initialObserver.snapshot()),
+			resumed: snapshotYieldObservations(resumeObserver.snapshot()),
+			traps:   snapshotTrapObservations(trapObserver),
+		}
+
+		require.NoError(t, rt.Close(ctx))
+	}
+
+	require.Equal(t, results["interpreter"], results["compiler"])
+	require.Equal(t, []yieldObservationSnapshot{{
+		Event:               experimental.YieldEventYielded,
+		YieldCount:          1,
+		ExpectedHostResults: 1,
+		SuspendedNanos:      0,
+	}}, results["interpreter"].initial)
+	require.Equal(t, []yieldObservationSnapshot{{
+		Event:               experimental.YieldEventResumed,
+		YieldCount:          1,
+		ExpectedHostResults: 1,
+		SuspendedNanos:      1_000_000,
+	}}, results["interpreter"].resumed)
+	require.Equal(t, 1, len(results["interpreter"].traps))
+	require.Equal(t, experimental.TrapCausePolicyDenied, results["interpreter"].traps[0].Cause)
+	require.True(t, results["interpreter"].traps[0].PolicyDenied)
+}
+
+func TestYieldParity_ReyieldResultContract(t *testing.T) {
+	type paritySnapshot struct {
+		staleResumerErr string
+		wrongCountErr   string
+		finalResults    []uint64
+	}
+
+	results := map[string]paritySnapshot{}
+	for _, ec := range engineConfigs() {
+		mod, rt, ctx := setupYieldResultCountChangeTest(t, ec.cfg)
+
+		_, err := mod.ExportedFunction("run").Call(experimental.WithYielder(ctx))
+		firstResumer := requireYieldError(t, err).Resumer()
+
+		_, err = firstResumer.Resume(experimental.WithYielder(ctx), []uint64{40})
+		secondResumer := requireYieldError(t, err).Resumer()
+
+		_, staleErr := firstResumer.Resume(experimental.WithYielder(ctx), []uint64{1})
+		_, wrongCountErr := secondResumer.Resume(experimental.WithYielder(ctx), []uint64{2})
+		require.Error(t, staleErr)
+		require.Error(t, wrongCountErr)
+		finalResults, err := secondResumer.Resume(experimental.WithYielder(ctx), []uint64{20, 22})
+		require.NoError(t, err)
+
+		results[ec.name] = paritySnapshot{
+			staleResumerErr: staleErr.Error(),
+			wrongCountErr:   wrongCountErr.Error(),
+			finalResults:    finalResults,
+		}
+
+		require.NoError(t, rt.Close(ctx))
+	}
+
+	require.Equal(t, results["interpreter"], results["compiler"])
+	require.Equal(t, paritySnapshot{
+		staleResumerErr: "cannot resume: resumer has already been used",
+		wrongCountErr:   "cannot resume: expected 2 host results, but got 1",
+		finalResults:    nil,
+	}, results["interpreter"])
+}
+
+func TestYieldParity_StateMachineErrors(t *testing.T) {
+	type paritySnapshot struct {
+		cancelErr     string
+		inProgressErr string
+		finalResults  []uint64
+	}
+
+	results := map[string]paritySnapshot{}
+	for _, ec := range engineConfigs() {
+		mod, rt, ctx := setupYieldTest(t, ec.cfg)
+
+		_, err := mod.ExportedFunction("run").Call(experimental.WithYielder(ctx))
+		cancelledResumer := requireYieldError(t, err).Resumer()
+		cancelledResumer.Cancel()
+		cancelledResumer.Cancel()
+		_, cancelErr := cancelledResumer.Resume(experimental.WithYielder(ctx), []uint64{42})
+		require.EqualError(t, cancelErr, "cannot resume: resumer has been cancelled")
+
+		host := &blockingResumeHostFunc{
+			t:             t,
+			resumeStarted: make(chan struct{}),
+			releaseResume: make(chan struct{}),
+		}
+		concurrentMod, concurrentRT, concurrentCtx := setupYieldTestWithHost(t, ec.cfg, host)
+		_, err = concurrentMod.ExportedFunction("run_twice").Call(experimental.WithYielder(concurrentCtx))
+		concurrentResumer := requireYieldError(t, err).Resumer()
+
+		type resumeOutcome struct {
+			results []uint64
+			err     error
+		}
+		outcomes := make(chan resumeOutcome, 2)
+		go func() {
+			results, err := concurrentResumer.Resume(experimental.WithYielder(concurrentCtx), []uint64{40})
+			outcomes <- resumeOutcome{results: results, err: err}
+		}()
+		<-host.resumeStarted
+		go func() {
+			results, err := concurrentResumer.Resume(experimental.WithYielder(concurrentCtx), []uint64{7})
+			outcomes <- resumeOutcome{results: results, err: err}
+		}()
+
+		second := <-outcomes
+		close(host.releaseResume)
+		first := <-outcomes
+		require.Error(t, second.err)
+		require.NoError(t, first.err)
+
+		results[ec.name] = paritySnapshot{
+			cancelErr:     cancelErr.Error(),
+			inProgressErr: second.err.Error(),
+			finalResults:  first.results,
+		}
+
+		require.NoError(t, concurrentRT.Close(concurrentCtx))
+		require.NoError(t, rt.Close(ctx))
+	}
+
+	require.Equal(t, results["interpreter"], results["compiler"])
+	require.Equal(t, paritySnapshot{
+		cancelErr:     "cannot resume: resumer has been cancelled",
+		inProgressErr: "cannot resume: resumer is already being resumed",
+		finalResults:  []uint64{42},
+	}, results["interpreter"])
 }
 
 func TestYield_BasicYieldAndResume(t *testing.T) {
