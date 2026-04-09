@@ -66,6 +66,23 @@ func (r *recordingYieldObserver) snapshot() []experimental.YieldObservation {
 	return append([]experimental.YieldObservation(nil), r.observations...)
 }
 
+type recordingYieldPolicyObserver struct {
+	mu           sync.Mutex
+	observations []experimental.YieldPolicyObservation
+}
+
+func (r *recordingYieldPolicyObserver) ObserveYieldPolicy(_ context.Context, observation experimental.YieldPolicyObservation) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.observations = append(r.observations, observation)
+}
+
+func (r *recordingYieldPolicyObserver) snapshot() []experimental.YieldPolicyObservation {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]experimental.YieldPolicyObservation(nil), r.observations...)
+}
+
 type yieldObservationSnapshot struct {
 	Event               experimental.YieldEvent
 	YieldCount          uint64
@@ -1264,6 +1281,191 @@ func TestYieldPolicy_ResumeUsesResumedContext(t *testing.T) {
 			require.True(t, errors.Is(err, wasmruntime.ErrRuntimePolicyDenied), "expected ErrRuntimePolicyDenied, got %v", err)
 			require.Equal(t, 1, initialConsulted)
 			require.Equal(t, 1, resumeConsulted)
+		})
+	}
+}
+
+func TestYieldPolicyObserver_ReportsAllow(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			mod, rt, ctx := setupYieldTest(t, ec.cfg)
+			defer rt.Close(ctx)
+
+			observer := &recordingYieldPolicyObserver{}
+			_, err := mod.ExportedFunction("run").Call(
+				experimental.WithYieldPolicyObserver(
+					experimental.WithYieldPolicy(
+						experimental.WithYielder(ctx),
+						experimental.YieldPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+							require.NotNil(t, caller)
+							require.Equal(t, "example.async_work", hostFunction.DebugName())
+							return true
+						}),
+					),
+					observer,
+				),
+			)
+			resumer := requireYieldError(t, err).Resumer()
+
+			results, err := resumer.Resume(experimental.WithYielder(ctx), []uint64{42})
+			require.NoError(t, err)
+			require.Equal(t, []uint64{142}, results)
+
+			observations := observer.snapshot()
+			require.Equal(t, 1, len(observations))
+			require.Equal(t, experimental.YieldPolicyEventAllowed, observations[0].Event)
+			require.Equal(t, mod.Name(), observations[0].Module.Name())
+			require.Equal(t, "example.async_work", observations[0].HostFunction.DebugName())
+		})
+	}
+}
+
+func TestYieldPolicyObserver_ReportsDeny(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			mod, rt, ctx := setupYieldTest(t, ec.cfg)
+			defer rt.Close(ctx)
+
+			observer := &recordingYieldPolicyObserver{}
+			_, err := mod.ExportedFunction("run").Call(
+				experimental.WithYieldPolicyObserver(
+					experimental.WithYieldPolicy(
+						experimental.WithYielder(ctx),
+						experimental.YieldPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+							require.NotNil(t, caller)
+							require.Equal(t, "example.async_work", hostFunction.DebugName())
+							return false
+						}),
+					),
+					observer,
+				),
+			)
+			require.True(t, errors.Is(err, wasmruntime.ErrRuntimePolicyDenied), "expected ErrRuntimePolicyDenied, got %v", err)
+
+			observations := observer.snapshot()
+			require.Equal(t, 1, len(observations))
+			require.Equal(t, experimental.YieldPolicyEventDenied, observations[0].Event)
+			require.Equal(t, mod.Name(), observations[0].Module.Name())
+			require.Equal(t, "example.async_work", observations[0].HostFunction.DebugName())
+		})
+	}
+}
+
+func TestYieldPolicyObserver_HostCallPolicyTakesPrecedence(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			mod, rt, ctx := setupYieldTest(t, ec.cfg)
+			defer rt.Close(ctx)
+
+			observer := &recordingYieldPolicyObserver{}
+			yieldConsulted := 0
+			callCtx := experimental.WithYieldPolicyObserver(
+				experimental.WithYieldPolicy(
+					experimental.WithHostCallPolicy(
+						experimental.WithYielder(ctx),
+						experimental.HostCallPolicyFunc(func(context.Context, api.Module, api.FunctionDefinition) bool {
+							return false
+						}),
+					),
+					experimental.YieldPolicyFunc(func(context.Context, api.Module, api.FunctionDefinition) bool {
+						yieldConsulted++
+						return true
+					}),
+				),
+				observer,
+			)
+
+			_, err := mod.ExportedFunction("run").Call(callCtx)
+			require.True(t, errors.Is(err, wasmruntime.ErrRuntimePolicyDenied), "expected ErrRuntimePolicyDenied, got %v", err)
+			require.Zero(t, yieldConsulted)
+			require.Zero(t, len(observer.snapshot()))
+		})
+	}
+}
+
+func TestYieldPolicyObserver_RuntimeDefaultAndCallContextOverride(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			mod, rt, ctx := setupYieldTest(t, ec.cfg.WithYieldPolicy(experimental.YieldPolicyFunc(
+				func(context.Context, api.Module, api.FunctionDefinition) bool { return false },
+			)))
+			defer rt.Close(ctx)
+
+			defaultObserver := &recordingYieldPolicyObserver{}
+			_, err := mod.ExportedFunction("run").Call(
+				experimental.WithYieldPolicyObserver(
+					experimental.WithYielder(ctx),
+					defaultObserver,
+				),
+			)
+			require.True(t, errors.Is(err, wasmruntime.ErrRuntimePolicyDenied), "expected ErrRuntimePolicyDenied, got %v", err)
+
+			defaultObservations := defaultObserver.snapshot()
+			require.Equal(t, 1, len(defaultObservations))
+			require.Equal(t, experimental.YieldPolicyEventDenied, defaultObservations[0].Event)
+
+			overrideObserver := &recordingYieldPolicyObserver{}
+			_, err = mod.ExportedFunction("run").Call(
+				experimental.WithYieldPolicyObserver(
+					experimental.WithYieldPolicy(
+						experimental.WithYielder(ctx),
+						experimental.YieldPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+							require.NotNil(t, caller)
+							require.Equal(t, "example.async_work", hostFunction.DebugName())
+							return true
+						}),
+					),
+					overrideObserver,
+				),
+			)
+			resumer := requireYieldError(t, err).Resumer()
+
+			results, err := resumer.Resume(experimental.WithYielder(ctx), []uint64{42})
+			require.NoError(t, err)
+			require.Equal(t, []uint64{142}, results)
+
+			overrideObservations := overrideObserver.snapshot()
+			require.Equal(t, 1, len(overrideObservations))
+			require.Equal(t, experimental.YieldPolicyEventAllowed, overrideObservations[0].Event)
+		})
+	}
+}
+
+func TestYieldPolicyObserver_DoesNotReemitOnResume(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			mod, rt, ctx := setupYieldTest(t, ec.cfg)
+			defer rt.Close(ctx)
+
+			initialObserver := &recordingYieldPolicyObserver{}
+			_, err := mod.ExportedFunction("run").Call(
+				experimental.WithYieldPolicyObserver(
+					experimental.WithYieldPolicy(
+						experimental.WithYielder(ctx),
+						experimental.YieldPolicyFunc(func(context.Context, api.Module, api.FunctionDefinition) bool {
+							return true
+						}),
+					),
+					initialObserver,
+				),
+			)
+			resumer := requireYieldError(t, err).Resumer()
+
+			resumeObserver := &recordingYieldPolicyObserver{}
+			results, err := resumer.Resume(
+				experimental.WithYieldPolicyObserver(
+					experimental.WithYielder(ctx),
+					resumeObserver,
+				),
+				[]uint64{42},
+			)
+			require.NoError(t, err)
+			require.Equal(t, []uint64{142}, results)
+
+			initialObservations := initialObserver.snapshot()
+			require.Equal(t, 1, len(initialObservations))
+			require.Equal(t, experimental.YieldPolicyEventAllowed, initialObservations[0].Event)
+			require.Zero(t, len(resumeObserver.snapshot()))
 		})
 	}
 }

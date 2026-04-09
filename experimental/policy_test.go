@@ -18,6 +18,11 @@ type stubHostCallPolicyObserver struct{}
 func (*stubHostCallPolicyObserver) ObserveHostCallPolicy(context.Context, HostCallPolicyObservation) {
 }
 
+type stubYieldPolicyObserver struct{}
+
+func (*stubYieldPolicyObserver) ObserveYieldPolicy(context.Context, YieldPolicyObservation) {
+}
+
 type stubYieldPolicy struct{}
 
 func (*stubYieldPolicy) AllowYield(context.Context, api.Module, api.FunctionDefinition) bool {
@@ -186,5 +191,50 @@ func TestYieldPolicyFunc_NilAllows(t *testing.T) {
 	var policy YieldPolicyFunc
 	if !policy.AllowYield(context.Background(), nil, nil) {
 		t.Fatal("nil YieldPolicyFunc should behave as absent and allow the yield")
+	}
+}
+
+func TestWithYieldPolicyObserver_NilDoesNothing(t *testing.T) {
+	ctx := context.Background()
+	if result := WithYieldPolicyObserver(ctx, nil); result != ctx {
+		t.Fatal("WithYieldPolicyObserver(ctx, nil) should return the same context")
+	}
+}
+
+func TestGetYieldPolicyObserver_NotSet(t *testing.T) {
+	if got := GetYieldPolicyObserver(context.Background()); got != nil {
+		t.Fatal("GetYieldPolicyObserver on empty context should return nil")
+	}
+}
+
+func TestGetYieldPolicyObserver_NilContext(t *testing.T) {
+	if got := GetYieldPolicyObserver(nil); got != nil {
+		t.Fatal("GetYieldPolicyObserver(nil) should return nil")
+	}
+}
+
+func TestWithYieldPolicyObserver_TypedNilDoesNothing(t *testing.T) {
+	ctx := context.Background()
+
+	var funcObserver YieldPolicyObserverFunc
+	if result := WithYieldPolicyObserver(ctx, funcObserver); result != ctx {
+		t.Fatal("WithYieldPolicyObserver should ignore typed-nil YieldPolicyObserverFunc values")
+	}
+
+	var ptrObserver *stubYieldPolicyObserver
+	if result := WithYieldPolicyObserver(ctx, ptrObserver); result != ctx {
+		t.Fatal("WithYieldPolicyObserver should ignore typed-nil YieldPolicyObserver values")
+	}
+}
+
+func TestWithYieldPolicyObserver_RoundTrip(t *testing.T) {
+	observer := YieldPolicyObserverFunc(func(context.Context, YieldPolicyObservation) {})
+
+	got := GetYieldPolicyObserver(WithYieldPolicyObserver(context.Background(), observer))
+	if got == nil {
+		t.Fatal("GetYieldPolicyObserver should return non-nil")
+	}
+	if _, ok := got.(YieldPolicyObserverFunc); !ok {
+		t.Fatal("GetYieldPolicyObserver should return the registered observer type")
 	}
 }

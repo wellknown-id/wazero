@@ -26,6 +26,24 @@ type HostCallPolicyObservation struct {
 	Event        HostCallPolicyEvent
 }
 
+// YieldPolicyEvent identifies a yield-policy decision.
+type YieldPolicyEvent string
+
+const (
+	YieldPolicyEventAllowed YieldPolicyEvent = "allowed"
+	YieldPolicyEventDenied  YieldPolicyEvent = "denied"
+)
+
+// YieldPolicyObservation describes an opt-in yield-policy decision.
+//
+// Notifications are emitted only when a YieldPolicy is configured and consulted
+// because a host function actually calls Yielder.Yield.
+type YieldPolicyObservation struct {
+	Module       api.Module
+	HostFunction api.FunctionDefinition
+	Event        YieldPolicyEvent
+}
+
 // HostCallPolicyObserver receives opt-in notifications for host-call policy
 // decisions.
 type HostCallPolicyObserver interface {
@@ -67,7 +85,61 @@ func GetHostCallPolicyObserver(ctx context.Context) HostCallPolicyObserver {
 	return observer
 }
 
+// YieldPolicyObserver receives opt-in notifications for yield-policy
+// decisions.
+type YieldPolicyObserver interface {
+	ObserveYieldPolicy(ctx context.Context, observation YieldPolicyObservation)
+}
+
+// YieldPolicyObserverFunc adapts a function into a YieldPolicyObserver.
+type YieldPolicyObserverFunc func(context.Context, YieldPolicyObservation)
+
+// ObserveYieldPolicy implements YieldPolicyObserver.
+func (f YieldPolicyObserverFunc) ObserveYieldPolicy(ctx context.Context, observation YieldPolicyObservation) {
+	if f != nil {
+		f(ctx, observation)
+	}
+}
+
+// WithYieldPolicyObserver returns a derived context with the given
+// YieldPolicyObserver.
+//
+// If observer is nil, including a typed-nil YieldPolicyObserver value, ctx is
+// returned unchanged.
+func WithYieldPolicyObserver(ctx context.Context, observer YieldPolicyObserver) context.Context {
+	if isNilYieldPolicyObserver(observer) {
+		return ctx
+	}
+	return context.WithValue(ctx, expctxkeys.YieldPolicyObserverKey{}, observer)
+}
+
+// GetYieldPolicyObserver returns the YieldPolicyObserver from ctx, or nil if
+// none is set.
+func GetYieldPolicyObserver(ctx context.Context) YieldPolicyObserver {
+	if ctx == nil {
+		return nil
+	}
+	observer, _ := ctx.Value(expctxkeys.YieldPolicyObserverKey{}).(YieldPolicyObserver)
+	if isNilYieldPolicyObserver(observer) {
+		return nil
+	}
+	return observer
+}
+
 func isNilHostCallPolicyObserver(observer HostCallPolicyObserver) bool {
+	if observer == nil {
+		return true
+	}
+	v := reflect.ValueOf(observer)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
+}
+
+func isNilYieldPolicyObserver(observer YieldPolicyObserver) bool {
 	if observer == nil {
 		return true
 	}

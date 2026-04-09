@@ -742,6 +742,22 @@ func notifyHostCallPolicyObserver(ctx context.Context, mod api.Module, hostFunct
 	})
 }
 
+func notifyYieldPolicyObserver(ctx context.Context, mod api.Module, hostFunction api.FunctionDefinition, allowed bool) {
+	observer := experimental.GetYieldPolicyObserver(ctx)
+	if observer == nil {
+		return
+	}
+	event := experimental.YieldPolicyEventDenied
+	if allowed {
+		event = experimental.YieldPolicyEventAllowed
+	}
+	observer.ObserveYieldPolicy(ctx, experimental.YieldPolicyObservation{
+		Module:       mod,
+		HostFunction: hostFunction,
+		Event:        event,
+	})
+}
+
 func notifyFuelObserver(ctx, fallbackCtx context.Context, observer experimental.FuelObserver, observation experimental.FuelObservation) {
 	observer, observeCtx := resolveFuelObserver(ctx, fallbackCtx, observer)
 	if observer == nil {
@@ -1091,8 +1107,12 @@ type compilerYielder struct {
 
 // Yield implements experimental.Yielder.
 func (y *compilerYielder) Yield() {
-	if policy := experimental.GetYieldPolicy(y.ctx); policy != nil && !policy.AllowYield(y.ctx, y.caller, y.hostFunction) {
-		panic(wasmruntime.ErrRuntimePolicyDenied)
+	if policy := experimental.GetYieldPolicy(y.ctx); policy != nil {
+		allowed := policy.AllowYield(y.ctx, y.caller, y.hostFunction)
+		notifyYieldPolicyObserver(y.ctx, y.caller, y.hostFunction, allowed)
+		if !allowed {
+			panic(wasmruntime.ErrRuntimePolicyDenied)
+		}
 	}
 	panic(&compilerYieldSignal{ce: y.ce})
 }

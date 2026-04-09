@@ -11,3 +11,7 @@ type HostCallPolicyObserverKey struct{}
 // YieldPolicyKey is a context.Context key for the experimental yield policy
 // hook.
 type YieldPolicyKey struct{}
+
+// YieldPolicyObserverKey is a context.Context key for the experimental yield
+// policy observer.
+type YieldPolicyObserverKey struct{}
