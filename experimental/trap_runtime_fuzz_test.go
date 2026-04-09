@@ -11,6 +11,7 @@ import (
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/experimental"
+	"github.com/tetratelabs/wazero/internal/leb128"
 	"github.com/tetratelabs/wazero/internal/platform"
 	"github.com/tetratelabs/wazero/internal/testing/binaryencoding"
 	"github.com/tetratelabs/wazero/internal/wasm"
@@ -133,6 +134,47 @@ func trapRuntimeOutOfBoundsLoadBinary() []byte {
 		CodeSection: []wasm.Code{{Body: []byte{
 			wasm.OpcodeI32Const, 0x00,
 			wasm.OpcodeI32Load, 0x02, 0x80, 0x80, 0x04,
+			wasm.OpcodeEnd,
+		}}},
+		ExportSection: []wasm.Export{{Type: api.ExternTypeFunc, Name: "run", Index: 0}},
+	})
+}
+
+func trapRuntimeIntegerDivideByZeroBinary() []byte {
+	return binaryencoding.EncodeModule(&wasm.Module{
+		TypeSection:     []wasm.FunctionType{{Results: []api.ValueType{api.ValueTypeI32}}},
+		FunctionSection: []wasm.Index{0},
+		CodeSection: []wasm.Code{{Body: []byte{
+			wasm.OpcodeI32Const, 0x01,
+			wasm.OpcodeI32Const, 0x00,
+			wasm.OpcodeI32DivS,
+			wasm.OpcodeEnd,
+		}}},
+		ExportSection: []wasm.Export{{Type: api.ExternTypeFunc, Name: "run", Index: 0}},
+	})
+}
+
+func trapRuntimeIntegerOverflowBinary() []byte {
+	body := []byte{wasm.OpcodeI32Const}
+	body = append(body, leb128.EncodeInt32(-1<<31)...)
+	body = append(body, wasm.OpcodeI32Const)
+	body = append(body, leb128.EncodeInt32(-1)...)
+	body = append(body, wasm.OpcodeI32DivS, wasm.OpcodeEnd)
+	return binaryencoding.EncodeModule(&wasm.Module{
+		TypeSection:     []wasm.FunctionType{{Results: []api.ValueType{api.ValueTypeI32}}},
+		FunctionSection: []wasm.Index{0},
+		CodeSection:     []wasm.Code{{Body: body}},
+		ExportSection:   []wasm.Export{{Type: api.ExternTypeFunc, Name: "run", Index: 0}},
+	})
+}
+
+func trapRuntimeInvalidConversionToIntegerBinary() []byte {
+	return binaryencoding.EncodeModule(&wasm.Module{
+		TypeSection:     []wasm.FunctionType{{Results: []api.ValueType{api.ValueTypeI32}}},
+		FunctionSection: []wasm.Index{0},
+		CodeSection: []wasm.Code{{Body: []byte{
+			wasm.OpcodeF32Const, 0x00, 0x00, 0xc0, 0x7f,
+			wasm.OpcodeI32TruncF32S,
 			wasm.OpcodeEnd,
 		}}},
 		ExportSection: []wasm.Export{{Type: api.ExternTypeFunc, Name: "run", Index: 0}},

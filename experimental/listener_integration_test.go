@@ -495,6 +495,96 @@ func TestFunctionListener_AbortTrapPaths(t *testing.T) {
 			},
 		},
 		{
+			name:                   "interpreter/integer-divide-by-zero",
+			cfg:                    wazero.NewRuntimeConfigInterpreter,
+			supported:              func() bool { return true },
+			moduleBinary:           func(t *testing.T) []byte { return trapRuntimeIntegerDivideByZeroBinary() },
+			exportName:             "run",
+			wantErr:                wasmruntime.ErrRuntimeIntegerDivideByZero,
+			wantCause:              experimental.TrapCauseIntegerDivideByZero,
+			wantTrapClassification: true,
+			wantTrapCount:          1,
+			wantEvents: []expectedListenerEvent{
+				{phase: "before", function: "run"},
+				{phase: "abort", function: "run", errIs: wasmruntime.ErrRuntimeIntegerDivideByZero},
+			},
+		},
+		{
+			name:                   "compiler/integer-divide-by-zero",
+			cfg:                    wazero.NewRuntimeConfigCompiler,
+			supported:              platform.CompilerSupported,
+			moduleBinary:           func(t *testing.T) []byte { return trapRuntimeIntegerDivideByZeroBinary() },
+			exportName:             "run",
+			wantErr:                wasmruntime.ErrRuntimeIntegerDivideByZero,
+			wantCause:              experimental.TrapCauseIntegerDivideByZero,
+			wantTrapClassification: true,
+			wantTrapCount:          1,
+			wantEvents: []expectedListenerEvent{
+				{phase: "before", function: "run"},
+				{phase: "abort", function: "run", errIs: wasmruntime.ErrRuntimeIntegerDivideByZero},
+			},
+		},
+		{
+			name:                   "interpreter/integer-overflow",
+			cfg:                    wazero.NewRuntimeConfigInterpreter,
+			supported:              func() bool { return true },
+			moduleBinary:           func(t *testing.T) []byte { return trapRuntimeIntegerOverflowBinary() },
+			exportName:             "run",
+			wantErr:                wasmruntime.ErrRuntimeIntegerOverflow,
+			wantCause:              experimental.TrapCauseIntegerOverflow,
+			wantTrapClassification: true,
+			wantTrapCount:          1,
+			wantEvents: []expectedListenerEvent{
+				{phase: "before", function: "run"},
+				{phase: "abort", function: "run", errIs: wasmruntime.ErrRuntimeIntegerOverflow},
+			},
+		},
+		{
+			name:                   "compiler/integer-overflow",
+			cfg:                    wazero.NewRuntimeConfigCompiler,
+			supported:              platform.CompilerSupported,
+			moduleBinary:           func(t *testing.T) []byte { return trapRuntimeIntegerOverflowBinary() },
+			exportName:             "run",
+			wantErr:                wasmruntime.ErrRuntimeIntegerOverflow,
+			wantCause:              experimental.TrapCauseIntegerOverflow,
+			wantTrapClassification: true,
+			wantTrapCount:          1,
+			wantEvents: []expectedListenerEvent{
+				{phase: "before", function: "run"},
+				{phase: "abort", function: "run", errIs: wasmruntime.ErrRuntimeIntegerOverflow},
+			},
+		},
+		{
+			name:                   "interpreter/invalid-conversion-to-integer",
+			cfg:                    wazero.NewRuntimeConfigInterpreter,
+			supported:              func() bool { return true },
+			moduleBinary:           func(t *testing.T) []byte { return trapRuntimeInvalidConversionToIntegerBinary() },
+			exportName:             "run",
+			wantErr:                wasmruntime.ErrRuntimeInvalidConversionToInteger,
+			wantCause:              experimental.TrapCauseInvalidConversionToInteger,
+			wantTrapClassification: true,
+			wantTrapCount:          1,
+			wantEvents: []expectedListenerEvent{
+				{phase: "before", function: "run"},
+				{phase: "abort", function: "run", errIs: wasmruntime.ErrRuntimeInvalidConversionToInteger},
+			},
+		},
+		{
+			name:                   "compiler/invalid-conversion-to-integer",
+			cfg:                    wazero.NewRuntimeConfigCompiler,
+			supported:              platform.CompilerSupported,
+			moduleBinary:           func(t *testing.T) []byte { return trapRuntimeInvalidConversionToIntegerBinary() },
+			exportName:             "run",
+			wantErr:                wasmruntime.ErrRuntimeInvalidConversionToInteger,
+			wantCause:              experimental.TrapCauseInvalidConversionToInteger,
+			wantTrapClassification: true,
+			wantTrapCount:          1,
+			wantEvents: []expectedListenerEvent{
+				{phase: "before", function: "run"},
+				{phase: "abort", function: "run", errIs: wasmruntime.ErrRuntimeInvalidConversionToInteger},
+			},
+		},
+		{
 			name:                   "interpreter/memory-oob",
 			cfg:                    wazero.NewRuntimeConfigInterpreter,
 			supported:              func() bool { return true },
@@ -720,6 +810,48 @@ func TestFunctionListener_TrapObserverOrdering(t *testing.T) {
 			},
 		},
 		{
+			name:         "interpreter/integer-divide-by-zero",
+			cfg:          wazero.NewRuntimeConfigInterpreter,
+			supported:    func() bool { return true },
+			moduleBinary: func(t *testing.T) []byte { return trapRuntimeIntegerDivideByZeroBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeIntegerDivideByZero,
+			wantCause:    experimental.TrapCauseIntegerDivideByZero,
+			wantSubsequence: []string{
+				"listener before run",
+				"listener abort run (integer_divide_by_zero)",
+				"trap integer_divide_by_zero",
+			},
+		},
+		{
+			name:         "interpreter/integer-overflow",
+			cfg:          wazero.NewRuntimeConfigInterpreter,
+			supported:    func() bool { return true },
+			moduleBinary: func(t *testing.T) []byte { return trapRuntimeIntegerOverflowBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeIntegerOverflow,
+			wantCause:    experimental.TrapCauseIntegerOverflow,
+			wantSubsequence: []string{
+				"listener before run",
+				"listener abort run (integer_overflow)",
+				"trap integer_overflow",
+			},
+		},
+		{
+			name:         "interpreter/invalid-conversion-to-integer",
+			cfg:          wazero.NewRuntimeConfigInterpreter,
+			supported:    func() bool { return true },
+			moduleBinary: func(t *testing.T) []byte { return trapRuntimeInvalidConversionToIntegerBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeInvalidConversionToInteger,
+			wantCause:    experimental.TrapCauseInvalidConversionToInteger,
+			wantSubsequence: []string{
+				"listener before run",
+				"listener abort run (invalid_conversion_to_integer)",
+				"trap invalid_conversion_to_integer",
+			},
+		},
+		{
 			name:         "interpreter/policy-denied",
 			cfg:          wazero.NewRuntimeConfigInterpreter,
 			supported:    func() bool { return true },
@@ -753,6 +885,48 @@ func TestFunctionListener_TrapObserverOrdering(t *testing.T) {
 				"listener before run",
 				"listener abort run (unreachable)",
 				"trap unreachable",
+			},
+		},
+		{
+			name:         "compiler/integer-divide-by-zero",
+			cfg:          wazero.NewRuntimeConfigCompiler,
+			supported:    platform.CompilerSupported,
+			moduleBinary: func(t *testing.T) []byte { return trapRuntimeIntegerDivideByZeroBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeIntegerDivideByZero,
+			wantCause:    experimental.TrapCauseIntegerDivideByZero,
+			wantSubsequence: []string{
+				"listener before run",
+				"listener abort run (integer_divide_by_zero)",
+				"trap integer_divide_by_zero",
+			},
+		},
+		{
+			name:         "compiler/integer-overflow",
+			cfg:          wazero.NewRuntimeConfigCompiler,
+			supported:    platform.CompilerSupported,
+			moduleBinary: func(t *testing.T) []byte { return trapRuntimeIntegerOverflowBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeIntegerOverflow,
+			wantCause:    experimental.TrapCauseIntegerOverflow,
+			wantSubsequence: []string{
+				"listener before run",
+				"listener abort run (integer_overflow)",
+				"trap integer_overflow",
+			},
+		},
+		{
+			name:         "compiler/invalid-conversion-to-integer",
+			cfg:          wazero.NewRuntimeConfigCompiler,
+			supported:    platform.CompilerSupported,
+			moduleBinary: func(t *testing.T) []byte { return trapRuntimeInvalidConversionToIntegerBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeInvalidConversionToInteger,
+			wantCause:    experimental.TrapCauseInvalidConversionToInteger,
+			wantSubsequence: []string{
+				"listener before run",
+				"listener abort run (invalid_conversion_to_integer)",
+				"trap invalid_conversion_to_integer",
 			},
 		},
 		{
@@ -1087,7 +1261,11 @@ func TestFunctionListener_YieldObserverOrdering(t *testing.T) {
 
 			ctx := context.Background()
 			recorder := &orderedEventRecorder{}
-			instantiateCtx := experimental.WithFunctionListenerFactory(ctx, newFunctionListenerFactory(&orderedFunctionListener{recorder: recorder}))
+			listenerEvents := &recordingFunctionListener{}
+			instantiateCtx := experimental.WithFunctionListenerFactory(ctx, newFunctionListenerFactory(&orderedRecordingFunctionListener{
+				recorder: recorder,
+				events:   listenerEvents,
+			}))
 
 			rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg)
 			defer rt.Close(ctx)
@@ -1111,6 +1289,10 @@ func TestFunctionListener_YieldObserverOrdering(t *testing.T) {
 
 			_, err = mod.ExportedFunction("run").Call(callCtx)
 			yieldErr := requireYieldError(t, err)
+			assertListenerEvents(t, listenerEvents.snapshot(), []expectedListenerEvent{
+				{phase: "before", function: "run"},
+				{phase: "before", function: "async_work"},
+			})
 
 			results, err := yieldErr.Resumer().Resume(
 				experimental.WithYieldObserver(
@@ -1123,6 +1305,16 @@ func TestFunctionListener_YieldObserverOrdering(t *testing.T) {
 			)
 			require.NoError(t, err)
 			require.Equal(t, []uint64{142}, results)
+
+			events := listenerEvents.snapshot()
+			assertListenerEvents(t, events, []expectedListenerEvent{
+				{phase: "before", function: "run"},
+				{phase: "before", function: "async_work"},
+				{phase: "after", function: "async_work"},
+				{phase: "after", function: "run"},
+			})
+			assertBeforeCompletionPairing(t, events)
+			assertBeforeCompletionStackPairing(t, events)
 
 			assertOrderedEvents(t, recorder.snapshot(), []string{
 				"listener before run",
