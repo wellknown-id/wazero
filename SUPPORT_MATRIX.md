@@ -37,7 +37,7 @@ the embedder rather than by a built-in runtime-owned WASI layer.
 | Baseline Wasm execution | ✅ | ✅ | ✅ | ✅ | n/a | Covered by normal repository test suites on supported targets. |
 | `WithSecureMode(true)`: guard-page-backed linear memory allocation | ✅ on unix/windows | ✅ on unix/windows | ✅ on unix/windows | ✅ on unix/windows | On non-`unix`/`windows` targets, secure mode stays on regular checked memory paths. If the embedder already provides a custom `experimental.MemoryAllocator`, wazero does not replace it. | Backed by `internal/platform` and `internal/secmem` tests; this is broader than the Linux fault-trap path below. |
 | `WithSecureMode(true)`: hardware fault to Wasm OOB trap path and compiler bounds-check elision | ✅ | ✅ in code | ❌ | ❌ | Outside Linux `amd64` / `arm64`, compiled code keeps normal software bounds checks even when secure mode is enabled. Interpreter always keeps software bounds checks. | Linux/amd64 has end-to-end coverage via `TestSecureMode_HardwareFaultToTrap`. Linux/arm64 implementation is present, but [native validation is still pending](ARM64-SECURE-MODE-VALIDATION.md). |
-| `WithFuel(fuel > 0)` deterministic metering | ✅ | ✅ | ✅ | ❌ | Interpreter ignores `WithFuel`; if `NewRuntimeConfig()` auto-selects the interpreter, fuel behaves as a no-op. `fuel <= 0` also disables metering. | Implemented in the compiler path and covered by repository fuel/controller tests and benches. |
+| `WithFuel(fuel > 0)` deterministic metering | ✅ | ✅ | ✅ | ✅ | `fuel <= 0` disables metering. | Covered by repository fuel/controller tests on both engines and by fuel benches on the compiler path. |
 
 ## Hook ordering and precedence
 
@@ -121,9 +121,10 @@ back to the instantiated-module store.
   `experimental.WithFuelController`, `experimental.WithFuelObserver`,
   `experimental.RemainingFuel`, `experimental.AddFuel`, and
   `FuelController.Consumed`.
-- On the compiler path, a call-scoped `FuelController` overrides the runtime
-  fuel budget for that call. The interpreter ignores `WithFuel`.
-- When a `FuelObserver` is present on the compiler path, lifecycle events are
+- On both engines, a call-scoped `FuelController` overrides the runtime fuel
+  budget for that call. A non-positive controller budget disables metering for
+  that call.
+- When a `FuelObserver` is present, lifecycle events are
   emitted in call order: `budgeted`, then any in-host `recharged` events from
   `AddFuel`, then terminal `consumed` or `exhausted`.
 - For yielded executions, the fuel controller/budget is chosen when the Wasm
@@ -137,8 +138,27 @@ back to the instantiated-module store.
 
 ## Practical guidance
 
+- Install hardening hooks at the narrowest scope that matches their job:
+
+  | Scope | Put these hooks here | Why |
+  | --- | --- | --- |
+  | runtime defaults | `RuntimeConfig.WithHostCallPolicy`, `RuntimeConfig.WithYieldPolicy`, `RuntimeConfig.WithTimeProvider`, `RuntimeConfig.WithFuel` | Sets a baseline for every module instantiated by that runtime. Call-scoped overrides can still narrow or replace the default later. |
+  | instantiation context | `experimental.WithImportResolverACL`, `experimental.WithImportResolverConfig` | Import resolution happens only while instantiating a module, so attach ACL/resolver policy to `Instantiate`, `InstantiateWithConfig`, or `InstantiateModule`. |
+  | call / resume context | `experimental.WithYielder`, `experimental.WithTrapObserver`, `experimental.WithYieldObserver`, `experimental.WithFuelController`, `experimental.WithFuelObserver`, `experimental.WithHostCallPolicy`, `experimental.WithYieldPolicy`, `experimental.WithTimeProvider` | These govern a specific execution attempt and can change on `Resume`. Rebuild the resume context with the observers/policies you still want active. |
+
+- A practical pattern is:
+  1. set runtime-wide host/yield defaults once;
+  2. instantiate each guest with an import ACL / resolver config;
+  3. wrap each exported-function call with only the per-request observers,
+     fuel controls, and call-scoped overrides you need.
+- The `experimental` package example `Example_runtimeHardeningHooks` shows this
+  layering end-to-end: import ACL at instantiation, runtime-default
+  `HostCallPolicy`, per-call `YieldObserver`, and a denial path surfaced through
+  `TrapObserver`.
 - If you want the broadest compatibility, use `NewRuntimeConfig()` and assume interpreter fallback is possible.
-- If you require deterministic fuel metering, require the compiler explicitly and treat interpreter fallback as unsupported for that deployment.
+- Deterministic fuel metering works on both engines. Require the compiler
+  explicitly only if you also depend on compiler-only behavior such as JIT
+  performance or compiler-path benchmarking.
 - If you require the Workstream 1 hardware-fault secure-mode path, target Linux first:
   - **Linux/amd64** is the current validated path.
   - **Linux/arm64** is implemented but should still be treated as pending native validation sign-off.

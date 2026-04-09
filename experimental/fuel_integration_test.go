@@ -74,18 +74,19 @@ func (r *recordingFuelObserver) snapshot() []experimental.FuelObservation {
 	return out
 }
 
-func TestWithFuel_InterpreterIgnoresFuel(t *testing.T) {
+func TestWithFuel_InterpreterExposesFuelAccessor(t *testing.T) {
 	ctx := context.Background()
 	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfigInterpreter().WithFuel(5))
 	defer rt.Close(ctx)
 
+	var remaining int64
 	var fuelErr error
 	hostCalled := false
 	_, err := rt.NewHostModuleBuilder("env").
 		NewFunctionBuilder().
 		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 			hostCalled = true
-			_, fuelErr = experimental.RemainingFuel(ctx)
+			remaining, fuelErr = experimental.RemainingFuel(ctx)
 		}), nil, nil).
 		Export("inspect").
 		Instantiate(ctx)
@@ -97,43 +98,48 @@ func TestWithFuel_InterpreterIgnoresFuel(t *testing.T) {
 	_, err = mod.ExportedFunction("run").Call(ctx)
 	require.NoError(t, err)
 	require.True(t, hostCalled)
-	require.ErrorIs(t, fuelErr, experimental.ErrNoFuelAccessor)
+	require.NoError(t, fuelErr)
+	require.True(t, remaining > 0 && remaining < 5, "remaining fuel = %d", remaining)
 }
 
 func TestWithFuelController_OverridesRuntimeBudget(t *testing.T) {
-	if !platform.CompilerSupported() {
-		t.Skip("compiler is not supported on this host")
-	}
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
 
-	ctx := context.Background()
-	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfigCompiler().WithFuel(1))
-	defer rt.Close(ctx)
+			ctx := context.Background()
+			rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg.WithFuel(1))
+			defer rt.Close(ctx)
 
-	var remaining int64
-	var fuelErr error
-	_, err := rt.NewHostModuleBuilder("env").
-		NewFunctionBuilder().
-		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
-			remaining, fuelErr = experimental.RemainingFuel(ctx)
-		}), nil, nil).
-		Export("inspect").
-		Instantiate(ctx)
-	require.NoError(t, err)
+			var remaining int64
+			var fuelErr error
+			_, err := rt.NewHostModuleBuilder("env").
+				NewFunctionBuilder().
+				WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+					remaining, fuelErr = experimental.RemainingFuel(ctx)
+				}), nil, nil).
+				Export("inspect").
+				Instantiate(ctx)
+			require.NoError(t, err)
 
-	mod, err := rt.Instantiate(ctx, hostInspectModuleBinary())
-	require.NoError(t, err)
+			mod, err := rt.Instantiate(ctx, hostInspectModuleBinary())
+			require.NoError(t, err)
 
-	ctrl := experimental.NewSimpleFuelController(10)
-	callCtx := experimental.WithFuelController(ctx, ctrl)
+			ctrl := experimental.NewSimpleFuelController(10)
+			callCtx := experimental.WithFuelController(ctx, ctrl)
 
-	_, err = mod.ExportedFunction("run").Call(callCtx)
-	require.NoError(t, err)
-	require.NoError(t, fuelErr)
-	if remaining <= 1 {
-		t.Fatalf("expected controller budget to override runtime fuel budget, remaining fuel = %d", remaining)
-	}
-	if ctrl.TotalConsumed() <= 0 {
-		t.Fatalf("expected fuel controller to record consumption, got %d", ctrl.TotalConsumed())
+			_, err = mod.ExportedFunction("run").Call(callCtx)
+			require.NoError(t, err)
+			require.NoError(t, fuelErr)
+			if remaining <= 1 {
+				t.Fatalf("expected controller budget to override runtime fuel budget, remaining fuel = %d", remaining)
+			}
+			if ctrl.TotalConsumed() <= 0 {
+				t.Fatalf("expected fuel controller to record consumption, got %d", ctrl.TotalConsumed())
+			}
+		})
 	}
 }
 
@@ -176,10 +182,6 @@ func TestWithFuelController_NonPositiveBudgetDisablesFuelMetering(t *testing.T) 
 }
 
 func TestAddFuel_HostAdjustmentControlsNextFuelCheck(t *testing.T) {
-	if !platform.CompilerSupported() {
-		t.Skip("compiler is not supported on this host")
-	}
-
 	tests := []struct {
 		name       string
 		budget     int64
@@ -192,130 +194,144 @@ func TestAddFuel_HostAdjustmentControlsNextFuelCheck(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
+		for _, ec := range engineConfigs() {
+			t.Run(fmt.Sprintf("%s/%s", ec.name, tc.name), func(t *testing.T) {
+				if ec.name == "compiler" && !platform.CompilerSupported() {
+					t.Skip("compiler is not supported on this host")
+				}
+
+				ctx := context.Background()
+				rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg.WithFuel(1))
+				defer rt.Close(ctx)
+
+				hostCalled := false
+				var before, after int64
+				var remainingErr, addErr error
+				_, err := rt.NewHostModuleBuilder("env").
+					NewFunctionBuilder().
+					WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+						hostCalled = true
+						before, remainingErr = experimental.RemainingFuel(ctx)
+						if remainingErr != nil {
+							return
+						}
+						addErr = experimental.AddFuel(ctx, tc.adjustment)
+						if addErr != nil {
+							return
+						}
+						after, remainingErr = experimental.RemainingFuel(ctx)
+					}), nil, nil).
+					Export("adjust").
+					Instantiate(ctx)
+				require.NoError(t, err)
+
+				mod, err := rt.Instantiate(ctx, hostAdjustThenCallModuleBinary())
+				require.NoError(t, err)
+
+				ctrl := experimental.NewSimpleFuelController(tc.budget)
+				callCtx := experimental.WithFuelController(ctx, ctrl)
+
+				_, err = mod.ExportedFunction("run").Call(callCtx)
+				require.True(t, hostCalled)
+				require.NoError(t, remainingErr)
+				require.NoError(t, addErr)
+				require.Equal(t, before+tc.adjustment, after)
+				if after > 0 {
+					require.NoError(t, err)
+				} else {
+					require.ErrorIs(t, err, wasmruntime.ErrRuntimeFuelExhausted)
+				}
+				require.True(t, ctrl.TotalConsumed() > 0)
+			})
+		}
+	}
+}
+
+func TestFuelObserver_Lifecycle(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
+
 			ctx := context.Background()
-			rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfigCompiler().WithFuel(1))
+			rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg.WithFuel(1))
 			defer rt.Close(ctx)
 
-			hostCalled := false
-			var before, after int64
-			var remainingErr, addErr error
+			var beforeRecharge, afterRecharge int64
+			var fuelErr error
 			_, err := rt.NewHostModuleBuilder("env").
 				NewFunctionBuilder().
 				WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
-					hostCalled = true
-					before, remainingErr = experimental.RemainingFuel(ctx)
-					if remainingErr != nil {
-						return
-					}
-					addErr = experimental.AddFuel(ctx, tc.adjustment)
-					if addErr != nil {
-						return
-					}
-					after, remainingErr = experimental.RemainingFuel(ctx)
+					beforeRecharge, fuelErr = experimental.RemainingFuel(ctx)
+					require.NoError(t, fuelErr)
+					require.NoError(t, experimental.AddFuel(ctx, 5))
+					afterRecharge, fuelErr = experimental.RemainingFuel(ctx)
+					require.NoError(t, fuelErr)
 				}), nil, nil).
-				Export("adjust").
+				Export("inspect").
 				Instantiate(ctx)
 			require.NoError(t, err)
 
-			mod, err := rt.Instantiate(ctx, hostAdjustThenCallModuleBinary())
+			mod, err := rt.InstantiateWithConfig(ctx, hostInspectModuleBinary(), wazero.NewModuleConfig().WithName("fuel-guest"))
 			require.NoError(t, err)
 
-			ctrl := experimental.NewSimpleFuelController(tc.budget)
-			callCtx := experimental.WithFuelController(ctx, ctrl)
+			observer := &recordingFuelObserver{}
+			ctrl := experimental.NewSimpleFuelController(10)
+			callCtx := experimental.WithFuelObserver(experimental.WithFuelController(ctx, ctrl), observer)
 
 			_, err = mod.ExportedFunction("run").Call(callCtx)
-			require.True(t, hostCalled)
-			require.NoError(t, remainingErr)
-			require.NoError(t, addErr)
-			require.Equal(t, before+tc.adjustment, after)
-			if after > 0 {
-				require.NoError(t, err)
-			} else {
-				require.ErrorIs(t, err, wasmruntime.ErrRuntimeFuelExhausted)
-			}
-			require.True(t, ctrl.TotalConsumed() > 0)
+			require.NoError(t, err)
+			require.NoError(t, fuelErr)
+			require.True(t, afterRecharge > beforeRecharge)
+
+			observations := observer.snapshot()
+			require.Equal(t, 3, len(observations))
+			require.Equal(t, experimental.FuelEventBudgeted, observations[0].Event)
+			require.Equal(t, int64(10), observations[0].Budget)
+			require.Equal(t, int64(10), observations[0].Remaining)
+
+			require.Equal(t, experimental.FuelEventRecharged, observations[1].Event)
+			require.Equal(t, int64(5), observations[1].Delta)
+			require.Equal(t, afterRecharge, observations[1].Remaining)
+			require.Equal(t, "fuel-guest", observations[1].Module.Name())
+
+			require.Equal(t, experimental.FuelEventConsumed, observations[2].Event)
+			require.Equal(t, int64(15), observations[2].Budget)
+			require.True(t, observations[2].Consumed > 0)
+			require.Equal(t, observations[2].Budget-observations[2].Consumed, observations[2].Remaining)
+			require.Equal(t, observations[2].Consumed, ctrl.TotalConsumed())
 		})
 	}
 }
 
-func TestFuelObserver_CompilerLifecycle(t *testing.T) {
-	if !platform.CompilerSupported() {
-		t.Skip("compiler is not supported on this host")
+func TestFuelObserver_Exhaustion(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
+
+			ctx := context.Background()
+			rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg.WithFuel(3))
+			defer rt.Close(ctx)
+
+			mod, err := rt.InstantiateWithConfig(ctx, fuelLoopModuleBinary(), wazero.NewModuleConfig().WithName("fuel-loop"))
+			require.NoError(t, err)
+
+			observer := &recordingFuelObserver{}
+			_, err = mod.ExportedFunction("run").Call(experimental.WithFuelObserver(ctx, observer))
+			require.ErrorIs(t, err, wasmruntime.ErrRuntimeFuelExhausted)
+
+			observations := observer.snapshot()
+			require.Equal(t, 2, len(observations))
+			require.Equal(t, experimental.FuelEventBudgeted, observations[0].Event)
+			require.Equal(t, int64(3), observations[0].Budget)
+			require.Equal(t, experimental.FuelEventExhausted, observations[1].Event)
+			require.Equal(t, int64(3), observations[1].Budget)
+			require.True(t, observations[1].Consumed >= observations[1].Budget)
+			require.True(t, observations[1].Remaining <= 0)
+			require.Equal(t, "fuel-loop", observations[1].Module.Name())
+		})
 	}
-
-	ctx := context.Background()
-	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfigCompiler().WithFuel(1))
-	defer rt.Close(ctx)
-
-	var beforeRecharge, afterRecharge int64
-	var fuelErr error
-	_, err := rt.NewHostModuleBuilder("env").
-		NewFunctionBuilder().
-		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
-			beforeRecharge, fuelErr = experimental.RemainingFuel(ctx)
-			require.NoError(t, fuelErr)
-			require.NoError(t, experimental.AddFuel(ctx, 5))
-			afterRecharge, fuelErr = experimental.RemainingFuel(ctx)
-			require.NoError(t, fuelErr)
-		}), nil, nil).
-		Export("inspect").
-		Instantiate(ctx)
-	require.NoError(t, err)
-
-	mod, err := rt.InstantiateWithConfig(ctx, hostInspectModuleBinary(), wazero.NewModuleConfig().WithName("fuel-guest"))
-	require.NoError(t, err)
-
-	observer := &recordingFuelObserver{}
-	ctrl := experimental.NewSimpleFuelController(10)
-	callCtx := experimental.WithFuelObserver(experimental.WithFuelController(ctx, ctrl), observer)
-
-	_, err = mod.ExportedFunction("run").Call(callCtx)
-	require.NoError(t, err)
-	require.NoError(t, fuelErr)
-	require.True(t, afterRecharge > beforeRecharge)
-
-	observations := observer.snapshot()
-	require.Equal(t, 3, len(observations))
-	require.Equal(t, experimental.FuelEventBudgeted, observations[0].Event)
-	require.Equal(t, int64(10), observations[0].Budget)
-	require.Equal(t, int64(10), observations[0].Remaining)
-
-	require.Equal(t, experimental.FuelEventRecharged, observations[1].Event)
-	require.Equal(t, int64(5), observations[1].Delta)
-	require.Equal(t, afterRecharge, observations[1].Remaining)
-	require.Equal(t, "fuel-guest", observations[1].Module.Name())
-
-	require.Equal(t, experimental.FuelEventConsumed, observations[2].Event)
-	require.Equal(t, int64(15), observations[2].Budget)
-	require.True(t, observations[2].Consumed > 0)
-	require.Equal(t, observations[2].Budget-observations[2].Consumed, observations[2].Remaining)
-	require.Equal(t, observations[2].Consumed, ctrl.TotalConsumed())
-}
-
-func TestFuelObserver_CompilerExhaustion(t *testing.T) {
-	if !platform.CompilerSupported() {
-		t.Skip("compiler is not supported on this host")
-	}
-
-	ctx := context.Background()
-	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfigCompiler().WithFuel(3))
-	defer rt.Close(ctx)
-
-	mod, err := rt.InstantiateWithConfig(ctx, fuelLoopModuleBinary(), wazero.NewModuleConfig().WithName("fuel-loop"))
-	require.NoError(t, err)
-
-	observer := &recordingFuelObserver{}
-	_, err = mod.ExportedFunction("run").Call(experimental.WithFuelObserver(ctx, observer))
-	require.ErrorIs(t, err, wasmruntime.ErrRuntimeFuelExhausted)
-
-	observations := observer.snapshot()
-	require.Equal(t, 2, len(observations))
-	require.Equal(t, experimental.FuelEventBudgeted, observations[0].Event)
-	require.Equal(t, int64(3), observations[0].Budget)
-	require.Equal(t, experimental.FuelEventExhausted, observations[1].Event)
-	require.Equal(t, int64(3), observations[1].Budget)
-	require.True(t, observations[1].Consumed >= observations[1].Budget)
-	require.True(t, observations[1].Remaining <= 0)
-	require.Equal(t, "fuel-loop", observations[1].Module.Name())
 }

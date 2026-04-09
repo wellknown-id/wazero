@@ -188,11 +188,11 @@ type RuntimeConfig interface {
 	// Fuel lifecycle hooks can be attached per-call with
 	// experimental.WithFuelObserver.
 	//
-	// Note: fuel metering is currently supported only by the compiler (wazevo)
-	// engine. The interpreter ignores this setting, including when
-	// NewRuntimeConfig() auto-falls back to the interpreter.
+	// Fuel metering is supported on both the compiler and interpreter engines.
+	// If NewRuntimeConfig() auto-falls back to the interpreter, fuel metering
+	// remains active.
 	//
-	// See SUPPORT_MATRIX.md for the current support and fallback matrix.
+	// See SUPPORT_MATRIX.md for the current support matrix.
 	WithFuel(fuel int64) RuntimeConfig
 
 	// WithTimeProvider sets the default host-visible time provider for modules

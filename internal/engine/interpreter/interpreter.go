@@ -164,6 +164,24 @@ type callEngine struct {
 	resumePC uint64
 	// resumeBase, when resumePC is set, overrides the frame's base.
 	resumeBase int
+
+	// fuel is the remaining budget for the current execution when deterministic
+	// metering is enabled.
+	fuel int64
+	// fuelInitial is the fixed budget selected when the current execution
+	// started. A non-positive value disables fuel metering for that execution.
+	fuelInitial int64
+	// fuelAdded tracks in-flight AddFuel adjustments so observer/controller
+	// accounting can report the effective budget.
+	fuelAdded int64
+	// fuelCtrl is the call-scoped controller fixed when the execution began.
+	fuelCtrl experimental.FuelController
+	// fuelObserver is the observer in effect for the current execution. Resume
+	// contexts can override this without changing the fixed budget/controller.
+	fuelObserver experimental.FuelObserver
+	// fuelObserverCtx is the fallback context used when a later resume omits a
+	// new observer.
+	fuelObserverCtx context.Context
 }
 
 func (e *moduleEngine) newCallEngine(compiled *function) *callEngine {
@@ -252,6 +270,7 @@ type compiledFunction struct {
 	offsetsInWasmBinary []uint64
 	hostFn              interface{}
 	ensureTermination   bool
+	fuel                int64
 	index               wasm.Index
 }
 
@@ -364,6 +383,11 @@ type interpreterResumer struct {
 
 	expectedHostResults int
 	yieldCount          uint64
+	fuelCtrl            experimental.FuelController
+	fuelInitial         int64
+	fuelAdded           int64
+	fuelObserver        experimental.FuelObserver
+	fuelObserverCtx     context.Context
 	yieldObserver       experimental.YieldObserver
 	yieldObserverCtx    context.Context
 	yieldClock          experimental.TimeProvider
@@ -399,6 +423,14 @@ func (r *interpreterResumer) Resume(ctx context.Context, hostResults []uint64) (
 	ce := r.ce
 	ce.stack = r.stack
 	ce.frames = r.frames
+	ce.fuelCtrl = r.fuelCtrl
+	ce.fuelInitial = r.fuelInitial
+	ce.fuelAdded = r.fuelAdded
+	ce.fuelObserver = selectFuelObserver(ctx, r.fuelObserver)
+	ce.fuelObserverCtx = r.fuelObserverCtx
+	if ce.fuelObserverCtx == nil {
+		ce.fuelObserverCtx = ctx
+	}
 
 	// At yield time, the frame stack has the host function's frame on top
 	// (pushed by callGoFunc but not popped due to the panic). Pop it.
@@ -436,6 +468,7 @@ func (r *interpreterResumer) Resume(ctx context.Context, hostResults []uint64) (
 	}
 
 	m := r.moduleInstance
+	ctx = ce.restoreFuelContext(ctx, m)
 
 	defer func() {
 		if err == nil {
@@ -454,6 +487,11 @@ func (r *interpreterResumer) Resume(ctx context.Context, hostResults []uint64) (
 					ce:                  ce,
 					expectedHostResults: ce.frames[len(ce.frames)-1].f.funcType.ResultNumInUint64,
 					yieldCount:          r.yieldCount + 1,
+					fuelCtrl:            ce.fuelCtrl,
+					fuelInitial:         ce.fuelInitial,
+					fuelAdded:           ce.fuelAdded,
+					fuelObserver:        ce.fuelObserver,
+					fuelObserverCtx:     ctx,
 					yieldObserver:       selectYieldObserver(ctx, r.yieldObserver),
 					yieldObserverCtx:    ctx,
 					yieldClock:          effectiveYieldClock(ctx, r.yieldClock),
@@ -469,6 +507,7 @@ func (r *interpreterResumer) Resume(ctx context.Context, hostResults []uint64) (
 			err = ce.recoverOnCall(ctx, m, v)
 		}
 
+		ce.reportFuel(ctx, m, err)
 		notifyTrapObserver(ctx, m, err)
 
 		ce.yieldState.Store(yieldStateIdle)
@@ -626,6 +665,7 @@ func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listene
 		}
 		compiled.source = module
 		compiled.ensureTermination = ensureTermination
+		compiled.fuel = fuel
 		compiled.listener = lsn
 		compiled.index = imported + uint32(i)
 	}
@@ -814,6 +854,7 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 	if ctx.Value(expctxkeys.EnableSnapshotterKey{}) != nil {
 		ctx = context.WithValue(ctx, expctxkeys.SnapshotterKey{}, ce)
 	}
+	ctx = ce.initializeFuel(ctx, m)
 
 	defer func() {
 		// If the module closed during the call, and the call didn't err for another reason, set an ExitError.
@@ -835,6 +876,11 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 					ce:                  ce,
 					expectedHostResults: ce.frames[len(ce.frames)-1].f.funcType.ResultNumInUint64,
 					yieldCount:          1,
+					fuelCtrl:            ce.fuelCtrl,
+					fuelInitial:         ce.fuelInitial,
+					fuelAdded:           ce.fuelAdded,
+					fuelObserver:        ce.fuelObserver,
+					fuelObserverCtx:     ctx,
 					yieldObserver:       experimental.GetYieldObserver(ctx),
 					yieldObserverCtx:    ctx,
 					yieldClock:          experimental.GetTimeProvider(ctx),
@@ -851,6 +897,7 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 			err = ce.recoverOnCall(ctx, m, v)
 		}
 
+		ce.reportFuel(ctx, m, err)
 		notifyTrapObserver(ctx, m, err)
 	}()
 
@@ -960,6 +1007,35 @@ func notifyHostCallPolicyObserver(ctx context.Context, mod api.Module, hostFunct
 	})
 }
 
+func notifyFuelObserver(ctx, fallbackCtx context.Context, observer experimental.FuelObserver, observation experimental.FuelObservation) {
+	observer, observeCtx := resolveFuelObserver(ctx, fallbackCtx, observer)
+	if observer == nil {
+		return
+	}
+	observer.ObserveFuel(observeCtx, observation)
+}
+
+func resolveFuelObserver(ctx, fallbackCtx context.Context, fallback experimental.FuelObserver) (experimental.FuelObserver, context.Context) {
+	if observer := experimental.GetFuelObserver(ctx); observer != nil {
+		return observer, ctx
+	}
+	if fallback != nil {
+		return fallback, fallbackCtx
+	}
+	return nil, nil
+}
+
+func selectFuelObserver(ctx context.Context, fallback experimental.FuelObserver) experimental.FuelObserver {
+	if observer := experimental.GetFuelObserver(ctx); observer != nil {
+		return observer
+	}
+	return fallback
+}
+
+func currentFuelBudget(initialFuel, fuelAdded int64) int64 {
+	return initialFuel + fuelAdded
+}
+
 func notifyYieldObserver(ctx, fallbackCtx context.Context, observer experimental.YieldObserver, mod api.Module, event experimental.YieldEvent, yieldCount uint64, expectedHostResults int, clock experimental.TimeProvider, yieldedAtNanos int64) {
 	observer, observeCtx := resolveYieldObserver(ctx, fallbackCtx, observer)
 	if observer == nil {
@@ -1010,12 +1086,98 @@ func yieldNanotime(provider experimental.TimeProvider) int64 {
 	return provider.Nanotime()
 }
 
+func (ce *callEngine) initializeFuel(ctx context.Context, m *wasm.ModuleInstance) context.Context {
+	ce.fuel = 0
+	ce.fuelInitial = 0
+	ce.fuelAdded = 0
+	ce.fuelCtrl = nil
+	ce.fuelObserver = experimental.GetFuelObserver(ctx)
+	ce.fuelObserverCtx = ctx
+
+	if fc := experimental.GetFuelController(ctx); fc != nil {
+		ce.fuelCtrl = fc
+		ce.fuelInitial = fc.Budget()
+	} else {
+		ce.fuelInitial = ce.f.parent.fuel
+	}
+	if ce.fuelInitial <= 0 {
+		return ctx
+	}
+
+	ce.fuel = ce.fuelInitial
+	ctx = ce.restoreFuelContext(ctx, m)
+	notifyFuelObserver(ctx, ce.fuelObserverCtx, ce.fuelObserver, experimental.FuelObservation{
+		Module:    m,
+		Event:     experimental.FuelEventBudgeted,
+		Budget:    ce.fuelInitial,
+		Remaining: ce.fuelInitial,
+	})
+	return ctx
+}
+
+func (ce *callEngine) restoreFuelContext(ctx context.Context, m *wasm.ModuleInstance) context.Context {
+	if ce.fuelInitial <= 0 {
+		return ctx
+	}
+	ctx = context.WithValue(ctx, expctxkeys.FuelAccessorKey{}, &expctxkeys.FuelAccessor{
+		Ptr:    &ce.fuel,
+		Module: m,
+		Added:  &ce.fuelAdded,
+	})
+	if experimental.GetFuelObserver(ctx) == nil && ce.fuelObserver != nil {
+		ctx = context.WithValue(ctx, expctxkeys.FuelObserverKey{}, ce.fuelObserver)
+	}
+	return ctx
+}
+
+func (ce *callEngine) reportFuel(ctx context.Context, m *wasm.ModuleInstance, err error) {
+	if ce.fuelInitial <= 0 {
+		return
+	}
+	budget := currentFuelBudget(ce.fuelInitial, ce.fuelAdded)
+	event := experimental.FuelEventConsumed
+	if err != nil && errors.Is(err, wasmruntime.ErrRuntimeFuelExhausted) {
+		event = experimental.FuelEventExhausted
+	}
+	notifyFuelObserver(ctx, ce.fuelObserverCtx, ce.fuelObserver, experimental.FuelObservation{
+		Module:    m,
+		Event:     event,
+		Budget:    budget,
+		Consumed:  budget - ce.fuel,
+		Remaining: ce.fuel,
+	})
+	if ce.fuelCtrl != nil {
+		consumed := budget - ce.fuel
+		if consumed > 0 {
+			ce.fuelCtrl.Consumed(consumed)
+		}
+	}
+}
+
+func (ce *callEngine) consumeFuel(amount int64) {
+	if ce.fuelInitial <= 0 || amount <= 0 {
+		return
+	}
+	ce.fuel -= amount
+	if ce.fuel < 0 {
+		panic(wasmruntime.ErrRuntimeFuelExhausted)
+	}
+}
+
+func (ce *callEngine) consumeFuelForBranch(pc, target uint64) {
+	if target < pc {
+		ce.consumeFuel(1)
+	}
+}
+
 func (ce *callEngine) callFunction(ctx context.Context, m *wasm.ModuleInstance, f *function) {
 	if f.parent.hostFn != nil {
 		ce.callGoFuncWithStack(ctx, m, f)
 	} else if lsn := f.parent.listener; lsn != nil {
+		ce.consumeFuel(1)
 		ce.callNativeFuncWithListener(ctx, m, f, lsn)
 	} else {
+		ce.consumeFuel(1)
 		ce.callNativeFunc(ctx, m, f)
 	}
 }
@@ -1102,10 +1264,12 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 		case operationKindUnreachable:
 			panic(wasmruntime.ErrRuntimeUnreachable)
 		case operationKindBr:
+			ce.consumeFuelForBranch(frame.pc, op.U1)
 			frame.pc = op.U1
 		case operationKindBrIf:
 			if ce.popValue() > 0 {
 				ce.drop(op.U3)
+				ce.consumeFuelForBranch(frame.pc, op.U1)
 				frame.pc = op.U1
 			} else {
 				frame.pc = op.U2
@@ -1118,7 +1282,9 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			}
 			v *= 2
 			ce.drop(op.Us[v+1])
-			frame.pc = op.Us[v]
+			target := op.Us[v]
+			ce.consumeFuelForBranch(frame.pc, target)
+			frame.pc = target
 		case operationKindCall:
 			func() {
 				if ctx.Value(expctxkeys.EnableSnapshotterKey{}) != nil {
