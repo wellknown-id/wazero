@@ -581,6 +581,58 @@ func TestMultiYieldObserverWithMultiFuelObserver_YieldResumeLifecycle(t *testing
 	}
 }
 
+func TestMultiFuelObserverWithMultiTrapObserver_YieldResumeLifecycle(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			ctx := context.Background()
+			provider := newObservingTimeProvider()
+			mod, rt, _ := setupYieldTest(t, ec.cfg.WithTimeProvider(provider))
+			defer rt.Close(ctx)
+
+			fuelLeft := &recordingFuelObserver{}
+			fuelRight := &recordingFuelObserver{}
+			trapLeft := &recordingTrapObserver{}
+			trapRight := &recordingTrapObserver{}
+			ctrl := experimental.NewSimpleFuelController(20)
+			callCtx := experimental.WithTrapObserver(
+				experimental.WithFuelObserver(
+					experimental.WithFuelController(
+						experimental.WithYielder(ctx),
+						ctrl,
+					),
+					experimental.MultiFuelObserver(fuelLeft, fuelRight),
+				),
+				experimental.MultiTrapObserver(trapLeft, trapRight),
+			)
+
+			_, err := mod.ExportedFunction("run").Call(callCtx)
+			resumer := requireYieldError(t, err).Resumer()
+
+			results, err := resumer.Resume(callCtx, []uint64{42})
+			require.NoError(t, err)
+			require.Equal(t, []uint64{142}, results)
+
+			wantFuel := []fuelObservationSnapshot{
+				{
+					Event:     experimental.FuelEventBudgeted,
+					Budget:    20,
+					Remaining: 20,
+				},
+				{
+					Event:     experimental.FuelEventConsumed,
+					Budget:    20,
+					Consumed:  ctrl.TotalConsumed(),
+					Remaining: 20 - ctrl.TotalConsumed(),
+				},
+			}
+			require.Equal(t, wantFuel, snapshotFuelObservations(fuelLeft.snapshot()))
+			require.Equal(t, wantFuel, snapshotFuelObservations(fuelRight.snapshot()))
+			require.Zero(t, trapLeft.count())
+			require.Zero(t, trapRight.count())
+		})
+	}
+}
+
 func TestMultiYieldObserver_ReyieldUsesResumedObserver(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
