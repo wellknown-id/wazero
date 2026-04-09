@@ -1280,6 +1280,23 @@ func (r *compilerResumer) Resume(ctx context.Context, hostResults []uint64) (res
 					lsn experimental.FunctionListener
 				}{def, lsn})
 			}
+			if c.execCtx.stackPointerBeforeGoCall != nil {
+				returnAddrs := unwindStack(
+					uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)),
+					c.execCtx.framePointerBeforeGoCall,
+					c.stackTop,
+					nil,
+				)
+				for _, retAddr := range returnAddrs[:len(returnAddrs)-1] { // the last return addr is the trampoline, so we skip it.
+					def, lsn, _ = c.addFrame(builder, retAddr)
+					if lsn != nil {
+						listeners = append(listeners, struct {
+							def api.FunctionDefinition
+							lsn experimental.FunctionListener
+						}{def, lsn})
+					}
+				}
+			}
 			err = builder.FromRecovered(rec)
 			for _, l := range listeners {
 				l.lsn.Abort(ctx, m, l.def, err)

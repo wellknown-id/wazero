@@ -252,6 +252,31 @@ func assertBeforeCompletionPairing(t *testing.T, events []listenerEvent) {
 	assertBeforeCompletionPairingExcept(t, events)
 }
 
+func assertBeforeCompletionStackPairing(t *testing.T, events []listenerEvent) {
+	t.Helper()
+
+	type frame struct {
+		function string
+	}
+
+	var stack []frame
+	for _, event := range events {
+		switch event.phase {
+		case "before":
+			stack = append(stack, frame{function: event.function})
+		case "after", "abort":
+			require.True(t, len(stack) > 0, "unexpected %s event for %s with empty listener stack", event.phase, event.function)
+			top := stack[len(stack)-1]
+			require.Equal(t, top.function, event.function, "listener %s for %s did not match innermost before", event.phase, event.function)
+			stack = stack[:len(stack)-1]
+		default:
+			t.Fatalf("unexpected phase %q", event.phase)
+		}
+	}
+
+	require.Zero(t, len(stack), "unpaired listener events remain on stack: %v", stack)
+}
+
 func assertBeforeCompletionPairingExcept(t *testing.T, events []listenerEvent, allowedOrphanAbortFunctions ...string) {
 	t.Helper()
 
@@ -962,6 +987,91 @@ func TestFunctionListener_YieldPolicyDeniedTrapObserverOrdering(t *testing.T) {
 				"listener before async_work",
 				"listener abort async_work (policy_denied)",
 				"listener abort run (policy_denied)",
+				"trap policy_denied",
+			})
+		})
+	}
+}
+
+func TestFunctionListener_ResumeYieldPolicyDeniedTrapObserverOrdering(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
+
+			ctx := context.Background()
+			recorder := &orderedEventRecorder{}
+			listenerEvents := &recordingFunctionListener{}
+			instantiateCtx := experimental.WithFunctionListenerFactory(ctx, newFunctionListenerFactory(&orderedRecordingFunctionListener{
+				recorder: recorder,
+				events:   listenerEvents,
+			}))
+
+			rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg)
+			defer rt.Close(ctx)
+
+			_, err := rt.NewHostModuleBuilder("example").
+				NewFunctionBuilder().
+				WithGoModuleFunction(&yieldingHostFunc{t: t}, nil, []api.ValueType{api.ValueTypeI32}).
+				Export("async_work").
+				Instantiate(instantiateCtx)
+			require.NoError(t, err)
+
+			mod, err := rt.InstantiateWithConfig(instantiateCtx, yieldWasm, wazero.NewModuleConfig().WithName("guest"))
+			require.NoError(t, err)
+
+			_, err = mod.ExportedFunction("run_twice").Call(experimental.WithYielder(ctx))
+			yieldErr := requireYieldError(t, err)
+
+			trapObserver := &recordingTrapObserver{}
+			_, err = yieldErr.Resumer().Resume(
+				experimental.WithTrapObserver(
+					experimental.WithYieldPolicy(
+						experimental.WithYielder(ctx),
+						experimental.YieldPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+							require.NotNil(t, caller)
+							require.Equal(t, "example.async_work", hostFunction.DebugName())
+							return false
+						}),
+					),
+					experimental.TrapObserverFunc(func(ctx context.Context, observation experimental.TrapObservation) {
+						trapObserver.ObserveTrap(ctx, observation)
+						recorder.add("trap %s", observation.Cause)
+					}),
+				),
+				[]uint64{1},
+			)
+			require.ErrorIs(t, err, wasmruntime.ErrRuntimePolicyDenied)
+
+			cause, ok := experimental.TrapCauseOf(err)
+			require.True(t, ok)
+			require.Equal(t, experimental.TrapCausePolicyDenied, cause)
+
+			events := listenerEvents.snapshot()
+			assertListenerEvents(t, events, []expectedListenerEvent{
+				{phase: "before", function: "run_twice"},
+				{phase: "before", function: "async_work"},
+				{phase: "after", function: "async_work"},
+				{phase: "before", function: "async_work"},
+				{phase: "abort", function: "async_work", errIs: wasmruntime.ErrRuntimePolicyDenied},
+				{phase: "abort", function: "run_twice", errIs: wasmruntime.ErrRuntimePolicyDenied},
+			})
+			assertAbortTrapCauseClassification(t, events, experimental.TrapCausePolicyDenied, true)
+			assertBeforeCompletionStackPairing(t, events)
+
+			observation := trapObserver.single(t)
+			require.Equal(t, experimental.TrapCausePolicyDenied, observation.Cause)
+			require.ErrorIs(t, observation.Err, wasmruntime.ErrRuntimePolicyDenied)
+			require.Equal(t, mod.Name(), observation.Module.Name())
+
+			assertOrderedEvents(t, recorder.snapshot(), []string{
+				"listener before run_twice",
+				"listener before async_work",
+				"listener after async_work",
+				"listener before async_work",
+				"listener abort async_work (policy_denied)",
+				"listener abort run_twice (policy_denied)",
 				"trap policy_denied",
 			})
 		})
