@@ -1798,6 +1798,145 @@ func TestFunctionListener_ResumeArithmeticTrapObserverOrdering(t *testing.T) {
 	}
 }
 
+func TestFunctionListener_ResumeMultiFunctionListenerArithmeticTrapObserverOrdering(t *testing.T) {
+	testCases := []struct {
+		name      string
+		wantErr   error
+		wantCause experimental.TrapCause
+	}{
+		{
+			name:      "integer-divide-by-zero",
+			wantErr:   wasmruntime.ErrRuntimeIntegerDivideByZero,
+			wantCause: experimental.TrapCauseIntegerDivideByZero,
+		},
+		{
+			name:      "integer-overflow",
+			wantErr:   wasmruntime.ErrRuntimeIntegerOverflow,
+			wantCause: experimental.TrapCauseIntegerOverflow,
+		},
+		{
+			name:      "invalid-conversion-to-integer",
+			wantErr:   wasmruntime.ErrRuntimeInvalidConversionToInteger,
+			wantCause: experimental.TrapCauseInvalidConversionToInteger,
+		},
+	}
+
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
+
+			for _, tc := range testCases {
+				t.Run(tc.name, func(t *testing.T) {
+					ctx := context.Background()
+					recorder := &orderedEventRecorder{}
+					leftEvents := &recordingFunctionListener{}
+					rightEvents := &recordingFunctionListener{}
+					instantiateCtx := experimental.WithFunctionListenerFactory(ctx, experimental.MultiFunctionListenerFactory(
+						newFunctionListenerFactory(&namedOrderedRecordingFunctionListener{
+							name:     "listener left",
+							recorder: recorder,
+							events:   leftEvents,
+						}),
+						newFunctionListenerFactory(&namedOrderedRecordingFunctionListener{
+							name:     "listener right",
+							recorder: recorder,
+							events:   rightEvents,
+						}),
+					))
+
+					rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg)
+					defer rt.Close(ctx)
+
+					_, err := rt.NewHostModuleBuilder("example").
+						NewFunctionBuilder().
+						WithGoModuleFunction(&yieldingHostFunc{t: t}, nil, []api.ValueType{api.ValueTypeI32}).
+						Export("async_work").
+						Instantiate(instantiateCtx)
+					require.NoError(t, err)
+
+					mod, err := rt.InstantiateWithConfig(instantiateCtx, resumeArithmeticTrapModuleBinary(tc.wantCause), wazero.NewModuleConfig().WithName("guest"))
+					require.NoError(t, err)
+
+					_, err = mod.ExportedFunction("run").Call(experimental.WithYielder(ctx))
+					yieldErr := requireYieldError(t, err)
+
+					wantInitialEvents := []expectedListenerEvent{
+						{phase: "before", function: "run"},
+						{phase: "before", function: "resume_trap"},
+						{phase: "before", function: "async_work"},
+					}
+					for _, events := range [][]listenerEvent{leftEvents.snapshot(), rightEvents.snapshot()} {
+						assertListenerEvents(t, events, wantInitialEvents)
+					}
+
+					trapLeft := &recordingTrapObserver{}
+					trapRight := &recordingTrapObserver{}
+					_, err = yieldErr.Resumer().Resume(
+						experimental.WithTrapObserver(
+							experimental.WithYielder(ctx),
+							experimental.MultiTrapObserver(
+								experimental.TrapObserverFunc(func(ctx context.Context, observation experimental.TrapObservation) {
+									trapLeft.ObserveTrap(ctx, observation)
+									recorder.add("trap left %s", observation.Cause)
+								}),
+								experimental.TrapObserverFunc(func(ctx context.Context, observation experimental.TrapObservation) {
+									trapRight.ObserveTrap(ctx, observation)
+									recorder.add("trap right %s", observation.Cause)
+								}),
+							),
+						),
+						[]uint64{1},
+					)
+					require.ErrorIs(t, err, tc.wantErr)
+
+					cause, ok := experimental.TrapCauseOf(err)
+					require.True(t, ok)
+					require.Equal(t, tc.wantCause, cause)
+
+					wantEvents := []expectedListenerEvent{
+						{phase: "before", function: "run"},
+						{phase: "before", function: "resume_trap"},
+						{phase: "before", function: "async_work"},
+						{phase: "after", function: "async_work"},
+						{phase: "abort", function: "resume_trap", errIs: tc.wantErr},
+						{phase: "abort", function: "run", errIs: tc.wantErr},
+					}
+					for _, events := range [][]listenerEvent{leftEvents.snapshot(), rightEvents.snapshot()} {
+						assertListenerEvents(t, events, wantEvents)
+						assertAbortTrapCauseClassification(t, events, tc.wantCause, true)
+						assertBeforeCompletionPairing(t, events)
+						assertBeforeCompletionStackPairing(t, events)
+					}
+
+					requireEquivalentTrapObservation(t, trapObservationSnapshot{
+						Cause:      tc.wantCause,
+						ModuleName: mod.Name(),
+					}, tc.wantErr, trapLeft, trapRight)
+
+					assertOrderedEvents(t, recorder.snapshot(), []string{
+						"listener left before run",
+						"listener right before run",
+						"listener left before resume_trap",
+						"listener right before resume_trap",
+						"listener left before async_work",
+						"listener right before async_work",
+						"listener left after async_work",
+						"listener right after async_work",
+						fmt.Sprintf("listener left abort resume_trap (%s)", tc.wantCause),
+						fmt.Sprintf("listener right abort resume_trap (%s)", tc.wantCause),
+						fmt.Sprintf("listener left abort run (%s)", tc.wantCause),
+						fmt.Sprintf("listener right abort run (%s)", tc.wantCause),
+						fmt.Sprintf("trap left %s", tc.wantCause),
+						fmt.Sprintf("trap right %s", tc.wantCause),
+					})
+				})
+			}
+		})
+	}
+}
+
 func TestFunctionListener_YieldObserverOrdering(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
