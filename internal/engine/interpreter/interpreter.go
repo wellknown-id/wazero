@@ -330,11 +330,17 @@ func (y *yieldSignal) Error() string {
 
 // interpreterYielder implements experimental.Yielder for the interpreter engine.
 type interpreterYielder struct {
-	ce *callEngine
+	ce           *callEngine
+	ctx          context.Context
+	caller       api.Module
+	hostFunction api.FunctionDefinition
 }
 
 // Yield implements experimental.Yielder.
 func (y *interpreterYielder) Yield() {
+	if policy := experimental.GetYieldPolicy(y.ctx); policy != nil && !policy.AllowYield(y.ctx, y.caller, y.hostFunction) {
+		panic(wasmruntime.ErrRuntimePolicyDenied)
+	}
 	panic(&yieldSignal{ce: y.ce})
 }
 
@@ -428,12 +434,6 @@ func (r *interpreterResumer) Resume(ctx context.Context, hostResults []uint64) (
 
 		// Trim the stack to: resultBase + resultLen (what callGoFuncWithStack would leave).
 		ce.stack = ce.stack[:resultBase+resultLen]
-	}
-
-	// Wire yield enablement into the new context.
-	yieldEnabled := ctx.Value(expctxkeys.EnableYielderKey{}) != nil
-	if yieldEnabled {
-		ctx = context.WithValue(ctx, expctxkeys.YielderKey{}, &interpreterYielder{ce: ce})
 	}
 
 	if ctx.Value(expctxkeys.EnableSnapshotterKey{}) != nil {
@@ -801,6 +801,9 @@ func (ce *callEngine) CallWithStack(ctx context.Context, stack []uint64) error {
 }
 
 func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []uint64, err error) {
+	if ce.yieldState.Load() != yieldStateIdle {
+		return nil, errors.New("cannot call: function has suspended execution; resume or cancel the outstanding Resumer first")
+	}
 	m := ce.f.moduleInstance
 	if experimental.GetTimeProvider(ctx) == nil && m.TimeProvider != nil {
 		ctx = experimental.WithTimeProvider(ctx, m.TimeProvider)
@@ -818,12 +821,6 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 
 	if ctx.Value(expctxkeys.EnableSnapshotterKey{}) != nil {
 		ctx = context.WithValue(ctx, expctxkeys.SnapshotterKey{}, ce)
-	}
-
-	// Enable async yield/resume if requested.
-	yieldEnabled := ctx.Value(expctxkeys.EnableYielderKey{}) != nil
-	if yieldEnabled {
-		ctx = context.WithValue(ctx, expctxkeys.YielderKey{}, &interpreterYielder{ce: ce})
 	}
 
 	defer func() {
@@ -1016,6 +1013,9 @@ func (ce *callEngine) callFunction(ctx context.Context, m *wasm.ModuleInstance, 
 }
 
 func (ce *callEngine) callGoFunc(ctx context.Context, m *wasm.ModuleInstance, f *function, stack []uint64) {
+	if experimental.GetTimeProvider(ctx) == nil && m.TimeProvider != nil {
+		ctx = experimental.WithTimeProvider(ctx, m.TimeProvider)
+	}
 	if policy := experimental.GetHostCallPolicy(ctx); policy != nil && !policy.AllowHostCall(ctx, m, f.definition()) {
 		panic(wasmruntime.ErrRuntimePolicyDenied)
 	}
@@ -1031,12 +1031,22 @@ func (ce *callEngine) callGoFunc(ctx context.Context, m *wasm.ModuleInstance, f 
 	frame := &callFrame{f: f, base: len(ce.stack)}
 	ce.pushFrame(frame)
 
+	hostCtx := ctx
+	if ctx.Value(expctxkeys.EnableYielderKey{}) != nil {
+		hostCtx = context.WithValue(ctx, expctxkeys.YielderKey{}, &interpreterYielder{
+			ce:           ce,
+			ctx:          ctx,
+			caller:       m,
+			hostFunction: f.definition(),
+		})
+	}
+
 	fn := f.parent.hostFn
 	switch fn := fn.(type) {
 	case api.GoModuleFunction:
-		fn.Call(ctx, m, stack)
+		fn.Call(hostCtx, m, stack)
 	case api.GoFunction:
-		fn.Call(ctx, stack)
+		fn.Call(hostCtx, stack)
 	}
 
 	ce.popFrame()

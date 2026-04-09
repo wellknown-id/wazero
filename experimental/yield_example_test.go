@@ -28,6 +28,10 @@ var yieldExampleWasm []byte
 // immediately. The embedder receives a Resumer via a *YieldError,
 // supplies the host function's return value through Resume, and
 // the module finishes its computation (adding 100 to the result).
+//
+// While the call is suspended, that exported function call remains in-flight:
+// do not call it again until the returned Resumer has been resumed or
+// cancelled.
 func Example_enableYielder() {
 	ctx := context.Background()
 
@@ -74,7 +78,8 @@ func Example_enableYielder() {
 	}
 
 	// At this point no goroutine is blocked. The embedder is free to do
-	// async work, schedule on a different goroutine, etc.
+	// async work, schedule on a different goroutine, etc. The suspended call
+	// is still outstanding until Resume or Cancel completes it.
 
 	// Resume execution, providing 42 as the host function's return value.
 	// The Wasm function "run" adds 100 to whatever async_work returns.

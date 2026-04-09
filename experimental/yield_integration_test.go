@@ -78,6 +78,46 @@ func (f *yieldingHostFunc) Call(ctx context.Context, mod api.Module, stack []uin
 	// Unreachable after Yield().
 }
 
+type taggedHostCallPolicy string
+
+func (p taggedHostCallPolicy) AllowHostCall(context.Context, api.Module, api.FunctionDefinition) bool {
+	return true
+}
+
+type contextCheckingYieldingHostFunc struct {
+	t                    *testing.T
+	calls                int
+	expectedTimeProvider experimental.TimeProvider
+	expectedTrapObserver experimental.TrapObserver
+	expectedPolicy       experimental.HostCallPolicy
+}
+
+func (f *contextCheckingYieldingHostFunc) Call(ctx context.Context, _ api.Module, stack []uint64) {
+	f.calls++
+	if f.calls == 1 {
+		yielder := experimental.GetYielder(ctx)
+		if yielder == nil {
+			f.t.Fatal("expected yielder in initial host call context")
+		}
+		yielder.Yield()
+	}
+
+	if got := experimental.GetYielder(ctx); got == nil {
+		f.t.Fatal("expected yielder in resumed host call context")
+	}
+	if got := experimental.GetTimeProvider(ctx); got != f.expectedTimeProvider {
+		f.t.Fatalf("time provider = %#v, want %#v", got, f.expectedTimeProvider)
+	}
+	if got := experimental.GetTrapObserver(ctx); got != f.expectedTrapObserver {
+		f.t.Fatalf("trap observer = %#v, want %#v", got, f.expectedTrapObserver)
+	}
+	if got := experimental.GetHostCallPolicy(ctx); got != f.expectedPolicy {
+		f.t.Fatalf("host call policy = %#v, want %#v", got, f.expectedPolicy)
+	}
+
+	stack[0] = 2
+}
+
 func setupYieldTest(t *testing.T, cfg wazero.RuntimeConfig) (api.Module, wazero.Runtime, context.Context) {
 	return setupYieldTestWithHost(t, cfg, &yieldingHostFunc{t: t})
 }
@@ -222,6 +262,26 @@ func TestYield_CancelDoesNotNotifyTrapObserver(t *testing.T) {
 			_, err = resumer.Resume(experimental.WithYielder(ctx), []uint64{42})
 			require.EqualError(t, err, "cannot resume: resumer has been cancelled")
 			require.Zero(t, observer.count())
+		})
+	}
+}
+
+func TestYield_CallWhileSuspendedRejected(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			mod, rt, ctx := setupYieldTest(t, ec.cfg)
+			defer rt.Close(ctx)
+
+			fn := mod.ExportedFunction("run")
+			_, err := fn.Call(experimental.WithYielder(ctx))
+			resumer := requireYieldError(t, err).Resumer()
+
+			_, err = fn.Call(experimental.WithYielder(ctx))
+			require.EqualError(t, err, "cannot call: function has suspended execution; resume or cancel the outstanding Resumer first")
+
+			results, err := resumer.Resume(experimental.WithYielder(ctx), []uint64{42})
+			require.NoError(t, err)
+			require.Equal(t, []uint64{142}, results)
 		})
 	}
 }
@@ -397,6 +457,78 @@ func TestYield_ResumeUsesResumedTrapObserver(t *testing.T) {
 	}
 }
 
+func TestYield_ResumeUsesResumeContextInSubsequentHostCall(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			initialTrapObserver := &recordingTrapObserver{}
+			resumeTrapObserver := &recordingTrapObserver{}
+			initialTimeProvider := fixedTimeProvider{nano: 111}
+			resumeTimeProvider := fixedTimeProvider{nano: 222}
+			initialPolicy := taggedHostCallPolicy("initial")
+			resumePolicy := taggedHostCallPolicy("resume")
+
+			mod, rt, ctx := setupYieldTestWithHost(t, ec.cfg, &contextCheckingYieldingHostFunc{
+				t:                    t,
+				expectedTimeProvider: resumeTimeProvider,
+				expectedTrapObserver: resumeTrapObserver,
+				expectedPolicy:       resumePolicy,
+			})
+			defer rt.Close(ctx)
+
+			initialCtx := experimental.WithHostCallPolicy(
+				experimental.WithTrapObserver(
+					experimental.WithTimeProvider(
+						experimental.WithYielder(ctx),
+						initialTimeProvider,
+					),
+					initialTrapObserver,
+				),
+				initialPolicy,
+			)
+			_, err := mod.ExportedFunction("run_twice").Call(initialCtx)
+			resumer := requireYieldError(t, err).Resumer()
+
+			resumeCtx := experimental.WithHostCallPolicy(
+				experimental.WithTrapObserver(
+					experimental.WithTimeProvider(
+						experimental.WithYielder(ctx),
+						resumeTimeProvider,
+					),
+					resumeTrapObserver,
+				),
+				resumePolicy,
+			)
+			results, err := resumer.Resume(resumeCtx, []uint64{40})
+			require.NoError(t, err)
+			require.Equal(t, []uint64{42}, results)
+		})
+	}
+}
+
+func TestYield_ResumeDoesNotLeakInitialTimeProviderOverride(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			runtimeTimeProvider := fixedTimeProvider{nano: 222}
+			initialTimeProvider := fixedTimeProvider{nano: 111}
+
+			mod, rt, ctx := setupYieldTestWithHost(t, ec.cfg.WithTimeProvider(runtimeTimeProvider), &contextCheckingYieldingHostFunc{
+				t:                    t,
+				expectedTimeProvider: runtimeTimeProvider,
+			})
+			defer rt.Close(ctx)
+
+			_, err := mod.ExportedFunction("run_twice").Call(
+				experimental.WithTimeProvider(experimental.WithYielder(ctx), initialTimeProvider),
+			)
+			resumer := requireYieldError(t, err).Resumer()
+
+			results, err := resumer.Resume(experimental.WithYielder(ctx), []uint64{40})
+			require.NoError(t, err)
+			require.Equal(t, []uint64{42}, results)
+		})
+	}
+}
+
 func TestYield_ConcurrentResumePanicsSecondCaller(t *testing.T) {
 	type resumeOutcome struct {
 		results  []uint64
@@ -443,6 +575,132 @@ func TestYield_ConcurrentResumePanicsSecondCaller(t *testing.T) {
 			require.Contains(t, panicOutcome.panicErr.Error(), "Resume called more than once")
 			require.NoError(t, successOutcome.err)
 			require.Equal(t, []uint64{107}, successOutcome.results)
+		})
+	}
+}
+
+func TestYieldPolicy_AllowsYield(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			mod, rt, ctx := setupYieldTest(t, ec.cfg)
+			defer rt.Close(ctx)
+
+			consulted := 0
+			callCtx := experimental.WithYieldPolicy(
+				experimental.WithYielder(ctx),
+				experimental.YieldPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+					consulted++
+					require.NotNil(t, caller)
+					require.Equal(t, "example.async_work", hostFunction.DebugName())
+					return true
+				}),
+			)
+
+			_, err := mod.ExportedFunction("run").Call(callCtx)
+			resumer := requireYieldError(t, err).Resumer()
+
+			results, err := resumer.Resume(experimental.WithYielder(ctx), []uint64{42})
+			require.NoError(t, err)
+			require.Equal(t, []uint64{142}, results)
+			require.Equal(t, 1, consulted)
+		})
+	}
+}
+
+func TestYieldPolicy_DeniesYieldAndNotifiesTrapObserver(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			mod, rt, ctx := setupYieldTest(t, ec.cfg)
+			defer rt.Close(ctx)
+
+			observer := &recordingTrapObserver{}
+			consulted := 0
+			callCtx := experimental.WithTrapObserver(
+				experimental.WithYieldPolicy(
+					experimental.WithYielder(ctx),
+					experimental.YieldPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+						consulted++
+						require.NotNil(t, caller)
+						require.Equal(t, "example.async_work", hostFunction.DebugName())
+						return false
+					}),
+				),
+				observer,
+			)
+
+			_, err := mod.ExportedFunction("run").Call(callCtx)
+			require.True(t, errors.Is(err, wasmruntime.ErrRuntimePolicyDenied), "expected ErrRuntimePolicyDenied, got %v", err)
+			require.Equal(t, 1, consulted)
+
+			observation := observer.single(t)
+			require.Equal(t, experimental.TrapCausePolicyDenied, observation.Cause)
+			require.True(t, errors.Is(observation.Err, wasmruntime.ErrRuntimePolicyDenied))
+			require.Equal(t, mod.Name(), observation.Module.Name())
+		})
+	}
+}
+
+func TestYieldPolicy_HostCallPolicyTakesPrecedence(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			mod, rt, ctx := setupYieldTest(t, ec.cfg)
+			defer rt.Close(ctx)
+
+			yieldConsulted := 0
+			callCtx := experimental.WithYieldPolicy(
+				experimental.WithHostCallPolicy(
+					experimental.WithYielder(ctx),
+					experimental.HostCallPolicyFunc(func(context.Context, api.Module, api.FunctionDefinition) bool {
+						return false
+					}),
+				),
+				experimental.YieldPolicyFunc(func(context.Context, api.Module, api.FunctionDefinition) bool {
+					yieldConsulted++
+					return true
+				}),
+			)
+
+			_, err := mod.ExportedFunction("run").Call(callCtx)
+			require.True(t, errors.Is(err, wasmruntime.ErrRuntimePolicyDenied), "expected ErrRuntimePolicyDenied, got %v", err)
+			require.Zero(t, yieldConsulted)
+		})
+	}
+}
+
+func TestYieldPolicy_ResumeUsesResumedContext(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			mod, rt, ctx := setupYieldTest(t, ec.cfg)
+			defer rt.Close(ctx)
+
+			initialConsulted := 0
+			_, err := mod.ExportedFunction("run_twice").Call(
+				experimental.WithYieldPolicy(
+					experimental.WithYielder(ctx),
+					experimental.YieldPolicyFunc(func(context.Context, api.Module, api.FunctionDefinition) bool {
+						initialConsulted++
+						return true
+					}),
+				),
+			)
+			resumer := requireYieldError(t, err).Resumer()
+
+			resumeConsulted := 0
+			_, err = resumer.Resume(
+				experimental.WithYieldPolicy(
+					experimental.WithYielder(ctx),
+					experimental.YieldPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+						resumeConsulted++
+						require.NotNil(t, caller)
+						require.Equal(t, "example.async_work", hostFunction.DebugName())
+						return false
+					}),
+				),
+				[]uint64{1},
+			)
+			require.True(t, errors.Is(err, wasmruntime.ErrRuntimePolicyDenied), "expected ErrRuntimePolicyDenied, got %v", err)
+			require.Equal(t, 1, initialConsulted)
+			require.Equal(t, 1, resumeConsulted)
 		})
 	}
 }
@@ -546,6 +804,48 @@ func TestYieldObserver_ReyieldAndValidation(t *testing.T) {
 			require.Equal(t, uint64(2), observations[3].YieldCount)
 			require.Equal(t, experimental.YieldEventResumed, observations[4].Event)
 			require.Equal(t, uint64(2), observations[4].YieldCount)
+		})
+	}
+}
+
+func TestYieldObserver_ReyieldUsesResumedObserver(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			mod, rt, ctx := setupYieldTest(t, ec.cfg)
+			defer rt.Close(ctx)
+
+			initialObserver := &recordingYieldObserver{}
+			_, err := mod.ExportedFunction("run_twice").Call(
+				experimental.WithYieldObserver(experimental.WithYielder(ctx), initialObserver),
+			)
+			firstResumer := requireYieldError(t, err).Resumer()
+
+			resumeObserver := &recordingYieldObserver{}
+			resumeProvider := newObservingTimeProvider()
+			_, err = firstResumer.Resume(
+				experimental.WithYieldObserver(
+					experimental.WithTimeProvider(experimental.WithYielder(ctx), resumeProvider),
+					resumeObserver,
+				),
+				[]uint64{40},
+			)
+			secondYield := requireYieldError(t, err)
+			secondYield.Resumer().Cancel()
+
+			initialObservations := initialObserver.snapshot()
+			require.Equal(t, 1, len(initialObservations))
+			require.Equal(t, experimental.YieldEventYielded, initialObservations[0].Event)
+			require.Equal(t, uint64(1), initialObservations[0].YieldCount)
+
+			resumeObservations := resumeObserver.snapshot()
+			require.Equal(t, 3, len(resumeObservations))
+			require.Equal(t, experimental.YieldEventResumed, resumeObservations[0].Event)
+			require.Equal(t, uint64(1), resumeObservations[0].YieldCount)
+			require.Equal(t, experimental.YieldEventYielded, resumeObservations[1].Event)
+			require.Equal(t, uint64(2), resumeObservations[1].YieldCount)
+			require.Equal(t, experimental.YieldEventCancelled, resumeObservations[2].Event)
+			require.Equal(t, uint64(2), resumeObservations[2].YieldCount)
+			require.Equal(t, int64(1_000_000), resumeObservations[2].SuspendedNanos)
 		})
 	}
 }

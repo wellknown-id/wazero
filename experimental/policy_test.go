@@ -13,6 +13,12 @@ func (*stubHostCallPolicy) AllowHostCall(context.Context, api.Module, api.Functi
 	return false
 }
 
+type stubYieldPolicy struct{}
+
+func (*stubYieldPolicy) AllowYield(context.Context, api.Module, api.FunctionDefinition) bool {
+	return false
+}
+
 func TestWithHostCallPolicy_NilDoesNothing(t *testing.T) {
 	ctx := context.Background()
 	result := WithHostCallPolicy(ctx, nil)
@@ -70,5 +76,65 @@ func TestHostCallPolicyFunc_NilAllows(t *testing.T) {
 	var policy HostCallPolicyFunc
 	if !policy.AllowHostCall(context.Background(), nil, nil) {
 		t.Fatal("nil HostCallPolicyFunc should behave as absent and allow the call")
+	}
+}
+
+func TestWithYieldPolicy_NilDoesNothing(t *testing.T) {
+	ctx := context.Background()
+	result := WithYieldPolicy(ctx, nil)
+	if result != ctx {
+		t.Fatal("WithYieldPolicy(ctx, nil) should return the same context")
+	}
+}
+
+func TestGetYieldPolicy_NotSet(t *testing.T) {
+	if got := GetYieldPolicy(context.Background()); got != nil {
+		t.Fatal("GetYieldPolicy on empty context should return nil")
+	}
+}
+
+func TestGetYieldPolicy_NilContext(t *testing.T) {
+	if got := GetYieldPolicy(nil); got != nil {
+		t.Fatal("GetYieldPolicy(nil) should return nil")
+	}
+}
+
+func TestWithYieldPolicy_TypedNilDoesNothing(t *testing.T) {
+	ctx := context.Background()
+
+	var funcPolicy YieldPolicyFunc
+	if result := WithYieldPolicy(ctx, funcPolicy); result != ctx {
+		t.Fatal("WithYieldPolicy should ignore typed-nil YieldPolicyFunc values")
+	}
+
+	var ptrPolicy *stubYieldPolicy
+	if result := WithYieldPolicy(ctx, ptrPolicy); result != ctx {
+		t.Fatal("WithYieldPolicy should ignore typed-nil YieldPolicy values")
+	}
+}
+
+func TestWithYieldPolicy_RoundTrip(t *testing.T) {
+	called := false
+	policy := YieldPolicyFunc(func(context.Context, api.Module, api.FunctionDefinition) bool {
+		called = true
+		return false
+	})
+
+	got := GetYieldPolicy(WithYieldPolicy(context.Background(), policy))
+	if got == nil {
+		t.Fatal("GetYieldPolicy should return non-nil")
+	}
+	if got.AllowYield(context.Background(), nil, nil) {
+		t.Fatal("round-tripped policy should preserve deny result")
+	}
+	if !called {
+		t.Fatal("round-tripped policy should be invoked")
+	}
+}
+
+func TestYieldPolicyFunc_NilAllows(t *testing.T) {
+	var policy YieldPolicyFunc
+	if !policy.AllowYield(context.Background(), nil, nil) {
+		t.Fatal("nil YieldPolicyFunc should behave as absent and allow the yield")
 	}
 }

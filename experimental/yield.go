@@ -10,6 +10,14 @@ import (
 // Yielder allows host functions to cooperatively suspend Wasm execution.
 // Obtained from within a host function via GetYielder(ctx).
 //
+// Suspension contract:
+//   - Yield may only be called from a host function running under WithYielder.
+//   - Yield never returns to that host function; the call unwinds immediately.
+//   - Each yield produces exactly one Resumer for the suspended execution.
+//   - The embedder must eventually Resume or Cancel that Resumer.
+//   - While suspended, the yielding api.Function must not be called again until
+//     the outstanding Resumer has been resumed or cancelled.
+//
 // When a host function needs to perform asynchronous work (e.g., a network
 // call, database query, or channel operation), it can call Yield() to suspend
 // the Wasm execution without blocking a Go goroutine. The embedder receives
@@ -42,7 +50,9 @@ type Yielder interface {
 	// on the Wasm module's state after Yield is called.
 	//
 	// Panics if called outside a host function scope or if yield/resume
-	// is not enabled.
+	// is not enabled. If a YieldPolicy is configured and denies the suspension,
+	// the runtime terminates the current Wasm execution with
+	// wasmruntime.ErrRuntimePolicyDenied.
 	Yield()
 }
 
@@ -51,6 +61,15 @@ type Yielder interface {
 //
 // A Resumer must be either Resumed or Cancelled. Failure to do so will
 // leak the captured execution state.
+//
+// Resumer lifetime rules:
+//   - Resume or Cancel ends that suspension exactly once.
+//   - A successful Resume spends the current Resumer. If execution yields
+//     again, Resume returns a new *YieldError containing the next Resumer.
+//   - Validation failures before resumption (for example, nil ctx or wrong
+//     host result arity) leave the Resumer usable.
+//   - If the suspended module is closed before Resume, Resume returns the
+//     module close error and the Resumer becomes unusable.
 type Resumer interface {
 	// Resume continues the suspended execution. hostResults are the
 	// return values that the yielding host function would have produced.
@@ -66,6 +85,8 @@ type Resumer interface {
 	//
 	// Returns an error if called with a nil context, after Cancel, after the
 	// suspended module has been closed, or with the wrong number of hostResults.
+	// These validation failures do not consume the Resumer.
+	//
 	// Panics if called concurrently or more than once.
 	Resume(ctx context.Context, hostResults []uint64) ([]uint64, error)
 
@@ -78,9 +99,9 @@ type Resumer interface {
 }
 
 // YieldError is returned by api.Function.Call when the Wasm execution
-// cooperatively yields via the async yield protocol. It carries a Resumer
-// that can be used to continue execution later, possibly from a different
-// goroutine.
+// cooperatively yields via the async yield protocol. It carries the only
+// Resumer for that suspended execution, which can be used to continue
+// execution later, possibly from a different goroutine.
 //
 // The embedder should check for *YieldError using errors.As:
 //
