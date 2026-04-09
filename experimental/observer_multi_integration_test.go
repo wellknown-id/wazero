@@ -23,6 +23,13 @@ type fuelObservationSnapshot struct {
 	Delta     int64
 }
 
+type importResolverObservationSnapshot struct {
+	Event              experimental.ImportResolverEvent
+	ModuleName         string
+	ImportModule       string
+	ResolvedModuleName string
+}
+
 type forwardingFuelObserver struct {
 	inner experimental.FuelObserver
 }
@@ -45,6 +52,70 @@ func snapshotFuelObservations(observations []experimental.FuelObservation) []fue
 	return snapshots
 }
 
+func snapshotImportResolverObservations(observations []experimental.ImportResolverObservation) []importResolverObservationSnapshot {
+	snapshots := make([]importResolverObservationSnapshot, len(observations))
+	for i, observation := range observations {
+		snapshots[i] = importResolverObservationSnapshot{
+			Event:        observation.Event,
+			ModuleName:   observation.Module.Name(),
+			ImportModule: observation.ImportModule,
+		}
+		if observation.ResolvedModule != nil {
+			snapshots[i].ResolvedModuleName = observation.ResolvedModule.Name()
+		}
+	}
+	return snapshots
+}
+
+func runImportResolverInstantiationScenario(
+	t *testing.T,
+	registerStoreEnv bool,
+	configureContext func(context.Context, api.Module) context.Context,
+	observer experimental.ImportResolverObserver,
+) (err error, storeCalls, resolvedCalls int) {
+	t.Helper()
+
+	ctx := context.Background()
+	r := wazero.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	if registerStoreEnv {
+		_, err = instantiateStartModule(ctx, r, "env", func(context.Context) { storeCalls++ })
+		require.NoError(t, err)
+	}
+
+	resolved, err := instantiateStartModule(ctx, r, "resolved-env", func(context.Context) { resolvedCalls++ })
+	require.NoError(t, err)
+
+	modMain, err := r.CompileModule(ctx, testImportResolverModule())
+	require.NoError(t, err)
+
+	callCtx := configureContext(ctx, resolved)
+	if observer != nil {
+		callCtx = experimental.WithImportResolverObserver(callCtx, observer)
+	}
+
+	_, err = r.InstantiateModule(callCtx, modMain, wazero.NewModuleConfig().WithName("guest"))
+	return err, storeCalls, resolvedCalls
+}
+
+func requireEquivalentImportResolverOutcome(
+	t *testing.T,
+	baselineErr, observedErr error,
+	baselineStoreCalls, observedStoreCalls int,
+	baselineResolvedCalls, observedResolvedCalls int,
+) {
+	t.Helper()
+
+	require.Equal(t, baselineStoreCalls, observedStoreCalls)
+	require.Equal(t, baselineResolvedCalls, observedResolvedCalls)
+	if baselineErr == nil || observedErr == nil {
+		require.Equal(t, baselineErr == nil, observedErr == nil)
+		return
+	}
+	require.Equal(t, baselineErr.Error(), observedErr.Error())
+}
+
 func requireEquivalentTrapObservation(t *testing.T, want trapObservationSnapshot, wantErr error, observers ...*recordingTrapObserver) {
 	t.Helper()
 
@@ -53,6 +124,109 @@ func requireEquivalentTrapObservation(t *testing.T, want trapObservationSnapshot
 		require.Equal(t, wantSnapshots, snapshotTrapObservations(observer))
 		observation := observer.single(t)
 		require.True(t, errors.Is(observation.Err, wantErr))
+	}
+}
+
+func TestMultiImportResolverObserver_EquivalentSequences(t *testing.T) {
+	tests := []struct {
+		name             string
+		registerStoreEnv bool
+		configureContext func(context.Context, api.Module) context.Context
+		wantSnapshots    []importResolverObservationSnapshot
+	}{
+		{
+			name:             "acl allows store fallback",
+			registerStoreEnv: true,
+			configureContext: func(ctx context.Context, _ api.Module) context.Context {
+				return experimental.WithImportResolverACL(ctx, experimental.NewImportACL().AllowModules("env"))
+			},
+			wantSnapshots: []importResolverObservationSnapshot{
+				{Event: experimental.ImportResolverEventACLAllowed, ModuleName: "guest", ImportModule: "env"},
+				{Event: experimental.ImportResolverEventStoreFallback, ModuleName: "guest", ImportModule: "env", ResolvedModuleName: "env"},
+			},
+		},
+		{
+			name:             "acl deny",
+			registerStoreEnv: true,
+			configureContext: func(ctx context.Context, _ api.Module) context.Context {
+				return experimental.WithImportResolverConfig(ctx, experimental.ImportResolverConfig{
+					ACL: experimental.NewImportACL().DenyModules("env"),
+					Resolver: func(string) api.Module {
+						t.Fatal("resolver should not run after ACL denial")
+						return nil
+					},
+				})
+			},
+			wantSnapshots: []importResolverObservationSnapshot{
+				{Event: experimental.ImportResolverEventACLDenied, ModuleName: "guest", ImportModule: "env"},
+			},
+		},
+		{
+			name:             "fail closed denial",
+			registerStoreEnv: true,
+			configureContext: func(ctx context.Context, _ api.Module) context.Context {
+				return experimental.WithImportResolverConfig(ctx, experimental.ImportResolverConfig{
+					ACL:        experimental.NewImportACL().AllowModules("env"),
+					FailClosed: true,
+				})
+			},
+			wantSnapshots: []importResolverObservationSnapshot{
+				{Event: experimental.ImportResolverEventACLAllowed, ModuleName: "guest", ImportModule: "env"},
+				{Event: experimental.ImportResolverEventFailClosedDenied, ModuleName: "guest", ImportModule: "env"},
+			},
+		},
+		{
+			name:             "resolver hit takes precedence over store",
+			registerStoreEnv: true,
+			configureContext: func(ctx context.Context, resolved api.Module) context.Context {
+				return experimental.WithImportResolverConfig(ctx, experimental.ImportResolverConfig{
+					ACL: experimental.NewImportACL().AllowModules("env"),
+					Resolver: func(name string) api.Module {
+						if name == "env" {
+							return resolved
+						}
+						return nil
+					},
+				})
+			},
+			wantSnapshots: []importResolverObservationSnapshot{
+				{Event: experimental.ImportResolverEventACLAllowed, ModuleName: "guest", ImportModule: "env"},
+				{Event: experimental.ImportResolverEventResolverResolved, ModuleName: "guest", ImportModule: "env", ResolvedModuleName: "resolved-env"},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			baselineErr, baselineStoreCalls, baselineResolvedCalls := runImportResolverInstantiationScenario(
+				t,
+				tc.registerStoreEnv,
+				tc.configureContext,
+				nil,
+			)
+
+			left := &recordingImportResolverObserver{}
+			right := &recordingImportResolverObserver{}
+			multiErr, multiStoreCalls, multiResolvedCalls := runImportResolverInstantiationScenario(
+				t,
+				tc.registerStoreEnv,
+				tc.configureContext,
+				experimental.MultiImportResolverObserver(left, right),
+			)
+
+			requireEquivalentImportResolverOutcome(
+				t,
+				baselineErr,
+				multiErr,
+				baselineStoreCalls,
+				multiStoreCalls,
+				baselineResolvedCalls,
+				multiResolvedCalls,
+			)
+			require.Equal(t, tc.wantSnapshots, snapshotImportResolverObservations(left.snapshot()))
+			require.Equal(t, tc.wantSnapshots, snapshotImportResolverObservations(right.snapshot()))
+		})
 	}
 }
 
