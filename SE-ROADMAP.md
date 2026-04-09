@@ -28,6 +28,26 @@ Note: this roadmap encompasses work commencing from commit 7f2e5f44e791c45714ab2
 
 ## Workstreams
 
+### Track view
+
+Use this table as the quick side-by-side status board. The detailed workstream
+sections below remain the canonical item lists and should continue to carry the
+commit-backed progress markers for each track.
+
+| Workstream                                          | Go track                                                                                                                                             | Rust track                                                                                                                    |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| 1. Foundation and threat model                      | [95%:bbe2d375] Threat model and trap taxonomy are largely defined; support matrix and benchmark baselines still need more work.                      | —                                                                                                                             |
+| 2. Hardware-assisted memory sandboxing              | [100%:dedf9a6c] Virtual memory reservation and `mmap` guard-page prototype are in place; portability/fallback work remains.                          | —                                                                                                                             |
+| 3. Deterministic CPU metering ("fuel")              | [90%:dedf9a6c] Compiler-side fuel metering and exhaustion traps are in place; host fuel APIs and validation depth still need work.                   | —                                                                                                                             |
+| 4. Async yield and resume                           | [90%:dedf9a6c] Yield protocol, suspension, resume semantics, and broad Go validation are in place; suspension invariants still need tightening.      | —                                                                                                                             |
+| 5. Zero-trust host interface                        | [65%:dedf9a6c] Direction is set, but the Go core engine is not yet fully stripped of system/OS coupling.                                             | —                                                                                                                             |
+| 6. Validation, hardening, and operational readiness | [85%:16b42271] Extensive Go `experimental/` coverage now exists for memory faults, fuel exhaustion, async resumption, trap causes, and policy flows. | —                                                                                                                             |
+| 7. Rust-port AOT packaging and native distribution  | —                                                                                                                                                    | [95%:04af62a8] Strong Linux ELF/AOT packaging path exists; generic host-import/runtime-state packaging still needs hardening. |
+
+**Tracking rule:** use the Go column for Go-runtime progress, the Rust column
+for Rust-port progress, and leave a column as `—` until that track has been
+explicitly assessed for the corresponding workstream.
+
 ### 1. Foundation and threat model
 
 Establish the baseline needed to evaluate all later work.
