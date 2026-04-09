@@ -126,6 +126,17 @@ func (o *orderedRecordingFuelObserver) ObserveFuel(ctx context.Context, observat
 	o.recorder.add("fuel %s", observation.Event)
 }
 
+type namedOrderedRecordingFuelObserver struct {
+	name         string
+	recorder     *orderedEventRecorder
+	observations *recordingFuelObserver
+}
+
+func (o *namedOrderedRecordingFuelObserver) ObserveFuel(ctx context.Context, observation experimental.FuelObservation) {
+	o.observations.ObserveFuel(ctx, observation)
+	o.recorder.add("%s %s", o.name, observation.Event)
+}
+
 type namedOrderedRecordingFunctionListener struct {
 	name     string
 	recorder *orderedEventRecorder
@@ -2963,6 +2974,171 @@ func TestFunctionListener_FuelObserverAcrossYieldResume(t *testing.T) {
 				"listener after async_work",
 				"listener after run_twice",
 				"fuel consumed",
+			})
+		})
+	}
+}
+
+func TestFunctionListener_MultiFuelObserverOrderingAcrossYieldResume(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
+
+			ctx := context.Background()
+			recorder := &orderedEventRecorder{}
+			leftEvents := &recordingFunctionListener{}
+			rightEvents := &recordingFunctionListener{}
+			host := &fuelAdjustingYieldingHostFunc{t: t, adjustment: 5}
+			instantiateCtx := experimental.WithFunctionListenerFactory(ctx, experimental.MultiFunctionListenerFactory(
+				newFunctionListenerFactory(&namedOrderedRecordingFunctionListener{
+					name:     "listener left",
+					recorder: recorder,
+					events:   leftEvents,
+				}),
+				newFunctionListenerFactory(&namedOrderedRecordingFunctionListener{
+					name:     "listener right",
+					recorder: recorder,
+					events:   rightEvents,
+				}),
+			))
+
+			rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg)
+			defer rt.Close(ctx)
+
+			_, err := rt.NewHostModuleBuilder("example").
+				NewFunctionBuilder().
+				WithGoModuleFunction(host, nil, []api.ValueType{api.ValueTypeI32}).
+				Export("async_work").
+				Instantiate(instantiateCtx)
+			require.NoError(t, err)
+
+			mod, err := rt.InstantiateWithConfig(instantiateCtx, yieldWasm, wazero.NewModuleConfig().WithName("guest"))
+			require.NoError(t, err)
+
+			initialLeft := &namedOrderedRecordingFuelObserver{
+				name:         "fuel left",
+				recorder:     recorder,
+				observations: &recordingFuelObserver{},
+			}
+			initialRight := &namedOrderedRecordingFuelObserver{
+				name:         "fuel right",
+				recorder:     recorder,
+				observations: &recordingFuelObserver{},
+			}
+			ctrl := experimental.NewSimpleFuelController(20)
+
+			_, err = mod.ExportedFunction("run_twice").Call(
+				experimental.WithYieldObserver(
+					experimental.WithFuelObserver(
+						experimental.WithFuelController(
+							experimental.WithYielder(ctx),
+							ctrl,
+						),
+						experimental.MultiFuelObserver(initialLeft, initialRight),
+					),
+					experimental.YieldObserverFunc(func(_ context.Context, observation experimental.YieldObservation) {
+						recorder.add("yield %s #%d", observation.Event, observation.YieldCount)
+					}),
+				),
+			)
+			firstYield := requireYieldError(t, err)
+
+			for _, events := range [][]listenerEvent{leftEvents.snapshot(), rightEvents.snapshot()} {
+				assertListenerEvents(t, events, []expectedListenerEvent{
+					{phase: "before", function: "run_twice"},
+					{phase: "before", function: "async_work"},
+				})
+			}
+
+			resumeLeft := &namedOrderedRecordingFuelObserver{
+				name:         "fuel left",
+				recorder:     recorder,
+				observations: &recordingFuelObserver{},
+			}
+			resumeRight := &namedOrderedRecordingFuelObserver{
+				name:         "fuel right",
+				recorder:     recorder,
+				observations: &recordingFuelObserver{},
+			}
+			resumeMulti := &forwardingFuelObserver{inner: experimental.MultiFuelObserver(resumeLeft, resumeRight)}
+			host.expectedFuelObserver = resumeMulti
+
+			results, err := firstYield.Resumer().Resume(
+				experimental.WithYieldObserver(
+					experimental.WithFuelObserver(experimental.WithYielder(ctx), resumeMulti),
+					experimental.YieldObserverFunc(func(_ context.Context, observation experimental.YieldObservation) {
+						recorder.add("yield %s #%d", observation.Event, observation.YieldCount)
+					}),
+				),
+				[]uint64{40},
+			)
+			require.NoError(t, err)
+			require.Equal(t, []uint64{42}, results)
+			require.Equal(t, host.beforeAdjustment+int64(5), host.afterAdjustment)
+
+			wantEvents := []expectedListenerEvent{
+				{phase: "before", function: "run_twice"},
+				{phase: "before", function: "async_work"},
+				{phase: "after", function: "async_work"},
+				{phase: "before", function: "async_work"},
+				{phase: "after", function: "async_work"},
+				{phase: "after", function: "run_twice"},
+			}
+			for _, events := range [][]listenerEvent{leftEvents.snapshot(), rightEvents.snapshot()} {
+				assertListenerEvents(t, events, wantEvents)
+				assertBeforeCompletionPairing(t, events)
+				assertBeforeCompletionStackPairing(t, events)
+			}
+
+			wantInitial := []fuelObservationSnapshot{{
+				Event:     experimental.FuelEventBudgeted,
+				Budget:    20,
+				Remaining: 20,
+			}}
+			wantResumed := []fuelObservationSnapshot{
+				{
+					Event:     experimental.FuelEventRecharged,
+					Remaining: host.afterAdjustment,
+					Delta:     5,
+				},
+				{
+					Event:     experimental.FuelEventConsumed,
+					Budget:    25,
+					Consumed:  ctrl.TotalConsumed(),
+					Remaining: 25 - ctrl.TotalConsumed(),
+				},
+			}
+
+			for _, observer := range []*namedOrderedRecordingFuelObserver{initialLeft, initialRight} {
+				require.Equal(t, wantInitial, snapshotFuelObservations(observer.observations.snapshot()))
+			}
+			for _, observer := range []*namedOrderedRecordingFuelObserver{resumeLeft, resumeRight} {
+				require.Equal(t, wantResumed, snapshotFuelObservations(observer.observations.snapshot()))
+			}
+
+			assertOrderedEvents(t, recorder.snapshot(), []string{
+				"fuel left budgeted",
+				"fuel right budgeted",
+				"listener left before run_twice",
+				"listener right before run_twice",
+				"listener left before async_work",
+				"listener right before async_work",
+				"yield yielded #1",
+				"yield resumed #1",
+				"listener left after async_work",
+				"listener right after async_work",
+				"listener left before async_work",
+				"listener right before async_work",
+				"fuel left recharged",
+				"fuel right recharged",
+				"listener left after async_work",
+				"listener right after async_work",
+				"listener left after run_twice",
+				"listener right after run_twice",
+				"fuel left consumed",
+				"fuel right consumed",
 			})
 		})
 	}
