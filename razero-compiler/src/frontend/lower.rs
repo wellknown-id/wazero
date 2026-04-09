@@ -181,6 +181,10 @@ impl<'a> Compiler<'a> {
             OPCODE_I32_MUL | OPCODE_I64_MUL => self.lower_binary_same(|this, x, y| {
                 this.ssa_builder.allocate_instruction().as_imul(x, y)
             }),
+            OPCODE_I32_DIV_S | OPCODE_I64_DIV_S => self.lower_trapping_binary_generic(Opcode::Sdiv),
+            OPCODE_I32_DIV_U | OPCODE_I64_DIV_U => self.lower_trapping_binary_generic(Opcode::Udiv),
+            OPCODE_I32_REM_S | OPCODE_I64_REM_S => self.lower_trapping_binary_generic(Opcode::Srem),
+            OPCODE_I32_REM_U | OPCODE_I64_REM_U => self.lower_trapping_binary_generic(Opcode::Urem),
             OPCODE_F32_ADD | OPCODE_F64_ADD => self.lower_binary_generic(Opcode::Fadd),
             OPCODE_F32_SUB | OPCODE_F64_SUB => self.lower_binary_generic(Opcode::Fsub),
             OPCODE_F32_MUL | OPCODE_F64_MUL => self.lower_binary_generic(Opcode::Fmul),
@@ -488,6 +492,15 @@ impl<'a> Compiler<'a> {
             let y = self.lowering_state.pop();
             let x = self.lowering_state.pop();
             let value = self.emit_binary(opcode, x, y, x.ty());
+            self.lowering_state.push(value);
+        }
+    }
+
+    fn lower_trapping_binary_generic(&mut self, opcode: Opcode) {
+        if !self.lowering_state.unreachable {
+            let y = self.lowering_state.pop();
+            let x = self.lowering_state.pop();
+            let value = self.emit_trapping_binary(opcode, x, y, x.ty());
             self.lowering_state.push(value);
         }
     }
@@ -819,6 +832,22 @@ impl<'a> Compiler<'a> {
         self.ssa_builder.instruction(id).return_()
     }
 
+    fn emit_trapping_binary(
+        &mut self,
+        opcode: Opcode,
+        x: Value,
+        y: Value,
+        result_ty: Type,
+    ) -> Value {
+        let mut instr = self.ssa_builder.allocate_instruction().with_opcode(opcode);
+        instr.v = x;
+        instr.v2 = y;
+        instr.v3 = self.exec_ctx_ptr_value;
+        instr.typ = result_ty;
+        let id = self.ssa_builder.insert_instruction(instr);
+        self.ssa_builder.instruction(id).return_()
+    }
+
     fn emit_load(&mut self, ptr: Value, offset: u32, ty: Type) -> Value {
         let id = self.ssa_builder.insert_instruction(
             self.ssa_builder
@@ -844,23 +873,14 @@ impl<'a> Compiler<'a> {
             Type::I64,
         );
         let decrement = self.emit_iconst64(1);
-        let decremented = self.emit_binary(
-            Opcode::Isub,
-            remaining,
-            decrement,
-            Type::I64,
-        );
+        let decremented = self.emit_binary(Opcode::Isub, remaining, decrement, Type::I64);
         self.emit_store(
             decremented,
             self.exec_ctx_ptr_value,
             EXECUTION_CONTEXT_OFFSET_FUEL.u32(),
         );
         let zero = self.emit_iconst64(0);
-        let exhausted = self.emit_icmp(
-            decremented,
-            zero,
-            IntegerCmpCond::SignedLessThan,
-        );
+        let exhausted = self.emit_icmp(decremented, zero, IntegerCmpCond::SignedLessThan);
         self.emit_exit_if_true_with_code(
             self.exec_ctx_ptr_value,
             exhausted,
@@ -1258,6 +1278,134 @@ mod tests {
         assert!(formatted.contains(&format!(", exec_ctx, {fuel_offset:#x}")));
         assert!(formatted.contains("ExitIfTrueWithCode"));
         assert!(formatted.contains("fuel_exhausted"));
+    }
+
+    #[test]
+    fn lowers_i32_div_s_with_trap_check() {
+        let module = Module {
+            type_section: vec![function_type(
+                &[ValueType::I32, ValueType::I32],
+                &[ValueType::I32],
+            )],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![
+                    OPCODE_LOCAL_GET,
+                    0,
+                    OPCODE_LOCAL_GET,
+                    1,
+                    OPCODE_I32_DIV_S,
+                    OPCODE_END,
+                ],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32, v3:i32)\n\tv4:i32 = Sdiv v2, v3, exec_ctx\n\tJump blk_ret, v4\n"
+        );
+    }
+
+    #[test]
+    fn lowers_i64_div_u_with_trap_check() {
+        let module = Module {
+            type_section: vec![function_type(
+                &[ValueType::I64, ValueType::I64],
+                &[ValueType::I64],
+            )],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![
+                    OPCODE_LOCAL_GET,
+                    0,
+                    OPCODE_LOCAL_GET,
+                    1,
+                    OPCODE_I64_DIV_U,
+                    OPCODE_END,
+                ],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i64, v3:i64)\n\tv4:i64 = Udiv v2, v3, exec_ctx\n\tJump blk_ret, v4\n"
+        );
+    }
+
+    #[test]
+    fn lowers_i32_rem_s_with_trap_check() {
+        let module = Module {
+            type_section: vec![function_type(
+                &[ValueType::I32, ValueType::I32],
+                &[ValueType::I32],
+            )],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![
+                    OPCODE_LOCAL_GET,
+                    0,
+                    OPCODE_LOCAL_GET,
+                    1,
+                    OPCODE_I32_REM_S,
+                    OPCODE_END,
+                ],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32, v3:i32)\n\tv4:i32 = Srem v2, v3, exec_ctx\n\tJump blk_ret, v4\n"
+        );
+    }
+
+    #[test]
+    fn lowers_i64_rem_u_with_trap_check() {
+        let module = Module {
+            type_section: vec![function_type(
+                &[ValueType::I64, ValueType::I64],
+                &[ValueType::I64],
+            )],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![
+                    OPCODE_LOCAL_GET,
+                    0,
+                    OPCODE_LOCAL_GET,
+                    1,
+                    OPCODE_I64_REM_U,
+                    OPCODE_END,
+                ],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i64, v3:i64)\n\tv4:i64 = Urem v2, v3, exec_ctx\n\tJump blk_ret, v4\n"
+        );
     }
 
     #[test]
