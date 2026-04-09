@@ -357,6 +357,71 @@ func TestMultiFuelObserver_YieldResumeUsesResumedObserver(t *testing.T) {
 	}
 }
 
+func TestMultiTrapObserver_YieldResumeUsesResumedObserver(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			mod, rt, ctx := setupYieldTest(t, ec.cfg)
+			defer rt.Close(ctx)
+
+			resumePolicy := experimental.HostCallPolicyFunc(func(context.Context, api.Module, api.FunctionDefinition) bool {
+				return false
+			})
+
+			baselineInitial := &recordingTrapObserver{}
+			_, err := mod.ExportedFunction("run_twice").Call(
+				experimental.WithTrapObserver(experimental.WithYielder(ctx), baselineInitial),
+			)
+			baselineResumer := requireYieldError(t, err).Resumer()
+
+			baselineResume := &recordingTrapObserver{}
+			baselineResumeCtx := experimental.WithTrapObserver(
+				experimental.WithHostCallPolicy(experimental.WithYielder(ctx), resumePolicy),
+				baselineResume,
+			)
+			_, baselineErr := baselineResumer.Resume(baselineResumeCtx, []uint64{1})
+			require.ErrorIs(t, baselineErr, wasmruntime.ErrRuntimePolicyDenied)
+			require.Zero(t, baselineInitial.count())
+
+			wantSnapshots := []trapObservationSnapshot{{
+				Cause:        experimental.TrapCausePolicyDenied,
+				ModuleName:   mod.Name(),
+				PolicyDenied: true,
+			}}
+			require.Equal(t, wantSnapshots, snapshotTrapObservations(baselineResume))
+
+			initialLeft := &recordingTrapObserver{}
+			initialRight := &recordingTrapObserver{}
+			_, err = mod.ExportedFunction("run_twice").Call(
+				experimental.WithTrapObserver(
+					experimental.WithYielder(ctx),
+					experimental.MultiTrapObserver(initialLeft, initialRight),
+				),
+			)
+			resumer := requireYieldError(t, err).Resumer()
+
+			resumeLeft := &recordingTrapObserver{}
+			resumeRight := &recordingTrapObserver{}
+			resumeCtx := experimental.WithTrapObserver(
+				experimental.WithHostCallPolicy(experimental.WithYielder(ctx), resumePolicy),
+				experimental.MultiTrapObserver(resumeLeft, resumeRight),
+			)
+
+			_, err = resumer.Resume(resumeCtx, []uint64{1})
+			require.EqualError(t, err, baselineErr.Error())
+			require.Zero(t, initialLeft.count())
+			require.Zero(t, initialRight.count())
+
+			for _, observer := range []*recordingTrapObserver{resumeLeft, resumeRight} {
+				require.Equal(t, wantSnapshots, snapshotTrapObservations(observer))
+				observation := observer.single(t)
+				require.Equal(t, experimental.TrapCausePolicyDenied, observation.Cause)
+				require.EqualError(t, observation.Err, baselineErr.Error())
+				require.Equal(t, mod.Name(), observation.Module.Name())
+			}
+		})
+	}
+}
+
 func TestMultiHostCallPolicyObserver_PolicyDeniedAlsoNotifiesMultiTrapObserver(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
