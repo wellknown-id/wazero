@@ -534,6 +534,11 @@ impl<'a> Compiler<'a> {
                     self.emit_store(value, addr, offset);
                 }
             }
+            OPCODE_I32_STORE8 => self.lower_ext_store(Opcode::Istore8, 1),
+            OPCODE_I32_STORE16 => self.lower_ext_store(Opcode::Istore16, 2),
+            OPCODE_I64_STORE8 => self.lower_ext_store(Opcode::Istore8, 1),
+            OPCODE_I64_STORE16 => self.lower_ext_store(Opcode::Istore16, 2),
+            OPCODE_I64_STORE32 => self.lower_ext_store(Opcode::Istore32, 4),
             OPCODE_I32_LOAD8_S => self.lower_ext_load(Opcode::Sload8, 1, Type::I32),
             OPCODE_I32_LOAD8_U => self.lower_ext_load(Opcode::Uload8, 1, Type::I32),
             OPCODE_I32_LOAD16_S => self.lower_ext_load(Opcode::Sload16, 2, Type::I32),
@@ -593,6 +598,17 @@ impl<'a> Compiler<'a> {
             let addr = self.lower_local_memory_address(base_addr, offset as u64, size);
             let value = self.emit_ext_load(opcode, addr, offset, ty);
             self.lowering_state.push(value);
+        }
+    }
+
+    fn lower_ext_store(&mut self, opcode: Opcode, size: u64) {
+        let _align = self.read_u32();
+        let offset = self.read_u32();
+        if !self.lowering_state.unreachable {
+            let value = self.lowering_state.pop();
+            let base_addr = self.lowering_state.pop();
+            let addr = self.lower_local_memory_address(base_addr, offset as u64, size);
+            self.emit_store_with_opcode(opcode, value, addr, offset);
         }
     }
 
@@ -1009,13 +1025,15 @@ impl<'a> Compiler<'a> {
     }
 
     fn emit_store(&mut self, value: Value, ptr: Value, offset: u32) {
-        self.ssa_builder
-            .insert_instruction(self.ssa_builder.allocate_instruction().as_store(
-                Opcode::Store,
-                value,
-                ptr,
-                offset,
-            ));
+        self.emit_store_with_opcode(Opcode::Store, value, ptr, offset);
+    }
+
+    fn emit_store_with_opcode(&mut self, opcode: Opcode, value: Value, ptr: Value, offset: u32) {
+        self.ssa_builder.insert_instruction(
+            self.ssa_builder
+                .allocate_instruction()
+                .as_store(opcode, value, ptr, offset),
+        );
     }
 
     fn emit_iconst64(&mut self, value: u64) -> Value {
@@ -2029,6 +2047,120 @@ mod tests {
         assert_eq!(
             compiler.format(),
             "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32, v3:f64)\n\tv4:i64 = UExtend v2\n\tv5:i64 = Iconst 8\n\tv6:i64 = Iadd v4, v5\n\tv7:i64 = Uload32 module_ctx, 0x10\n\tv8:i32 = Icmp v7, v6\n\tExitIfTrueWithCode v8, exec_ctx, memory_out_of_bounds\n\tv9:i64 = Load module_ctx, 0x8\n\tv10:i64 = Iadd v9, v4\n\tStore v3, v10, 0x0\n\tJump blk_ret\n"
+        );
+    }
+
+    #[test]
+    fn lowers_i32_store8_with_local_memory_bounds_check() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32, ValueType::I32], &[])],
+            function_section: vec![0],
+            memory_section: Some(wasm::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                is_shared: false,
+            }),
+            code_section: vec![Code {
+                body: vec![
+                    OPCODE_LOCAL_GET,
+                    0,
+                    OPCODE_LOCAL_GET,
+                    1,
+                    OPCODE_I32_STORE8,
+                    0,
+                    0,
+                    OPCODE_END,
+                ],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32, v3:i32)\n\tv4:i64 = UExtend v2\n\tv5:i64 = Iconst 1\n\tv6:i64 = Iadd v4, v5\n\tv7:i64 = Uload32 module_ctx, 0x10\n\tv8:i32 = Icmp v7, v6\n\tExitIfTrueWithCode v8, exec_ctx, memory_out_of_bounds\n\tv9:i64 = Load module_ctx, 0x8\n\tv10:i64 = Iadd v9, v4\n\tIstore8 v3, v10, 0x0\n\tJump blk_ret\n"
+        );
+    }
+
+    #[test]
+    fn lowers_i32_store16_with_local_memory_bounds_check() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32, ValueType::I32], &[])],
+            function_section: vec![0],
+            memory_section: Some(wasm::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                is_shared: false,
+            }),
+            code_section: vec![Code {
+                body: vec![
+                    OPCODE_LOCAL_GET,
+                    0,
+                    OPCODE_LOCAL_GET,
+                    1,
+                    OPCODE_I32_STORE16,
+                    1,
+                    0,
+                    OPCODE_END,
+                ],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32, v3:i32)\n\tv4:i64 = UExtend v2\n\tv5:i64 = Iconst 2\n\tv6:i64 = Iadd v4, v5\n\tv7:i64 = Uload32 module_ctx, 0x10\n\tv8:i32 = Icmp v7, v6\n\tExitIfTrueWithCode v8, exec_ctx, memory_out_of_bounds\n\tv9:i64 = Load module_ctx, 0x8\n\tv10:i64 = Iadd v9, v4\n\tIstore16 v3, v10, 0x0\n\tJump blk_ret\n"
+        );
+    }
+
+    #[test]
+    fn lowers_i64_store32_with_local_memory_bounds_check() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32, ValueType::I64], &[])],
+            function_section: vec![0],
+            memory_section: Some(wasm::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                is_shared: false,
+            }),
+            code_section: vec![Code {
+                body: vec![
+                    OPCODE_LOCAL_GET,
+                    0,
+                    OPCODE_LOCAL_GET,
+                    1,
+                    OPCODE_I64_STORE32,
+                    2,
+                    0,
+                    OPCODE_END,
+                ],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32, v3:i64)\n\tv4:i64 = UExtend v2\n\tv5:i64 = Iconst 4\n\tv6:i64 = Iadd v4, v5\n\tv7:i64 = Uload32 module_ctx, 0x10\n\tv8:i32 = Icmp v7, v6\n\tExitIfTrueWithCode v8, exec_ctx, memory_out_of_bounds\n\tv9:i64 = Load module_ctx, 0x8\n\tv10:i64 = Iadd v9, v4\n\tIstore32 v3, v10, 0x0\n\tJump blk_ret\n"
         );
     }
 }
