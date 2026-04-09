@@ -58,7 +58,7 @@ The wazero `Store`, `Engine`, compilation caches, and type registries are shared
 
 **Mitigation (standard mode)**: Software bounds checks on every memory access (both interpreter and compiler paths). An out-of-bounds access returns `false` from `MemoryInstance.hasSize()` or triggers `ErrRuntimeOutOfBoundsMemoryAccess`.
 
-**Mitigation (secure mode)**: On `unix` / `windows` targets, linear memory can be backed by a large reservation with a 4 GiB guard region. On the compiler's Linux `amd64` / `arm64` secure-mode path, out-of-bounds accesses are converted into Wasm traps by the custom signal-handler fault path, so basic load/store instructions do not need the normal software bounds checks. On other targets, secure mode falls back to the checked execution path. See [SUPPORT_MATRIX.md](SUPPORT_MATRIX.md) for the exact runtime-mode and platform matrix.
+**Mitigation (secure mode)**: On `unix` / `windows` targets, linear memory can be backed by a large reservation with a 4 GiB guard region. On the compiler's Linux `amd64` / `arm64` secure-mode path, out-of-bounds accesses are converted into Wasm traps by the custom signal-handler fault path, so basic load/store instructions do not need the normal software bounds checks. When execution reaches that hardware-backed trap path, the runtime surfaces `ErrRuntimeMemoryFault`; software-checked paths continue to report `ErrRuntimeOutOfBoundsMemoryAccess`. On other targets, secure mode falls back to the checked execution path. See [SUPPORT_MATRIX.md](SUPPORT_MATRIX.md) for the exact runtime-mode and platform matrix.
 
 ### T2 — Resource exhaustion (CPU)
 

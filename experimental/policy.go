@@ -2,6 +2,7 @@ package experimental
 
 import (
 	"context"
+	"reflect"
 
 	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/internal/expctxkeys"
@@ -24,15 +25,21 @@ type HostCallPolicy interface {
 type HostCallPolicyFunc func(ctx context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool
 
 // AllowHostCall implements HostCallPolicy.
+//
+// A nil HostCallPolicyFunc is treated as absent and therefore allows the call.
 func (f HostCallPolicyFunc) AllowHostCall(ctx context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+	if f == nil {
+		return true
+	}
 	return f(ctx, caller, hostFunction)
 }
 
 // WithHostCallPolicy returns a derived context with the given HostCallPolicy.
 //
-// If policy is nil, ctx is returned unchanged.
+// If policy is nil, including a typed-nil policy value, ctx is returned
+// unchanged.
 func WithHostCallPolicy(ctx context.Context, policy HostCallPolicy) context.Context {
-	if policy != nil {
+	if !isNilHostCallPolicy(policy) {
 		return context.WithValue(ctx, expctxkeys.HostCallPolicyKey{}, policy)
 	}
 	return ctx
@@ -40,6 +47,25 @@ func WithHostCallPolicy(ctx context.Context, policy HostCallPolicy) context.Cont
 
 // GetHostCallPolicy returns the HostCallPolicy from ctx, or nil if none is set.
 func GetHostCallPolicy(ctx context.Context) HostCallPolicy {
+	if ctx == nil {
+		return nil
+	}
 	policy, _ := ctx.Value(expctxkeys.HostCallPolicyKey{}).(HostCallPolicy)
+	if isNilHostCallPolicy(policy) {
+		return nil
+	}
 	return policy
+}
+
+func isNilHostCallPolicy(policy HostCallPolicy) bool {
+	if policy == nil {
+		return true
+	}
+	v := reflect.ValueOf(policy)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
 }

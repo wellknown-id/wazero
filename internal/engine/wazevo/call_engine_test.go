@@ -5,7 +5,9 @@ import (
 	"testing"
 	"unsafe"
 
+	"github.com/tetratelabs/wazero/internal/engine/wazevo/wazevoapi"
 	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/tetratelabs/wazero/internal/wasmruntime"
 )
 
 func TestCallEngine_init(t *testing.T) {
@@ -65,4 +67,31 @@ func TestCallEngine_requiredInitialStackSize(t *testing.T) {
 	require.Equal(t, 10240, c.requiredInitialStackSize())
 	c.sizeOfParamResultSlice = 1000
 	require.Equal(t, 1000*16+32+16, c.requiredInitialStackSize())
+}
+
+func TestRuntimeTrapFromExitCode(t *testing.T) {
+	tests := []struct {
+		name     string
+		exitCode wazevoapi.ExitCode
+		expected error
+		ok       bool
+	}{
+		{name: "memory oob", exitCode: wazevoapi.ExitCodeMemoryOutOfBounds, expected: wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess, ok: true},
+		{name: "memory fault", exitCode: wazevoapi.ExitCodeMemoryFault, expected: wasmruntime.ErrRuntimeMemoryFault, ok: true},
+		{name: "unaligned atomic", exitCode: wazevoapi.ExitCodeUnalignedAtomic, expected: wasmruntime.ErrRuntimeUnalignedAtomic, ok: true},
+		{name: "non trap", exitCode: wazevoapi.ExitCodeGrowMemory},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			actual, ok := runtimeTrapFromExitCode(tc.exitCode)
+			require.Equal(t, tc.ok, ok)
+			if !tc.ok {
+				require.Nil(t, actual)
+				return
+			}
+			require.Same(t, tc.expected, actual)
+		})
+	}
 }

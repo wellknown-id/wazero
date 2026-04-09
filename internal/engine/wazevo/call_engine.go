@@ -596,33 +596,41 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			c.execCtx.exitCode = wazevoapi.ExitCodeOK
 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
-		case wazevoapi.ExitCodeUnreachable:
-			panic(wasmruntime.ErrRuntimeUnreachable)
-		case wazevoapi.ExitCodeMemoryOutOfBounds:
-			panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
-		case wazevoapi.ExitCodeTableOutOfBounds:
-			panic(wasmruntime.ErrRuntimeInvalidTableAccess)
-		case wazevoapi.ExitCodeIndirectCallNullPointer:
-			panic(wasmruntime.ErrRuntimeInvalidTableAccess)
-		case wazevoapi.ExitCodeIndirectCallTypeMismatch:
-			panic(wasmruntime.ErrRuntimeIndirectCallTypeMismatch)
-		case wazevoapi.ExitCodeIntegerOverflow:
-			panic(wasmruntime.ErrRuntimeIntegerOverflow)
-		case wazevoapi.ExitCodeIntegerDivisionByZero:
-			panic(wasmruntime.ErrRuntimeIntegerDivideByZero)
-		case wazevoapi.ExitCodeInvalidConversionToInteger:
-			panic(wasmruntime.ErrRuntimeInvalidConversionToInteger)
-		case wazevoapi.ExitCodeUnalignedAtomic:
-			panic(wasmruntime.ErrRuntimeUnalignedAtomic)
-		case wazevoapi.ExitCodeFuelExhausted:
-			panic(wasmruntime.ErrRuntimeFuelExhausted)
-		case wazevoapi.ExitCodePolicyDenied:
-			panic(wasmruntime.ErrRuntimePolicyDenied)
-		case wazevoapi.ExitCodeMemoryFault:
-			panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 		default:
+			if trap, ok := runtimeTrapFromExitCode(ec & wazevoapi.ExitCodeMask); ok {
+				panic(trap)
+			}
 			panic("BUG")
 		}
+	}
+}
+
+func runtimeTrapFromExitCode(exitCode wazevoapi.ExitCode) (*wasmruntime.Error, bool) {
+	switch exitCode {
+	case wazevoapi.ExitCodeUnreachable:
+		return wasmruntime.ErrRuntimeUnreachable, true
+	case wazevoapi.ExitCodeMemoryOutOfBounds:
+		return wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess, true
+	case wazevoapi.ExitCodeTableOutOfBounds, wazevoapi.ExitCodeIndirectCallNullPointer:
+		return wasmruntime.ErrRuntimeInvalidTableAccess, true
+	case wazevoapi.ExitCodeIndirectCallTypeMismatch:
+		return wasmruntime.ErrRuntimeIndirectCallTypeMismatch, true
+	case wazevoapi.ExitCodeIntegerOverflow:
+		return wasmruntime.ErrRuntimeIntegerOverflow, true
+	case wazevoapi.ExitCodeIntegerDivisionByZero:
+		return wasmruntime.ErrRuntimeIntegerDivideByZero, true
+	case wazevoapi.ExitCodeInvalidConversionToInteger:
+		return wasmruntime.ErrRuntimeInvalidConversionToInteger, true
+	case wazevoapi.ExitCodeUnalignedAtomic:
+		return wasmruntime.ErrRuntimeUnalignedAtomic, true
+	case wazevoapi.ExitCodeFuelExhausted:
+		return wasmruntime.ErrRuntimeFuelExhausted, true
+	case wazevoapi.ExitCodePolicyDenied:
+		return wasmruntime.ErrRuntimePolicyDenied, true
+	case wazevoapi.ExitCodeMemoryFault:
+		return wasmruntime.ErrRuntimeMemoryFault, true
+	default:
+		return nil, false
 	}
 }
 
@@ -1070,27 +1078,10 @@ func (r *compilerResumer) Resume(ctx context.Context, hostResults []uint64) (res
 			c.execCtx.exitCode = wazevoapi.ExitCodeOK
 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
-		case wazevoapi.ExitCodeUnreachable:
-			panic(wasmruntime.ErrRuntimeUnreachable)
-		case wazevoapi.ExitCodeMemoryOutOfBounds:
-			panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
-		case wazevoapi.ExitCodeTableOutOfBounds:
-			panic(wasmruntime.ErrRuntimeInvalidTableAccess)
-		case wazevoapi.ExitCodeIndirectCallNullPointer:
-			panic(wasmruntime.ErrRuntimeInvalidTableAccess)
-		case wazevoapi.ExitCodeIndirectCallTypeMismatch:
-			panic(wasmruntime.ErrRuntimeIndirectCallTypeMismatch)
-		case wazevoapi.ExitCodeIntegerOverflow:
-			panic(wasmruntime.ErrRuntimeIntegerOverflow)
-		case wazevoapi.ExitCodeIntegerDivisionByZero:
-			panic(wasmruntime.ErrRuntimeIntegerDivideByZero)
-		case wazevoapi.ExitCodeInvalidConversionToInteger:
-			panic(wasmruntime.ErrRuntimeInvalidConversionToInteger)
-		case wazevoapi.ExitCodeFuelExhausted:
-			panic(wasmruntime.ErrRuntimeFuelExhausted)
-		case wazevoapi.ExitCodePolicyDenied:
-			panic(wasmruntime.ErrRuntimePolicyDenied)
 		default:
+			if trap, ok := runtimeTrapFromExitCode(ec & wazevoapi.ExitCodeMask); ok {
+				panic(trap)
+			}
 			panic("BUG")
 		}
 	}

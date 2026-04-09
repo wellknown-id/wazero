@@ -12,6 +12,9 @@
 #define EXECCTX_ORIGSP_OFF 24
 #define EXECCTX_GORET_OFF 32
 
+// wazevoapi.ExitCodeMemoryFault.
+#define EXECCTX_EXITCODE_MEMORY_FAULT 26
+
 // SIGSEGV handler installed via rt_sigaction.
 // Linux delivers args as: (sig int, info *siginfo_t, uctx *ucontext_t).
 TEXT ·jitSigHandler(SB), NOSPLIT|TOPFRAME|NOFRAME, $0-0
@@ -57,8 +60,8 @@ jit_fault:
 	MOVD 25*8(R10), R11
 	CBZ R11, not_jit
 
-	// Mark as OOB memory fault.
-	MOVW $4, R16
+	// Mark as hardware-backed memory fault.
+	MOVW $EXECCTX_EXITCODE_MEMORY_FAULT, R16
 	MOVW R16, EXECCTX_EXITCODE_OFF(R11)
 
 	// Restore Go stack pointers.
