@@ -483,6 +483,76 @@ func TestMultiHostCallPolicyObserver_PolicyDeniedAlsoNotifiesMultiTrapObserver(t
 	}
 }
 
+func TestMultiHostCallPolicyObserver_ResumeUsesResumedObserver(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			mod, rt, ctx := setupYieldTest(t, ec.cfg)
+			defer rt.Close(ctx)
+
+			initialLeft := &recordingHostCallPolicyObserver{}
+			initialRight := &recordingHostCallPolicyObserver{}
+			_, err := mod.ExportedFunction("run_twice").Call(
+				experimental.WithHostCallPolicyObserver(
+					experimental.WithHostCallPolicy(
+						experimental.WithYielder(ctx),
+						experimental.HostCallPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+							require.Equal(t, mod.Name(), caller.Name())
+							require.Equal(t, "example.async_work", hostFunction.DebugName())
+							return true
+						}),
+					),
+					experimental.MultiHostCallPolicyObserver(initialLeft, initialRight),
+				),
+			)
+			firstResumer := requireYieldError(t, err).Resumer()
+
+			resumeLeft := &recordingHostCallPolicyObserver{}
+			resumeRight := &recordingHostCallPolicyObserver{}
+			trapLeft := &recordingTrapObserver{}
+			trapRight := &recordingTrapObserver{}
+			resumeCtx := experimental.WithTrapObserver(
+				experimental.WithHostCallPolicyObserver(
+					experimental.WithHostCallPolicy(
+						experimental.WithYielder(ctx),
+						experimental.HostCallPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+							require.Equal(t, mod.Name(), caller.Name())
+							require.Equal(t, "example.async_work", hostFunction.DebugName())
+							return false
+						}),
+					),
+					experimental.MultiHostCallPolicyObserver(resumeLeft, resumeRight),
+				),
+				experimental.MultiTrapObserver(trapLeft, trapRight),
+			)
+
+			_, err = firstResumer.Resume(resumeCtx, []uint64{40})
+			require.ErrorIs(t, err, wasmruntime.ErrRuntimePolicyDenied)
+
+			for _, observer := range []*recordingHostCallPolicyObserver{initialLeft, initialRight} {
+				observations := observer.snapshot()
+				require.Equal(t, 1, len(observations))
+				require.Equal(t, experimental.HostCallPolicyEventAllowed, observations[0].Event)
+				require.Equal(t, mod.Name(), observations[0].Module.Name())
+				require.Equal(t, "example.async_work", observations[0].HostFunction.DebugName())
+			}
+
+			for _, observer := range []*recordingHostCallPolicyObserver{resumeLeft, resumeRight} {
+				observations := observer.snapshot()
+				require.Equal(t, 1, len(observations))
+				require.Equal(t, experimental.HostCallPolicyEventDenied, observations[0].Event)
+				require.Equal(t, mod.Name(), observations[0].Module.Name())
+				require.Equal(t, "example.async_work", observations[0].HostFunction.DebugName())
+			}
+
+			requireEquivalentTrapObservation(t, trapObservationSnapshot{
+				Cause:        experimental.TrapCausePolicyDenied,
+				ModuleName:   mod.Name(),
+				PolicyDenied: true,
+			}, wasmruntime.ErrRuntimePolicyDenied, trapLeft, trapRight)
+		})
+	}
+}
+
 func TestMultiHostCallPolicy_ComposesAllowAndDenyFlows(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
