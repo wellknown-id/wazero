@@ -864,6 +864,88 @@ func TestMultiTrapObserver_ArithmeticTraps(t *testing.T) {
 	}
 }
 
+func TestMultiTrapObserver_ResumeArithmeticTraps(t *testing.T) {
+	testCases := []struct {
+		name      string
+		wantErr   error
+		wantCause experimental.TrapCause
+	}{
+		{
+			name:      "integer-divide-by-zero",
+			wantErr:   wasmruntime.ErrRuntimeIntegerDivideByZero,
+			wantCause: experimental.TrapCauseIntegerDivideByZero,
+		},
+		{
+			name:      "integer-overflow",
+			wantErr:   wasmruntime.ErrRuntimeIntegerOverflow,
+			wantCause: experimental.TrapCauseIntegerOverflow,
+		},
+		{
+			name:      "invalid-conversion-to-integer",
+			wantErr:   wasmruntime.ErrRuntimeInvalidConversionToInteger,
+			wantCause: experimental.TrapCauseInvalidConversionToInteger,
+		},
+	}
+
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			if ec.name == "compiler" && !platform.CompilerSupported() {
+				t.Skip("compiler is not supported on this host")
+			}
+
+			for _, tc := range testCases {
+				t.Run(tc.name, func(t *testing.T) {
+					ctx := context.Background()
+					rt := wazero.NewRuntimeWithConfig(ctx, ec.cfg)
+					defer rt.Close(ctx)
+
+					_, err := rt.NewHostModuleBuilder("example").
+						NewFunctionBuilder().
+						WithGoModuleFunction(&yieldingHostFunc{t: t}, nil, []api.ValueType{api.ValueTypeI32}).
+						Export("async_work").
+						Instantiate(ctx)
+					require.NoError(t, err)
+
+					mod, err := rt.InstantiateWithConfig(ctx, resumeArithmeticTrapModuleBinary(tc.wantCause), wazero.NewModuleConfig().WithName("guest"))
+					require.NoError(t, err)
+
+					initialLeft := &recordingTrapObserver{}
+					initialRight := &recordingTrapObserver{}
+					_, err = mod.ExportedFunction("run").Call(
+						experimental.WithTrapObserver(
+							experimental.WithYielder(ctx),
+							experimental.MultiTrapObserver(initialLeft, initialRight),
+						),
+					)
+					yieldErr := requireYieldError(t, err)
+					require.Zero(t, initialLeft.count())
+					require.Zero(t, initialRight.count())
+
+					resumeLeft := &recordingTrapObserver{}
+					resumeRight := &recordingTrapObserver{}
+					_, err = yieldErr.Resumer().Resume(
+						experimental.WithTrapObserver(
+							experimental.WithYielder(ctx),
+							experimental.MultiTrapObserver(resumeLeft, resumeRight),
+						),
+						[]uint64{1},
+					)
+					require.ErrorIs(t, err, tc.wantErr)
+
+					cause, ok := experimental.TrapCauseOf(err)
+					require.True(t, ok)
+					require.Equal(t, tc.wantCause, cause)
+
+					requireEquivalentTrapObservation(t, trapObservationSnapshot{
+						Cause:      tc.wantCause,
+						ModuleName: mod.Name(),
+					}, tc.wantErr, resumeLeft, resumeRight)
+				})
+			}
+		})
+	}
+}
+
 func TestMultiYieldPolicy_ComposesAllowAndDenyFlows(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
