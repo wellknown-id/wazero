@@ -1189,6 +1189,217 @@ func TestMultiTrapObserver_ArithmeticTraps(t *testing.T) {
 	}
 }
 
+func TestMultiTrapObserver_TrapObserverOrdering(t *testing.T) {
+	testCases := []struct {
+		name         string
+		cfg          func() wazero.RuntimeConfig
+		supported    func() bool
+		moduleBinary func(t *testing.T) []byte
+		exportName   string
+		setupHost    func(t *testing.T, ctx context.Context, rt wazero.Runtime)
+		callCtx      func(context.Context) context.Context
+		wantErr      error
+		wantCause    experimental.TrapCause
+	}{
+		{
+			name:         "interpreter/unreachable",
+			cfg:          wazero.NewRuntimeConfigInterpreter,
+			supported:    func() bool { return true },
+			moduleBinary: func(t *testing.T) []byte { return trapRuntimeUnreachableBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeUnreachable,
+			wantCause:    experimental.TrapCauseUnreachable,
+		},
+		{
+			name:         "interpreter/out-of-bounds-memory-access",
+			cfg:          wazero.NewRuntimeConfigInterpreter,
+			supported:    func() bool { return true },
+			moduleBinary: func(t *testing.T) []byte { return trapRuntimeOutOfBoundsLoadBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess,
+			wantCause:    experimental.TrapCauseOutOfBoundsMemoryAccess,
+		},
+		{
+			name:         "interpreter/integer-divide-by-zero",
+			cfg:          wazero.NewRuntimeConfigInterpreter,
+			supported:    func() bool { return true },
+			moduleBinary: func(t *testing.T) []byte { return trapRuntimeIntegerDivideByZeroBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeIntegerDivideByZero,
+			wantCause:    experimental.TrapCauseIntegerDivideByZero,
+		},
+		{
+			name:         "interpreter/integer-overflow",
+			cfg:          wazero.NewRuntimeConfigInterpreter,
+			supported:    func() bool { return true },
+			moduleBinary: func(t *testing.T) []byte { return trapRuntimeIntegerOverflowBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeIntegerOverflow,
+			wantCause:    experimental.TrapCauseIntegerOverflow,
+		},
+		{
+			name:         "interpreter/invalid-conversion-to-integer",
+			cfg:          wazero.NewRuntimeConfigInterpreter,
+			supported:    func() bool { return true },
+			moduleBinary: func(t *testing.T) []byte { return trapRuntimeInvalidConversionToIntegerBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeInvalidConversionToInteger,
+			wantCause:    experimental.TrapCauseInvalidConversionToInteger,
+		},
+		{
+			name:         "interpreter/policy-denied",
+			cfg:          wazero.NewRuntimeConfigInterpreter,
+			supported:    func() bool { return true },
+			moduleBinary: func(t *testing.T) []byte { return trapObserverTestModuleBinary() },
+			exportName:   "run",
+			setupHost: func(t *testing.T, ctx context.Context, rt wazero.Runtime) {
+				t.Helper()
+				_, err := rt.NewHostModuleBuilder("env").
+					NewFunctionBuilder().
+					WithFunc(func() {}).
+					Export("check").
+					Instantiate(ctx)
+				require.NoError(t, err)
+			},
+			callCtx: func(ctx context.Context) context.Context {
+				return experimental.WithHostCallPolicy(ctx, experimental.HostCallPolicyFunc(
+					func(context.Context, api.Module, api.FunctionDefinition) bool { return false },
+				))
+			},
+			wantErr:   wasmruntime.ErrRuntimePolicyDenied,
+			wantCause: experimental.TrapCausePolicyDenied,
+		},
+		{
+			name:         "compiler/unreachable",
+			cfg:          wazero.NewRuntimeConfigCompiler,
+			supported:    platform.CompilerSupported,
+			moduleBinary: func(t *testing.T) []byte { return trapRuntimeUnreachableBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeUnreachable,
+			wantCause:    experimental.TrapCauseUnreachable,
+		},
+		{
+			name:         "compiler/integer-divide-by-zero",
+			cfg:          wazero.NewRuntimeConfigCompiler,
+			supported:    platform.CompilerSupported,
+			moduleBinary: func(t *testing.T) []byte { return trapRuntimeIntegerDivideByZeroBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeIntegerDivideByZero,
+			wantCause:    experimental.TrapCauseIntegerDivideByZero,
+		},
+		{
+			name:         "compiler/integer-overflow",
+			cfg:          wazero.NewRuntimeConfigCompiler,
+			supported:    platform.CompilerSupported,
+			moduleBinary: func(t *testing.T) []byte { return trapRuntimeIntegerOverflowBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeIntegerOverflow,
+			wantCause:    experimental.TrapCauseIntegerOverflow,
+		},
+		{
+			name:         "compiler/invalid-conversion-to-integer",
+			cfg:          wazero.NewRuntimeConfigCompiler,
+			supported:    platform.CompilerSupported,
+			moduleBinary: func(t *testing.T) []byte { return trapRuntimeInvalidConversionToIntegerBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeInvalidConversionToInteger,
+			wantCause:    experimental.TrapCauseInvalidConversionToInteger,
+		},
+		{
+			name:         "compiler/policy-denied",
+			cfg:          wazero.NewRuntimeConfigCompiler,
+			supported:    platform.CompilerSupported,
+			moduleBinary: func(t *testing.T) []byte { return trapObserverTestModuleBinary() },
+			exportName:   "run",
+			setupHost: func(t *testing.T, ctx context.Context, rt wazero.Runtime) {
+				t.Helper()
+				_, err := rt.NewHostModuleBuilder("env").
+					NewFunctionBuilder().
+					WithFunc(func() {}).
+					Export("check").
+					Instantiate(ctx)
+				require.NoError(t, err)
+			},
+			callCtx: func(ctx context.Context) context.Context {
+				return experimental.WithHostCallPolicy(ctx, experimental.HostCallPolicyFunc(
+					func(context.Context, api.Module, api.FunctionDefinition) bool { return false },
+				))
+			},
+			wantErr:   wasmruntime.ErrRuntimePolicyDenied,
+			wantCause: experimental.TrapCausePolicyDenied,
+		},
+		{
+			name:         "compiler/fuel-exhausted",
+			cfg:          func() wazero.RuntimeConfig { return wazero.NewRuntimeConfigCompiler().WithFuel(1) },
+			supported:    platform.CompilerSupported,
+			moduleBinary: func(t *testing.T) []byte { return trapObserverFuelLoopBinary() },
+			exportName:   "run",
+			wantErr:      wasmruntime.ErrRuntimeFuelExhausted,
+			wantCause:    experimental.TrapCauseFuelExhausted,
+		},
+		{
+			name:         "compiler/memory-fault",
+			cfg:          func() wazero.RuntimeConfig { return wazero.NewRuntimeConfigCompiler().WithSecureMode(true) },
+			supported:    supportsGuardedMemoryFaultTrap,
+			moduleBinary: trapRuntimeMemoryFaultFixture,
+			exportName:   "oob",
+			wantErr:      wasmruntime.ErrRuntimeMemoryFault,
+			wantCause:    experimental.TrapCauseMemoryFault,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !tc.supported() {
+				t.Skip("trap path is not supported on this host")
+			}
+
+			ctx := context.Background()
+			rt := wazero.NewRuntimeWithConfig(ctx, tc.cfg())
+			defer rt.Close(ctx)
+
+			if tc.setupHost != nil {
+				tc.setupHost(t, ctx, rt)
+			}
+
+			mod, err := rt.InstantiateWithConfig(ctx, tc.moduleBinary(t), wazero.NewModuleConfig().WithName("guest"))
+			require.NoError(t, err)
+
+			left := &recordingTrapObserver{}
+			right := &recordingTrapObserver{}
+			var order []string
+			callCtx := experimental.WithTrapObserver(
+				ctx,
+				experimental.MultiTrapObserver(
+					experimental.TrapObserverFunc(func(ctx context.Context, observation experimental.TrapObservation) {
+						left.ObserveTrap(ctx, observation)
+						order = append(order, "left "+string(observation.Cause))
+					}),
+					experimental.TrapObserverFunc(func(ctx context.Context, observation experimental.TrapObservation) {
+						right.ObserveTrap(ctx, observation)
+						order = append(order, "right "+string(observation.Cause))
+					}),
+				),
+			)
+			if tc.callCtx != nil {
+				callCtx = tc.callCtx(callCtx)
+			}
+
+			_, err = mod.ExportedFunction(tc.exportName).Call(callCtx)
+			require.ErrorIs(t, err, tc.wantErr)
+			requireEquivalentTrapObservation(t, trapObservationSnapshot{
+				Cause:        tc.wantCause,
+				ModuleName:   mod.Name(),
+				PolicyDenied: errors.Is(tc.wantErr, wasmruntime.ErrRuntimePolicyDenied),
+			}, tc.wantErr, left, right)
+			require.Equal(t, []string{
+				"left " + string(tc.wantCause),
+				"right " + string(tc.wantCause),
+			}, order)
+		})
+	}
+}
+
 func TestMultiTrapObserver_ResumeArithmeticTraps(t *testing.T) {
 	testCases := []struct {
 		name      string
