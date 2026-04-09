@@ -230,6 +230,47 @@ func TestMultiImportResolverObserver_EquivalentSequences(t *testing.T) {
 	}
 }
 
+func TestMultiYieldObserver_YieldResumeLifecycle(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			provider := newObservingTimeProvider()
+			mod, rt, ctx := setupYieldTest(t, ec.cfg.WithTimeProvider(provider))
+			defer rt.Close(ctx)
+
+			left := &recordingYieldObserver{}
+			right := &recordingYieldObserver{}
+			_, err := mod.ExportedFunction("run").Call(
+				experimental.WithYieldObserver(
+					experimental.WithYielder(ctx),
+					experimental.MultiYieldObserver(left, right),
+				),
+			)
+			resumer := requireYieldError(t, err).Resumer()
+
+			results, err := resumer.Resume(experimental.WithYielder(ctx), []uint64{42})
+			require.NoError(t, err)
+			require.Equal(t, []uint64{142}, results)
+
+			want := []yieldObservationSnapshot{
+				{
+					Event:               experimental.YieldEventYielded,
+					YieldCount:          1,
+					ExpectedHostResults: 1,
+					SuspendedNanos:      0,
+				},
+				{
+					Event:               experimental.YieldEventResumed,
+					YieldCount:          1,
+					ExpectedHostResults: 1,
+					SuspendedNanos:      1_000_000,
+				},
+			}
+			require.Equal(t, want, snapshotYieldObservations(left.snapshot()))
+			require.Equal(t, want, snapshotYieldObservations(right.snapshot()))
+		})
+	}
+}
+
 func TestMultiYieldObserver_ReyieldUsesResumedObserver(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
