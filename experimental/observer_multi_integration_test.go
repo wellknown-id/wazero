@@ -1408,6 +1408,50 @@ func TestMultiYieldPolicyObserver_ResumeUsesResumedObserver(t *testing.T) {
 	}
 }
 
+func TestMultiYieldPolicyObserver_PolicyDeniedOrdering(t *testing.T) {
+	for _, ec := range engineConfigs() {
+		t.Run(ec.name, func(t *testing.T) {
+			mod, rt, ctx := setupYieldTest(t, ec.cfg)
+			defer rt.Close(ctx)
+
+			left := &recordingYieldPolicyObserver{}
+			right := &recordingYieldPolicyObserver{}
+			var order []string
+			callCtx := experimental.WithYieldPolicyObserver(
+				experimental.WithYieldPolicy(
+					experimental.WithYielder(ctx),
+					experimental.YieldPolicyFunc(func(_ context.Context, caller api.Module, hostFunction api.FunctionDefinition) bool {
+						require.Equal(t, mod.Name(), caller.Name())
+						require.Equal(t, "example.async_work", hostFunction.DebugName())
+						return false
+					}),
+				),
+				experimental.MultiYieldPolicyObserver(
+					experimental.YieldPolicyObserverFunc(func(ctx context.Context, observation experimental.YieldPolicyObservation) {
+						left.ObserveYieldPolicy(ctx, observation)
+						order = append(order, "left "+string(observation.Event))
+					}),
+					experimental.YieldPolicyObserverFunc(func(ctx context.Context, observation experimental.YieldPolicyObservation) {
+						right.ObserveYieldPolicy(ctx, observation)
+						order = append(order, "right "+string(observation.Event))
+					}),
+				),
+			)
+
+			_, err := mod.ExportedFunction("run").Call(callCtx)
+			require.ErrorIs(t, err, wasmruntime.ErrRuntimePolicyDenied)
+
+			for _, observations := range [][]experimental.YieldPolicyObservation{left.snapshot(), right.snapshot()} {
+				require.Equal(t, 1, len(observations))
+				require.Equal(t, experimental.YieldPolicyEventDenied, observations[0].Event)
+				require.Equal(t, mod.Name(), observations[0].Module.Name())
+				require.Equal(t, "example.async_work", observations[0].HostFunction.DebugName())
+			}
+			require.Equal(t, []string{"left denied", "right denied"}, order)
+		})
+	}
+}
+
 func TestMultiYieldPolicyObserver_YieldResumeLifecycle(t *testing.T) {
 	for _, ec := range engineConfigs() {
 		t.Run(ec.name, func(t *testing.T) {
