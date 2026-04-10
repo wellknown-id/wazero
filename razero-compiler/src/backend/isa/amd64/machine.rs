@@ -489,6 +489,18 @@ impl BackendMachine for Amd64Machine {
                     _ => panic!("unsupported amd64 select type: {:?}", instruction.typ),
                 }
             }
+            Opcode::UExtend => {
+                let dst = self.compiler().v_reg_of(instruction.return_());
+                let src = self.compiler().v_reg_of(instruction.v);
+                match instruction.typ {
+                    Type::I64 => {
+                        self.current_block_mut()
+                            .instructions
+                            .push(Amd64Instr::movzx_rm_r(ExtMode::LQ, Operand::reg(src), dst));
+                    }
+                    _ => panic!("unsupported amd64 uextend type: {:?}", instruction.typ),
+                }
+            }
             Opcode::Ishl | Opcode::Ushr | Opcode::Sshr | Opcode::Rotl | Opcode::Rotr => {
                 let dst = self.compiler().v_reg_of(instruction.return_());
                 let lhs = self.compiler().v_reg_of(instruction.v);
@@ -1097,6 +1109,28 @@ mod tests {
         m.format()
     }
 
+    fn lower_uextend_opcode() -> String {
+        let mut m = Amd64Machine::new();
+        m.start_lowering_function(BasicBlockId(0));
+        m.start_block(BasicBlockId(0));
+
+        let mut compiler = Box::new(TestCompilerContext::default());
+        compiler.regs = vec![
+            VReg::from_real_reg(1, RegType::Int),
+            VReg::from_real_reg(7, RegType::Int),
+        ];
+        let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
+        m.set_compiler(ptr);
+
+        let mut instruction = crate::ssa::Instruction::new().with_opcode(Opcode::UExtend);
+        instruction.v = Value(0).with_type(Type::I32);
+        instruction.r_value = Value(1).with_type(Type::I64);
+        instruction.typ = Type::I64;
+
+        m.lower_instr(&instruction);
+        m.format()
+    }
+
     fn lower_partial_load_opcode(opcode: Opcode, typ: Type) -> String {
         let mut m = Amd64Machine::new();
         m.start_lowering_function(BasicBlockId(0));
@@ -1154,6 +1188,12 @@ mod tests {
         assert!(formatted.contains("testl %eax, %eax"));
         assert!(formatted.contains("movq %rcx, %rsi"));
         assert!(formatted.contains("cmovnzq %rbx, %rsi"));
+    }
+
+    #[test]
+    fn lowers_uextend_i32_to_i64_to_amd64_movzx_lq() {
+        let formatted = lower_uextend_opcode();
+        assert!(formatted.contains("movzx.lq %rax, %rsi"));
     }
 
     #[test]
