@@ -309,6 +309,26 @@ impl Amd64Machine {
         }
     }
 
+    fn lower_fconst(&mut self, dst: VReg, ty: Type, value_bits: u64) {
+        let (tmp_ty, move_op, is_64) = match ty {
+            Type::F32 => (Type::I32, SseOpcode::Movd, false),
+            Type::F64 => (Type::I64, SseOpcode::Movq, true),
+            _ => panic!("unsupported amd64 float constant type: {:?}", ty),
+        };
+        let tmp = self.compiler_mut().allocate_vreg(tmp_ty);
+        self.current_block_mut()
+            .instructions
+            .push(Amd64Instr::imm(tmp, value_bits, is_64));
+        self.current_block_mut()
+            .instructions
+            .push(Amd64Instr::gpr_to_xmm(
+                move_op,
+                Operand::reg(tmp),
+                dst,
+                is_64,
+            ));
+    }
+
     fn lower_idivrem(&mut self, instruction: &Instruction, is_div: bool, is_signed: bool) {
         let dst = self.compiler().v_reg_of(instruction.return_());
         let lhs = self.compiler().v_reg_of(instruction.v);
@@ -617,13 +637,17 @@ impl BackendMachine for Amd64Machine {
 
     fn lower_instr(&mut self, instruction: &Instruction) {
         match instruction.opcode {
-            Opcode::Iconst | Opcode::F32const | Opcode::F64const => {
+            Opcode::Iconst => {
                 let dst = self.compiler().v_reg_of(instruction.return_());
                 self.current_block_mut().instructions.extend(lower_constant(
                     dst,
                     instruction.typ,
                     instruction.u1,
                 ));
+            }
+            Opcode::F32const | Opcode::F64const => {
+                let dst = self.compiler().v_reg_of(instruction.return_());
+                self.lower_fconst(dst, instruction.typ, instruction.u1);
             }
             Opcode::Iadd
             | Opcode::Isub
@@ -1312,6 +1336,67 @@ impl BackendMachine for Amd64Machine {
                         dst,
                     ));
             }
+            Opcode::Fabs | Opcode::Fneg => {
+                let dst = self.compiler().v_reg_of(instruction.return_());
+                let src = self.compiler().v_reg_of(instruction.v);
+                let (mask, op) = match (instruction.typ, instruction.opcode) {
+                    (Type::F32, Opcode::Fabs) => (0x7fff_ffff, SseOpcode::Andps),
+                    (Type::F32, Opcode::Fneg) => (0x8000_0000, SseOpcode::Xorps),
+                    (Type::F64, Opcode::Fabs) => (0x7fff_ffff_ffff_ffff, SseOpcode::Andpd),
+                    (Type::F64, Opcode::Fneg) => (0x8000_0000_0000_0000, SseOpcode::Xorpd),
+                    _ => panic!(
+                        "unsupported amd64 float unary bit-op: {:?} {:?}",
+                        instruction.opcode, instruction.typ
+                    ),
+                };
+                let tmp = self.compiler_mut().allocate_vreg(instruction.typ);
+                self.lower_fconst(tmp, instruction.typ, mask);
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::xmm_unary_rm_r(op, Operand::reg(src), tmp));
+                self.insert_move(dst, tmp, instruction.typ);
+            }
+            Opcode::Fcopysign => {
+                let dst = self.compiler().v_reg_of(instruction.return_());
+                let lhs = self.compiler().v_reg_of(instruction.v);
+                let rhs = self.compiler().v_reg_of(instruction.v2);
+                let (sign_mask, non_sign_mask, and_op, or_op) = match instruction.typ {
+                    Type::F32 => (0x8000_0000, 0x7fff_ffff, SseOpcode::Andps, SseOpcode::Orps),
+                    Type::F64 => (
+                        0x8000_0000_0000_0000,
+                        0x7fff_ffff_ffff_ffff,
+                        SseOpcode::Andpd,
+                        SseOpcode::Orpd,
+                    ),
+                    _ => panic!("unsupported amd64 fcopysign type: {:?}", instruction.typ),
+                };
+                let sign_bits = self.compiler_mut().allocate_vreg(instruction.typ);
+                let non_sign_bits = self.compiler_mut().allocate_vreg(instruction.typ);
+                self.lower_fconst(sign_bits, instruction.typ, sign_mask);
+                self.lower_fconst(non_sign_bits, instruction.typ, non_sign_mask);
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::xmm_unary_rm_r(
+                        and_op,
+                        Operand::reg(rhs),
+                        sign_bits,
+                    ));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::xmm_unary_rm_r(
+                        and_op,
+                        Operand::reg(lhs),
+                        non_sign_bits,
+                    ));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::xmm_unary_rm_r(
+                        or_op,
+                        Operand::reg(sign_bits),
+                        non_sign_bits,
+                    ));
+                self.insert_move(dst, non_sign_bits, instruction.typ);
+            }
             Opcode::Fmin | Opcode::Fmax => {
                 let dst = self.compiler().v_reg_of(instruction.return_());
                 let lhs = self.compiler().v_reg_of(instruction.v);
@@ -1712,9 +1797,13 @@ impl BackendMachine for Amd64Machine {
     }
 
     fn insert_load_constant_block_arg(&mut self, instr: &Instruction, dst: VReg) {
-        self.current_block_mut()
-            .instructions
-            .extend(lower_constant(dst, instr.typ, instr.u1));
+        match instr.opcode {
+            Opcode::F32const | Opcode::F64const => self.lower_fconst(dst, instr.typ, instr.u1),
+            _ => self
+                .current_block_mut()
+                .instructions
+                .extend(lower_constant(dst, instr.typ, instr.u1)),
+        }
     }
 
     fn format(&self) -> String {
@@ -2276,6 +2365,78 @@ mod tests {
         m.format()
     }
 
+    fn lower_float_unary_opcode(opcode: Opcode, ty: Type) -> String {
+        let mut m = Amd64Machine::new();
+        m.start_lowering_function(BasicBlockId(0));
+        m.start_block(BasicBlockId(0));
+
+        let mut compiler = Box::new(TestCompilerContext::default());
+        compiler.regs = vec![
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::XMM0, RegType::Float),
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::XMM2, RegType::Float),
+        ];
+        let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
+        m.set_compiler(ptr);
+
+        let mut instruction = crate::ssa::Instruction::new().with_opcode(opcode);
+        instruction.v = Value(0).with_type(ty);
+        instruction.r_value = Value(1).with_type(ty);
+        instruction.typ = ty;
+
+        m.lower_instr(&instruction);
+        m.format()
+    }
+
+    fn lower_fcopysign_opcode(ty: Type) -> String {
+        let mut m = Amd64Machine::new();
+        m.start_lowering_function(BasicBlockId(0));
+        m.start_block(BasicBlockId(0));
+
+        let mut compiler = Box::new(TestCompilerContext::default());
+        compiler.regs = vec![
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::XMM0, RegType::Float),
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::XMM1, RegType::Float),
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::XMM2, RegType::Float),
+        ];
+        let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
+        m.set_compiler(ptr);
+
+        let mut instruction = crate::ssa::Instruction::new().with_opcode(Opcode::Fcopysign);
+        instruction.v = Value(0).with_type(ty);
+        instruction.v2 = Value(1).with_type(ty);
+        instruction.r_value = Value(2).with_type(ty);
+        instruction.typ = ty;
+
+        m.lower_instr(&instruction);
+        m.format()
+    }
+
+    fn lower_float_const_opcode(ty: Type, bits: u64) -> String {
+        let mut m = Amd64Machine::new();
+        m.start_lowering_function(BasicBlockId(0));
+        m.start_block(BasicBlockId(0));
+
+        let mut compiler = Box::new(TestCompilerContext::default());
+        compiler.regs = vec![VReg::from_real_reg(
+            crate::backend::isa::amd64::reg::XMM2,
+            RegType::Float,
+        )];
+        let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
+        m.set_compiler(ptr);
+
+        let mut instruction = crate::ssa::Instruction::new().with_opcode(match ty {
+            Type::F32 => Opcode::F32const,
+            Type::F64 => Opcode::F64const,
+            _ => panic!("unsupported float constant test type: {:?}", ty),
+        });
+        instruction.r_value = Value(0).with_type(ty);
+        instruction.typ = ty;
+        instruction.u1 = bits;
+
+        m.lower_instr(&instruction);
+        m.format()
+    }
+
     fn lower_float_convert_opcode(opcode: Opcode, src_ty: Type, dst_ty: Type) -> String {
         let mut m = Amd64Machine::new();
         m.start_lowering_function(BasicBlockId(0));
@@ -2717,9 +2878,63 @@ mod tests {
     }
 
     #[test]
+    fn lowers_f32_abs_with_mask_andps_sequence() {
+        let formatted = lower_float_unary_opcode(Opcode::Fabs, Type::F32);
+        assert!(formatted.contains("movl $2147483647"));
+        assert!(formatted.contains("movd "));
+        assert!(formatted.contains("andps %xmm0"));
+        assert!(formatted.contains("movss "));
+    }
+
+    #[test]
+    fn lowers_f64_neg_with_mask_xorpd_sequence() {
+        let formatted = lower_float_unary_opcode(Opcode::Fneg, Type::F64);
+        assert!(formatted.contains("movabsq $-9223372036854775808"));
+        assert!(formatted.contains("movq "));
+        assert!(formatted.contains("xorpd %xmm0"));
+        assert!(formatted.contains("movsd "));
+    }
+
+    #[test]
+    fn lowers_f32_copysign_with_mask_merge_sequence() {
+        let formatted = lower_fcopysign_opcode(Type::F32);
+        assert!(formatted.contains("movl $-2147483648"));
+        assert!(formatted.contains("movl $2147483647"));
+        assert!(formatted.contains("andps %xmm1"));
+        assert!(formatted.contains("andps %xmm0"));
+        assert!(formatted.contains("orps "));
+        assert!(formatted.contains("movss "));
+    }
+
+    #[test]
+    fn lowers_f64_copysign_with_mask_merge_sequence() {
+        let formatted = lower_fcopysign_opcode(Type::F64);
+        assert!(formatted.contains("movabsq $-9223372036854775808"));
+        assert!(formatted.contains("movabsq $9223372036854775807"));
+        assert!(formatted.contains("andpd %xmm1"));
+        assert!(formatted.contains("andpd %xmm0"));
+        assert!(formatted.contains("orpd "));
+        assert!(formatted.contains("movsd "));
+    }
+
+    #[test]
     fn lowers_f64_sqrt_with_sse_sequence() {
         let formatted = lower_sqrt_opcode(Type::F64);
         assert!(formatted.contains("sqrtsd %xmm0, %xmm2"));
+    }
+
+    #[test]
+    fn lowers_f32_const_with_gpr_to_xmm_sequence() {
+        let formatted = lower_float_const_opcode(Type::F32, 0x3f80_0000);
+        assert!(formatted.contains("movl $1065353216"));
+        assert!(formatted.contains("movd "));
+    }
+
+    #[test]
+    fn lowers_f64_const_with_gpr_to_xmm_sequence() {
+        let formatted = lower_float_const_opcode(Type::F64, 0x3ff0_0000_0000_0000);
+        assert!(formatted.contains("movabsq $4607182418800017408"));
+        assert!(formatted.contains("movq "));
     }
 
     #[test]

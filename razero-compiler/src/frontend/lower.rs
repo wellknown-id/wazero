@@ -189,6 +189,11 @@ impl<'a> Compiler<'a> {
             OPCODE_F32_SUB | OPCODE_F64_SUB => self.lower_binary_generic(Opcode::Fsub),
             OPCODE_F32_MUL | OPCODE_F64_MUL => self.lower_binary_generic(Opcode::Fmul),
             OPCODE_F32_DIV | OPCODE_F64_DIV => self.lower_binary_generic(Opcode::Fdiv),
+            OPCODE_F32_ABS | OPCODE_F64_ABS => self.lower_unary_generic(Opcode::Fabs),
+            OPCODE_F32_NEG | OPCODE_F64_NEG => self.lower_unary_generic(Opcode::Fneg),
+            OPCODE_F32_COPYSIGN | OPCODE_F64_COPYSIGN => {
+                self.lower_binary_generic(Opcode::Fcopysign)
+            }
             OPCODE_F32_MIN | OPCODE_F64_MIN => self.lower_binary_generic(Opcode::Fmin),
             OPCODE_F32_MAX | OPCODE_F64_MAX => self.lower_binary_generic(Opcode::Fmax),
             OPCODE_F32_SQRT | OPCODE_F64_SQRT => self.lower_unary_generic(Opcode::Sqrt),
@@ -1831,6 +1836,82 @@ mod tests {
         assert_eq!(
             compiler.format(),
             "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i64)\n\tv3:i32 = Ireduce v2\n\tJump blk_ret, v3\n"
+        );
+    }
+
+    #[test]
+    fn lowers_f32_abs_to_ssa() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::F32], &[ValueType::F32])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_F32_ABS, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:f32)\n\tv3:f32 = Fabs v2\n\tJump blk_ret, v3\n"
+        );
+    }
+
+    #[test]
+    fn lowers_f64_neg_to_ssa() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::F64], &[ValueType::F64])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_F64_NEG, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:f64)\n\tv3:f64 = Fneg v2\n\tJump blk_ret, v3\n"
+        );
+    }
+
+    #[test]
+    fn lowers_f32_copysign_to_ssa() {
+        let module = Module {
+            type_section: vec![function_type(
+                &[ValueType::F32, ValueType::F32],
+                &[ValueType::F32],
+            )],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![
+                    OPCODE_LOCAL_GET,
+                    0,
+                    OPCODE_LOCAL_GET,
+                    1,
+                    OPCODE_F32_COPYSIGN,
+                    OPCODE_END,
+                ],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:f32, v3:f32)\n\tv4:f32 = Fcopysign v2, v3\n\tJump blk_ret, v4\n"
         );
     }
 

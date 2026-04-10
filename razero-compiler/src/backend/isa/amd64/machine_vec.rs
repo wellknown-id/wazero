@@ -27,6 +27,8 @@ pub enum SseOpcode {
     Andpd,
     Orps,
     Orpd,
+    Xorps,
+    Xorpd,
     Minps,
     Minpd,
     Maxps,
@@ -188,6 +190,18 @@ impl SseOpcode {
                 store_opcode: 0x0F56,
                 opcode_len: 2,
             },
+            Self::Xorps => SseEncoding {
+                prefix: None,
+                load_opcode: 0x0F57,
+                store_opcode: 0x0F57,
+                opcode_len: 2,
+            },
+            Self::Xorpd => SseEncoding {
+                prefix: Some(0x66),
+                load_opcode: 0x0F57,
+                store_opcode: 0x0F57,
+                opcode_len: 2,
+            },
             Self::Minps => SseEncoding {
                 prefix: None,
                 load_opcode: 0x0F5D,
@@ -276,15 +290,17 @@ impl SseOpcode {
             20 => Self::Andpd,
             21 => Self::Orps,
             22 => Self::Orpd,
-            23 => Self::Minps,
-            24 => Self::Minpd,
-            25 => Self::Maxps,
-            26 => Self::Maxpd,
-            27 => Self::Cvtss2sd,
-            28 => Self::Cvtsd2ss,
-            29 => Self::Cvtsi2ss,
-            30 => Self::Cvtsi2sd,
-            31 => Self::Cvttss2si,
+            23 => Self::Xorps,
+            24 => Self::Xorpd,
+            25 => Self::Minps,
+            26 => Self::Minpd,
+            27 => Self::Maxps,
+            28 => Self::Maxpd,
+            29 => Self::Cvtss2sd,
+            30 => Self::Cvtsd2ss,
+            31 => Self::Cvtsi2ss,
+            32 => Self::Cvtsi2sd,
+            33 => Self::Cvttss2si,
             _ => Self::Cvttsd2si,
         }
     }
@@ -320,6 +336,8 @@ impl fmt::Display for SseOpcode {
             Self::Andpd => "andpd",
             Self::Orps => "orps",
             Self::Orpd => "orpd",
+            Self::Xorps => "xorps",
+            Self::Xorpd => "xorpd",
             Self::Minps => "minps",
             Self::Minpd => "minpd",
             Self::Maxps => "maxps",
@@ -362,6 +380,8 @@ mod tests {
         assert_eq!(roundss.load_opcode, 0x0F3A0A);
         assert_eq!(minpd.prefix, Some(0x66));
         assert_eq!(minpd.load_opcode, 0x0F5D);
+        assert_eq!(SseOpcode::Xorps.encoding().load_opcode, 0x0F57);
+        assert_eq!(SseOpcode::Xorpd.encoding().prefix, Some(0x66));
         assert_eq!(cvtss2sd.load_opcode, 0x0F5A);
         assert_eq!(cvtsi2sd.load_opcode, 0x0F2A);
         assert_eq!(cvttsd2si.load_opcode, 0x0F2C);
@@ -372,6 +392,8 @@ mod tests {
         assert_eq!(SseOpcode::Ucomiss.to_string(), "ucomiss");
         assert_eq!(SseOpcode::Sqrtss.to_string(), "sqrtss");
         assert_eq!(SseOpcode::Roundsd.to_string(), "roundsd");
+        assert_eq!(SseOpcode::Xorps.to_string(), "xorps");
+        assert_eq!(SseOpcode::Xorpd.to_string(), "xorpd");
         assert_eq!(SseOpcode::Maxps.to_string(), "maxps");
         assert_eq!(SseOpcode::Cvtsd2ss.to_string(), "cvtsd2ss");
         assert_eq!(SseOpcode::Cvtsi2ss.to_string(), "cvtsi2ss");
