@@ -385,8 +385,18 @@ impl MemoryDefinition {
         self.maximum_pages
     }
 
+    pub fn module_name(&self) -> Option<&str> {
+        self.module_name.as_deref()
+    }
+
     pub fn export_names(&self) -> &[String] {
         &self.export_names
+    }
+
+    pub fn import(&self) -> Option<(&str, &str)> {
+        self.import
+            .as_ref()
+            .map(|(module, name)| (module.as_str(), name.as_str()))
     }
 }
 
@@ -1654,7 +1664,8 @@ mod tests {
     use super::{
         decode_externref, decode_f32, decode_f64, decode_i32, decode_u32, encode_externref,
         encode_f32, encode_f64, encode_i32, encode_i64, encode_u32, extern_type_name,
-        value_type_name, ExternType, FunctionDefinition, Global, GlobalValue, ValueType,
+        value_type_name, ExternType, FunctionDefinition, Global, GlobalValue, MemoryDefinition,
+        ValueType,
     };
     use std::{
         f32, f64,
@@ -1669,6 +1680,18 @@ mod tests {
         assert_eq!("sum", definition.name());
         assert_eq!(2, definition.param_types().len());
         assert_eq!(1, definition.result_types().len());
+    }
+
+    #[test]
+    fn memory_definition_tracks_module_and_import_metadata() {
+        let definition = MemoryDefinition::new(1, Some(2))
+            .with_module_name(Some("guest".to_string()))
+            .with_import("env", "memory")
+            .with_export_name("memory");
+
+        assert_eq!(Some("guest"), definition.module_name());
+        assert_eq!(Some(("env", "memory")), definition.import());
+        assert_eq!(&["memory".to_string()], definition.export_names());
     }
 
     #[test]
