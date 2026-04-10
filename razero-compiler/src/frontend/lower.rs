@@ -3140,6 +3140,82 @@ mod tests {
     }
 
     #[test]
+    fn lowers_i32_store8_without_local_memory_bounds_check_when_memory_isolation_enabled() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32, ValueType::I32], &[])],
+            function_section: vec![0],
+            memory_section: Some(wasm::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                is_shared: false,
+            }),
+            code_section: vec![Code {
+                body: vec![
+                    OPCODE_LOCAL_GET,
+                    0,
+                    OPCODE_LOCAL_GET,
+                    1,
+                    OPCODE_I32_STORE8,
+                    0,
+                    0,
+                    OPCODE_END,
+                ],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for_with_memory_isolation_enabled(&module, true);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32, v3:i32)\n\tv4:i64 = UExtend v2\n\tv5:i64 = Load module_ctx, 0x8\n\tv6:i64 = Iadd v5, v4\n\tIstore8 v3, v6, 0x0\n\tJump blk_ret\n"
+        );
+    }
+
+    #[test]
+    fn lowers_i32_store16_without_local_memory_bounds_check_when_memory_isolation_enabled() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32, ValueType::I32], &[])],
+            function_section: vec![0],
+            memory_section: Some(wasm::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                is_shared: false,
+            }),
+            code_section: vec![Code {
+                body: vec![
+                    OPCODE_LOCAL_GET,
+                    0,
+                    OPCODE_LOCAL_GET,
+                    1,
+                    OPCODE_I32_STORE16,
+                    1,
+                    0,
+                    OPCODE_END,
+                ],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for_with_memory_isolation_enabled(&module, true);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32, v3:i32)\n\tv4:i64 = UExtend v2\n\tv5:i64 = Load module_ctx, 0x8\n\tv6:i64 = Iadd v5, v4\n\tIstore16 v3, v6, 0x0\n\tJump blk_ret\n"
+        );
+    }
+
+    #[test]
     fn lowers_i32_store_with_local_memory_bounds_check() {
         let module = Module {
             type_section: vec![function_type(&[ValueType::I32, ValueType::I32], &[])],
