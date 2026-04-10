@@ -3602,6 +3602,7 @@ mod tests {
         for config in policy_runtime_configs() {
             let runtime = Runtime::with_config(config.with_host_call_policy(deny_env_host_calls));
             let called = Arc::new(AtomicU32::new(0));
+            let observations = Arc::new(Mutex::new(Vec::new()));
             runtime
                 .new_host_module_builder("env")
                 .new_function_builder()
@@ -3630,18 +3631,31 @@ mod tests {
                         0x01, 0x03, b'r', b'u', b'n', 0x00, 0x01, 0x0a, 0x08, 0x01, 0x06, 0x00,
                         0x41, 0x2a, 0x10, 0x00, 0x0b,
                     ],
-                    ModuleConfig::new(),
+                    ModuleConfig::new().with_name("guest"),
                 )
                 .unwrap();
+            let ctx = with_trap_observer(&Context::default(), {
+                let observations = observations.clone();
+                move |_ctx: &Context, observation: TrapObservation| {
+                    observations
+                        .lock()
+                        .expect("trap observations poisoned")
+                        .push((observation.cause, observation.err.to_string()));
+                }
+            });
 
             let err = guest
                 .exported_function("run")
                 .unwrap()
-                .call_with_context(&Context::default(), &[0])
+                .call_with_context(&ctx, &[0])
                 .unwrap_err();
             assert_eq!("policy denied: host call", err.to_string());
             assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
             assert_eq!(0, called.load(Ordering::SeqCst));
+            assert_eq!(
+                vec![(TrapCause::PolicyDenied, "policy denied: host call".to_string())],
+                *observations.lock().expect("trap observations poisoned")
+            );
         }
     }
 
@@ -3649,6 +3663,7 @@ mod tests {
     fn host_call_policy_denies_direct_host_function_calls() {
         let runtime = Runtime::new();
         let called = Arc::new(AtomicU32::new(0));
+        let observations = Arc::new(Mutex::new(Vec::new()));
         let module = runtime
             .new_host_module_builder("env")
             .new_function_builder()
@@ -3668,7 +3683,16 @@ mod tests {
             .instantiate(&Context::default())
             .unwrap();
 
-        let ctx = with_host_call_policy(&Context::default(), deny_hook_impl_host_call);
+        let policy_ctx = with_host_call_policy(&Context::default(), deny_hook_impl_host_call);
+        let ctx = with_trap_observer(&policy_ctx, {
+            let observations = observations.clone();
+            move |_ctx: &Context, observation: TrapObservation| {
+                observations
+                    .lock()
+                    .expect("trap observations poisoned")
+                    .push((observation.cause, observation.err.to_string()));
+            }
+        });
         let err = module
             .exported_function("hook")
             .unwrap()
@@ -3677,6 +3701,10 @@ mod tests {
         assert_eq!("policy denied: host call", err.to_string());
         assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
         assert_eq!(0, called.load(Ordering::SeqCst));
+        assert_eq!(
+            vec![(TrapCause::PolicyDenied, "policy denied: host call".to_string())],
+            *observations.lock().expect("trap observations poisoned")
+        );
     }
 
     #[test]
