@@ -109,7 +109,11 @@ impl CompiledModuleCache for InMemoryCompiledModuleCache {
     }
 }
 
-pub fn file_cache_key(module: &Module, memory_isolation_enabled: bool) -> ModuleId {
+pub fn file_cache_key(
+    module: &Module,
+    memory_isolation_enabled: bool,
+    fuel_enabled: bool,
+) -> ModuleId {
     let mut key = module.id;
     let arch = std::env::consts::ARCH.as_bytes();
     for (index, byte) in MAGIC.iter().chain(arch.iter()).copied().enumerate() {
@@ -117,6 +121,9 @@ pub fn file_cache_key(module: &Module, memory_isolation_enabled: bool) -> Module
     }
     if memory_isolation_enabled {
         key[0] ^= 0x80;
+    }
+    if fuel_enabled {
+        key[1] ^= 0x40;
     }
     key
 }
@@ -385,7 +392,7 @@ mod tests {
             id: [7; 32],
             ..Module::default()
         };
-        assert_ne!(file_cache_key(&module, false), module.id);
+        assert_ne!(file_cache_key(&module, false, false), module.id);
     }
 
     #[test]
@@ -395,8 +402,20 @@ mod tests {
             ..Module::default()
         };
         assert_ne!(
-            file_cache_key(&module, false),
-            file_cache_key(&module, true)
+            file_cache_key(&module, false, false),
+            file_cache_key(&module, true, false)
+        );
+    }
+
+    #[test]
+    fn cache_key_distinguishes_fuel_mode() {
+        let module = Module {
+            id: [7; 32],
+            ..Module::default()
+        };
+        assert_ne!(
+            file_cache_key(&module, false, false),
+            file_cache_key(&module, false, true)
         );
     }
 

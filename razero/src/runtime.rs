@@ -63,9 +63,11 @@ pub(crate) struct PublicEngine {
 pub(crate) type RuntimeStore = WasmStore<PublicEngine>;
 
 impl PublicEngine {
-    fn new(kind: RuntimeEngineKind, secure_mode: bool) -> Self {
+    fn new(kind: RuntimeEngineKind, secure_mode: bool, fuel: i64) -> Self {
         let inner: Box<dyn WasmEngine> = match kind {
-            RuntimeEngineKind::Compiler => Box::new(CompilerEngine::with_secure_mode(secure_mode)),
+            RuntimeEngineKind::Compiler => {
+                Box::new(CompilerEngine::with_secure_mode_and_fuel(secure_mode, fuel))
+            }
             RuntimeEngineKind::Interpreter => Box::new(razero_interp::engine::InterpEngine::new()),
             RuntimeEngineKind::Auto => unreachable!("runtime engine kind must be resolved"),
         };
@@ -345,6 +347,7 @@ impl Runtime {
         let mut store = WasmStore::new(PublicEngine::new(
             resolve_runtime_engine_kind(&config),
             config.secure_mode(),
+            config.fuel(),
         ));
         store.set_secure_memory(config.secure_mode());
         Self {

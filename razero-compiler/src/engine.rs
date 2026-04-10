@@ -691,6 +691,7 @@ pub struct CompilerEngine {
     shared_functions: Arc<SharedFunctions>,
     cache: Option<Arc<dyn CompiledModuleCache>>,
     secure_mode: bool,
+    fuel: i64,
 }
 
 impl Default for CompilerEngine {
@@ -701,20 +702,36 @@ impl Default for CompilerEngine {
 
 impl CompilerEngine {
     pub fn new() -> Self {
-        Self::with_cache_and_secure_mode(None, false)
+        Self::with_cache_secure_mode_and_fuel(None, false, 0)
     }
 
     pub fn with_secure_mode(secure_mode: bool) -> Self {
-        Self::with_cache_and_secure_mode(None, secure_mode)
+        Self::with_cache_secure_mode_and_fuel(None, secure_mode, 0)
+    }
+
+    pub fn with_fuel(fuel: i64) -> Self {
+        Self::with_cache_secure_mode_and_fuel(None, false, fuel)
+    }
+
+    pub fn with_secure_mode_and_fuel(secure_mode: bool, fuel: i64) -> Self {
+        Self::with_cache_secure_mode_and_fuel(None, secure_mode, fuel)
     }
 
     pub fn with_cache(cache: Option<Arc<dyn CompiledModuleCache>>) -> Self {
-        Self::with_cache_and_secure_mode(cache, false)
+        Self::with_cache_secure_mode_and_fuel(cache, false, 0)
     }
 
     pub fn with_cache_and_secure_mode(
         cache: Option<Arc<dyn CompiledModuleCache>>,
         secure_mode: bool,
+    ) -> Self {
+        Self::with_cache_secure_mode_and_fuel(cache, secure_mode, 0)
+    }
+
+    fn with_cache_secure_mode_and_fuel(
+        cache: Option<Arc<dyn CompiledModuleCache>>,
+        secure_mode: bool,
+        fuel: i64,
     ) -> Self {
         Self {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -723,6 +740,7 @@ impl CompilerEngine {
             shared_functions: Arc::new(compile_shared_functions()),
             cache,
             secure_mode,
+            fuel: fuel.max(0),
         }
     }
 
@@ -736,6 +754,9 @@ impl CompilerEngine {
         &self,
         module: &Module,
     ) -> Option<PrecompiledModuleArtifact> {
+        if self.fuel_enabled() {
+            return None;
+        }
         let compiled = self.compiled_module(module)?;
         Some(PrecompiledModuleArtifact {
             executable: compiled.executables.executable.as_slice().to_vec(),
@@ -800,14 +821,15 @@ impl CompilerEngine {
         let Some(cache) = &self.cache else {
             return Ok(None);
         };
-        let Some(bytes) = cache.get(&file_cache_key(module, self.memory_isolation_enabled()))
-        else {
+        let cache_key =
+            file_cache_key(module, self.memory_isolation_enabled(), self.fuel_enabled());
+        let Some(bytes) = cache.get(&cache_key) else {
             return Ok(None);
         };
         let Some(cached) = deserialize_compiled_module(&self.version, &bytes)
             .map_err(|err| EngineError::new(err.to_string()))?
         else {
-            cache.delete(&file_cache_key(module, self.memory_isolation_enabled()));
+            cache.delete(&cache_key);
             return Ok(None);
         };
         Ok(Some(Arc::new(
@@ -842,8 +864,8 @@ impl CompilerEngine {
             aot: cached.aot,
             shared_functions: self.shared_functions.clone(),
             ensure_termination: module.ensure_termination,
-            fuel_enabled: false,
-            fuel: 0,
+            fuel_enabled: self.fuel_enabled(),
+            fuel: self.fuel,
             memory_isolation_enabled,
             source_map: cached.source_map,
         })
@@ -886,10 +908,18 @@ impl CompilerEngine {
                 &compiled.aot,
             );
             cache.insert(
-                file_cache_key(module, compiled.memory_isolation_enabled),
+                file_cache_key(
+                    module,
+                    compiled.memory_isolation_enabled,
+                    compiled.fuel_enabled,
+                ),
                 bytes,
             );
         }
+    }
+
+    fn fuel_enabled(&self) -> bool {
+        self.fuel > 0
     }
 
     fn memory_isolation_enabled(&self) -> bool {
@@ -967,6 +997,7 @@ impl CompilerEngine {
         options: &CompileOptions,
     ) -> Result<Arc<CompiledModule>, EngineError> {
         let memory_isolation_enabled = self.memory_isolation_enabled();
+        let fuel_enabled = self.fuel_enabled();
         let executables = compile_entry_preambles(module)?;
         let mut function_offsets = Vec::with_capacity(module.code_section.len());
         let mut function_metadata = Vec::with_capacity(module.code_section.len());
@@ -974,8 +1005,12 @@ impl CompilerEngine {
         let mut relocations = Vec::<(usize, Vec<RelocationInfo>)>::new();
         let mut aot_relocations = Vec::new();
         let mut source_map = SourceMap::default();
-        let compiled_functions =
-            compile_functions(module, options.workers(), memory_isolation_enabled)?;
+        let compiled_functions = compile_functions(
+            module,
+            options.workers(),
+            fuel_enabled,
+            memory_isolation_enabled,
+        )?;
 
         for (local_index, compiled) in compiled_functions.into_iter().enumerate() {
             align16_vec(&mut executable);
@@ -1067,8 +1102,8 @@ impl CompilerEngine {
             ),
             shared_functions: self.shared_functions.clone(),
             ensure_termination: module.ensure_termination,
-            fuel_enabled: false,
-            fuel: 0,
+            fuel_enabled,
+            fuel: self.fuel,
             memory_isolation_enabled,
             source_map,
         };
@@ -1121,6 +1156,11 @@ impl WasmEngine for CompilerEngine {
     ) -> Result<(), EngineError> {
         if self.compiled_modules.contains_key(&module.id) {
             return Ok(());
+        }
+        if self.fuel_enabled() {
+            return Err(EngineError::new(
+                "fuel-enabled compiler runtimes do not yet support precompiled artifacts",
+            ));
         }
         let Some(artifact) = PrecompiledModuleArtifact::deserialize(artifact)
             .map_err(|err| EngineError::new(err.to_string()))?
@@ -1208,6 +1248,7 @@ struct CompiledFunction {
 fn compile_function(
     module: &Module,
     local_index: usize,
+    fuel_enabled: bool,
     memory_isolation_enabled: bool,
 ) -> Result<CompiledFunction, EngineError> {
     #[cfg(test)]
@@ -1222,7 +1263,7 @@ fn compile_function(
             module.ensure_termination,
             false,
             module.dwarf_lines.is_some(),
-            false,
+            fuel_enabled,
             memory_isolation_enabled,
         );
         frontend
@@ -1242,7 +1283,7 @@ fn compile_function(
 
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        let _ = (module, local_index, memory_isolation_enabled);
+        let _ = (module, local_index, fuel_enabled, memory_isolation_enabled);
         Err(EngineError::new("unsupported architecture"))
     }
 }
@@ -1250,18 +1291,20 @@ fn compile_function(
 fn compile_functions(
     module: &Module,
     workers: usize,
+    fuel_enabled: bool,
     memory_isolation_enabled: bool,
 ) -> Result<Vec<CompiledFunction>, EngineError> {
     let function_count = module.code_section.len();
     if workers <= 1 || function_count <= 1 {
         return (0..function_count)
             .map(|local_index| {
-                compile_function(module, local_index, memory_isolation_enabled).map_err(|err| {
-                    EngineError::new(format!(
-                        "compile function {local_index}/{}: {err}",
-                        function_count.saturating_sub(1)
-                    ))
-                })
+                compile_function(module, local_index, fuel_enabled, memory_isolation_enabled)
+                    .map_err(|err| {
+                        EngineError::new(format!(
+                            "compile function {local_index}/{}: {err}",
+                            function_count.saturating_sub(1)
+                        ))
+                    })
             })
             .collect();
     }
@@ -1286,7 +1329,8 @@ fn compile_functions(
                     return;
                 }
 
-                match compile_function(module, local_index, memory_isolation_enabled) {
+                match compile_function(module, local_index, fuel_enabled, memory_isolation_enabled)
+                {
                     Ok(compiled) => {
                         results.lock().expect("compile results poisoned")[local_index] =
                             Some(compiled);
@@ -2075,7 +2119,7 @@ mod tests {
             ..Module::default()
         };
 
-        let compiled = compile_function(&module, 0, false).unwrap();
+        let compiled = compile_function(&module, 0, false, false).unwrap();
         assert!(!compiled.code.is_empty());
         assert!(compiled.code.windows(5).any(|window| {
             window[0] == 0xE9 && i32::from_le_bytes(window[1..5].try_into().unwrap()) < 0
@@ -2107,5 +2151,30 @@ mod tests {
 
         assert!(!compiled.memory_isolation_enabled);
         assert!(secure_compiled.memory_isolation_enabled);
+    }
+
+    #[test]
+    fn compile_module_enables_fuel_only_when_runtime_has_positive_fuel() {
+        let mut engine = CompilerEngine::new();
+        let mut fuel_engine = CompilerEngine::with_fuel(7);
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x0b],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        engine.compile_module(&module).unwrap();
+        let compiled = engine.compiled_module(&module).unwrap();
+        fuel_engine.compile_module(&module).unwrap();
+        let fuel_compiled = fuel_engine.compiled_module(&module).unwrap();
+
+        assert!(!compiled.fuel_enabled);
+        assert_eq!(0, compiled.fuel);
+        assert!(fuel_compiled.fuel_enabled);
+        assert_eq!(7, fuel_compiled.fuel);
     }
 }

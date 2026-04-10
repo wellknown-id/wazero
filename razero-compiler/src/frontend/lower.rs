@@ -70,6 +70,7 @@ impl super::LoweringState {
 impl<'a> Compiler<'a> {
     pub(super) fn lower_body(&mut self, entry_block: BasicBlock) {
         self.ssa_builder.seal(entry_block);
+        self.insert_function_entry_checks();
         self.lowering_state.ctrl_push(ControlFrame {
             kind: ControlFrameKind::Function,
             original_stack_len_without_param: 0,
@@ -82,6 +83,10 @@ impl<'a> Compiler<'a> {
         while self.lowering_state.pc < self.wasm_function_body.len() {
             self.lower_current_opcode();
         }
+    }
+
+    fn insert_function_entry_checks(&mut self) {
+        self.insert_fuel_check();
     }
 
     fn lower_current_opcode(&mut self) {
@@ -1045,11 +1050,11 @@ impl<'a> Compiler<'a> {
     }
 
     fn insert_loop_header_checks(&mut self) {
-        self.insert_loop_fuel_check();
+        self.insert_fuel_check();
         self.insert_termination_check();
     }
 
-    fn insert_loop_fuel_check(&mut self) {
+    fn insert_fuel_check(&mut self) {
         if !self.fuel_enabled {
             return;
         }
@@ -1502,6 +1507,32 @@ mod tests {
         assert!(formatted.contains(&format!(", exec_ctx, {fuel_offset:#x}")));
         assert!(formatted.contains("ExitIfTrueWithCode"));
         assert!(formatted.contains("fuel_exhausted"));
+    }
+
+    #[test]
+    fn lowers_function_entry_fuel_check_when_fuel_is_enabled() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_I32_CONST, 7, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for_with_fuel_enabled(&module, true);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        let formatted = compiler.format();
+        let fuel_offset = EXECUTION_CONTEXT_OFFSET_FUEL.u32();
+        assert!(formatted.contains(&format!("Load exec_ctx, {fuel_offset:#x}")));
+        assert!(formatted.contains("Store v"));
+        assert!(formatted.contains(&format!(", exec_ctx, {fuel_offset:#x}")));
+        assert!(formatted.contains("ExitIfTrueWithCode"));
+        assert!(formatted.contains("fuel_exhausted"));
+        assert!(formatted.contains("Jump blk_ret"));
     }
 
     #[test]
