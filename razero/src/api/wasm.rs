@@ -456,6 +456,68 @@ impl GlobalDefinition {
     }
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TableDefinition {
+    ref_type: ValueType,
+    minimum: u32,
+    maximum: Option<u32>,
+    export_names: Vec<String>,
+    module_name: Option<String>,
+    import: Option<(String, String)>,
+}
+
+impl TableDefinition {
+    pub fn new(ref_type: ValueType, minimum: u32, maximum: Option<u32>) -> Self {
+        Self {
+            ref_type,
+            minimum,
+            maximum,
+            ..Self::default()
+        }
+    }
+
+    pub fn with_module_name(mut self, module_name: Option<String>) -> Self {
+        self.module_name = module_name;
+        self
+    }
+
+    pub fn with_export_name(mut self, export_name: impl Into<String>) -> Self {
+        self.export_names.push(export_name.into());
+        self
+    }
+
+    pub fn with_import(mut self, module: impl Into<String>, name: impl Into<String>) -> Self {
+        self.import = Some((module.into(), name.into()));
+        self
+    }
+
+    pub fn ref_type(&self) -> ValueType {
+        self.ref_type
+    }
+
+    pub fn minimum(&self) -> u32 {
+        self.minimum
+    }
+
+    pub fn maximum(&self) -> Option<u32> {
+        self.maximum
+    }
+
+    pub fn module_name(&self) -> Option<&str> {
+        self.module_name.as_deref()
+    }
+
+    pub fn export_names(&self) -> &[String] {
+        &self.export_names
+    }
+
+    pub fn import(&self) -> Option<(&str, &str)> {
+        self.import
+            .as_ref()
+            .map(|(module, name)| (module.as_str(), name.as_str()))
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CustomSection {
     name: String,
@@ -1316,6 +1378,28 @@ impl Module {
             .collect()
     }
 
+    pub fn imported_table_definitions(&self) -> Vec<TableDefinition> {
+        let Some(lower_module) = self.inner.lower_module.as_ref() else {
+            return Vec::new();
+        };
+        lower_module
+            .import_section
+            .iter()
+            .filter_map(|import| match &import.desc {
+                razero_wasm::module::ImportDesc::Table(table) => Some((import, table)),
+                _ => None,
+            })
+            .map(|(import, table)| {
+                TableDefinition::new(
+                    crate::runtime::convert_ref_type(table.ty),
+                    table.min,
+                    table.max,
+                )
+                .with_import(import.module.clone(), import.name.clone())
+            })
+            .collect()
+    }
+
     pub fn exported_global(&self, name: &str) -> Option<Global> {
         self.inner.globals.get(name).cloned()
     }
@@ -1374,6 +1458,69 @@ impl Module {
             .export_section
             .iter()
             .filter(|export| export.ty == razero_wasm::module::ExternType::GLOBAL)
+            .filter_map(|export| {
+                definitions_by_index
+                    .get(&export.index)
+                    .cloned()
+                    .map(|definition| (export.name.clone(), definition))
+            })
+            .collect()
+    }
+
+    pub fn exported_table_definitions(&self) -> BTreeMap<String, TableDefinition> {
+        let Some(lower_module) = self.inner.lower_module.as_ref() else {
+            return BTreeMap::new();
+        };
+
+        let mut definitions_by_index = BTreeMap::new();
+        let module_name = self.name().map(str::to_owned);
+        for export in lower_module
+            .export_section
+            .iter()
+            .filter(|export| export.ty == razero_wasm::module::ExternType::TABLE)
+        {
+            let definition = definitions_by_index.entry(export.index).or_insert_with(|| {
+                if export.index < lower_module.import_table_count {
+                    lower_module
+                        .import_section
+                        .iter()
+                        .filter_map(|import| match &import.desc {
+                            razero_wasm::module::ImportDesc::Table(table) => Some((import, table)),
+                            _ => None,
+                        })
+                        .nth(export.index as usize)
+                        .map(|(import, table)| {
+                            TableDefinition::new(
+                                crate::runtime::convert_ref_type(table.ty),
+                                table.min,
+                                table.max,
+                            )
+                            .with_import(import.module.clone(), import.name.clone())
+                        })
+                        .unwrap_or_default()
+                } else {
+                    let local_index = (export.index - lower_module.import_table_count) as usize;
+                    lower_module
+                        .table_section
+                        .get(local_index)
+                        .map(|table| {
+                            TableDefinition::new(
+                                crate::runtime::convert_ref_type(table.ty),
+                                table.min,
+                                table.max,
+                            )
+                            .with_module_name(module_name.clone())
+                        })
+                        .unwrap_or_default()
+                }
+            });
+            *definition = definition.clone().with_export_name(export.name.clone());
+        }
+
+        lower_module
+            .export_section
+            .iter()
+            .filter(|export| export.ty == razero_wasm::module::ExternType::TABLE)
             .filter_map(|export| {
                 definitions_by_index
                     .get(&export.index)
@@ -1860,7 +2007,7 @@ mod tests {
         decode_externref, decode_f32, decode_f64, decode_i32, decode_u32, encode_externref,
         encode_f32, encode_f64, encode_i32, encode_i64, encode_u32, extern_type_name,
         value_type_name, ExternType, FunctionDefinition, Global, GlobalDefinition, GlobalValue,
-        MemoryDefinition, ValueType,
+        MemoryDefinition, TableDefinition, ValueType,
     };
     use std::{
         f32, f64,
@@ -1913,6 +2060,21 @@ mod tests {
         assert_eq!(Some("guest"), definition.module_name());
         assert_eq!(Some(("env", "counter")), definition.import());
         assert_eq!(&["counter".to_string()], definition.export_names());
+    }
+
+    #[test]
+    fn table_definition_tracks_metadata() {
+        let definition = TableDefinition::new(ValueType::FuncRef, 1, Some(2))
+            .with_module_name(Some("guest".to_string()))
+            .with_import("env", "table")
+            .with_export_name("table");
+
+        assert_eq!(ValueType::FuncRef, definition.ref_type());
+        assert_eq!(1, definition.minimum());
+        assert_eq!(Some(2), definition.maximum());
+        assert_eq!(Some("guest"), definition.module_name());
+        assert_eq!(Some(("env", "table")), definition.import());
+        assert_eq!(&["table".to_string()], definition.export_names());
     }
 
     #[test]

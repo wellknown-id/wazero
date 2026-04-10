@@ -1863,6 +1863,14 @@ pub(crate) fn convert_value_type(value_type: WasmValueType) -> ValueType {
     }
 }
 
+pub(crate) fn convert_ref_type(ref_type: razero_wasm::module::RefType) -> ValueType {
+    match ref_type {
+        razero_wasm::module::RefType::FUNCREF => ValueType::FuncRef,
+        razero_wasm::module::RefType::EXTERNREF => ValueType::ExternRef,
+        _ => ValueType::FuncRef,
+    }
+}
+
 pub(crate) fn to_wasm_value_type(value_type: ValueType) -> WasmValueType {
     match value_type {
         ValueType::I32 => WasmValueType::I32,
@@ -4202,6 +4210,40 @@ mod tests {
     }
 
     #[test]
+    fn module_imported_table_definitions_expose_import_metadata() {
+        let runtime = Runtime::new();
+        runtime
+            .instantiate_binary(
+                &[
+                    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x04, 0x05, 0x01, 0x70, 0x01,
+                    0x01, 0x02, 0x07, 0x09, 0x01, 0x05, b't', b'a', b'b', b'l', b'e', 0x01, 0x00,
+                ],
+                ModuleConfig::new().with_name("env"),
+            )
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                &[
+                    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x02, 0x10, 0x01, 0x03, b'e',
+                    b'n', b'v', 0x05, b't', b'a', b'b', b'l', b'e', 0x01, 0x70, 0x01, 0x01, 0x02,
+                ],
+                ModuleConfig::new().with_name("guest"),
+            )
+            .unwrap();
+
+        let imported = guest.imported_table_definitions();
+        assert_eq!(1, imported.len());
+        let definition = &imported[0];
+        assert_eq!(ValueType::FuncRef, definition.ref_type());
+        assert_eq!(1, definition.minimum());
+        assert_eq!(Some(2), definition.maximum());
+        assert_eq!(None, definition.module_name());
+        assert_eq!(Some(("env", "table")), definition.import());
+        assert!(definition.export_names().is_empty());
+    }
+
+    #[test]
     fn module_exported_global_definitions_expose_export_metadata() {
         let runtime = Runtime::new();
         let guest = runtime
@@ -4228,6 +4270,36 @@ mod tests {
             counter.export_names()
         );
         assert_eq!(counter, alias);
+    }
+
+    #[test]
+    fn module_exported_table_definitions_expose_export_metadata() {
+        let runtime = Runtime::new();
+        let guest = runtime
+            .instantiate_binary(
+                &[
+                    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x04, 0x05, 0x01, 0x70, 0x01,
+                    0x01, 0x02, 0x07, 0x11, 0x02, 0x05, b't', b'a', b'b', b'l', b'e', 0x01, 0x00,
+                    0x05, b'a', b'l', b'i', b'a', b's', 0x01, 0x00,
+                ],
+                ModuleConfig::new().with_name("guest"),
+            )
+            .unwrap();
+
+        let exported = guest.exported_table_definitions();
+        assert_eq!(2, exported.len());
+        let table = exported.get("table").unwrap();
+        let alias = exported.get("alias").unwrap();
+        assert_eq!(ValueType::FuncRef, table.ref_type());
+        assert_eq!(1, table.minimum());
+        assert_eq!(Some(2), table.maximum());
+        assert_eq!(Some("guest"), table.module_name());
+        assert_eq!(None, table.import());
+        assert_eq!(
+            &["table".to_string(), "alias".to_string()],
+            table.export_names()
+        );
+        assert_eq!(table, alias);
     }
 
     #[test]
