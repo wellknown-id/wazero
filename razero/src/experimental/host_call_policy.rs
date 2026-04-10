@@ -9,6 +9,7 @@ use crate::{
 #[non_exhaustive]
 pub struct HostCallPolicyRequest {
     pub function: Option<FunctionDefinition>,
+    pub caller_module_name: Option<String>,
 }
 
 impl HostCallPolicyRequest {
@@ -19,6 +20,15 @@ impl HostCallPolicyRequest {
     pub fn with_function(mut self, function: FunctionDefinition) -> Self {
         self.function = Some(function);
         self
+    }
+
+    pub fn with_caller_module_name(mut self, caller_module_name: impl Into<String>) -> Self {
+        self.caller_module_name = Some(caller_module_name.into());
+        self
+    }
+
+    pub fn caller_module_name(&self) -> Option<&str> {
+        self.caller_module_name.as_deref()
     }
 
     pub fn param_types(&self) -> Option<&[ValueType]> {
@@ -114,9 +124,12 @@ mod tests {
         let function = FunctionDefinition::new("host.call")
             .with_module_name(Some("env".to_string()))
             .with_export_name("call");
-        let request = HostCallPolicyRequest::new().with_function(function.clone());
+        let request = HostCallPolicyRequest::new()
+            .with_function(function.clone())
+            .with_caller_module_name("guest");
 
         assert_eq!(Some(function), request.function);
+        assert_eq!(Some("guest"), request.caller_module_name());
     }
 
     #[test]
@@ -157,6 +170,7 @@ mod tests {
         assert_eq!(None, request.result_types());
         assert_eq!(None, request.param_names());
         assert_eq!(None, request.result_names());
+        assert_eq!(None, request.caller_module_name());
         assert_eq!(0, request.param_count());
         assert_eq!(0, request.result_count());
         assert_eq!(None, request.import());

@@ -363,7 +363,10 @@ fn enforce_host_call_policy(
     module: &Module,
     definition: &FunctionDefinition,
 ) -> Result<()> {
-    let request = HostCallPolicyRequest::new().with_function(definition.clone());
+    let mut request = HostCallPolicyRequest::new().with_function(definition.clone());
+    if let Some(module_name) = module.name() {
+        request = request.with_caller_module_name(module_name);
+    }
     let policy = get_host_call_policy(ctx).or_else(|| module.host_call_policy());
     if policy
         .as_ref()
@@ -1930,6 +1933,10 @@ mod tests {
 
     fn deny_start_host_call(_ctx: &Context, request: &HostCallPolicyRequest) -> bool {
         request.function.as_ref().map(FunctionDefinition::name) != Some("start")
+    }
+
+    fn deny_untrusted_caller_module(_ctx: &Context, request: &HostCallPolicyRequest) -> bool {
+        request.caller_module_name() != Some("untrusted")
     }
 
     fn deny_high_arity_host_calls(_ctx: &Context, request: &HostCallPolicyRequest) -> bool {
@@ -4208,6 +4215,75 @@ mod tests {
                 .lock()
                 .expect("import observer events poisoned")
         );
+    }
+
+    #[test]
+    fn host_call_policy_can_filter_guest_callbacks_by_caller_module_name() {
+        for config in policy_runtime_configs() {
+            let runtime =
+                Runtime::with_config(config.with_host_call_policy(deny_untrusted_caller_module));
+            let called = Arc::new(AtomicU32::new(0));
+            runtime
+                .new_host_module_builder("env")
+                .new_function_builder()
+                .with_func(
+                    {
+                        let called = called.clone();
+                        move |_ctx, _module, _params| {
+                            called.fetch_add(1, Ordering::SeqCst);
+                            Ok(vec![7])
+                        }
+                    },
+                    &[ValueType::I32],
+                    &[ValueType::I32],
+                )
+                .with_name("hook_impl")
+                .export("hook")
+                .instantiate(&Context::default())
+                .unwrap();
+
+            let compiled_guest = runtime
+                .compile(&[
+                    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01,
+                    0x7f, 0x01, 0x7f, 0x02, 0x0c, 0x01, 0x03, b'e', b'n', b'v', 0x04, b'h', b'o',
+                    b'o', b'k', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r',
+                    b'u', b'n', 0x00, 0x01, 0x0a, 0x08, 0x01, 0x06, 0x00, 0x41, 0x2a, 0x10, 0x00,
+                    0x0b,
+                ])
+                .unwrap();
+            let trusted = runtime
+                .instantiate_with_context(
+                    &Context::default(),
+                    &compiled_guest,
+                    ModuleConfig::new().with_name("trusted"),
+                )
+                .unwrap();
+            let untrusted = runtime
+                .instantiate_with_context(
+                    &Context::default(),
+                    &compiled_guest,
+                    ModuleConfig::new().with_name("untrusted"),
+                )
+                .unwrap();
+
+            assert_eq!(
+                vec![7],
+                trusted
+                    .exported_function("run")
+                    .unwrap()
+                    .call(&[0])
+                    .unwrap()
+            );
+
+            let err = untrusted
+                .exported_function("run")
+                .unwrap()
+                .call(&[0])
+                .unwrap_err();
+            assert_eq!("policy denied: host call", err.to_string());
+            assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+            assert_eq!(1, called.load(Ordering::SeqCst));
+        }
     }
 
     #[test]
