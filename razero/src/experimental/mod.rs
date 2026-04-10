@@ -5,6 +5,7 @@ pub mod experimental;
 pub mod features;
 pub mod fuel;
 pub mod host_call_policy;
+pub mod host_call_policy_observer;
 pub mod import_resolver;
 pub mod import_resolver_observer;
 pub mod listener;
@@ -29,6 +30,10 @@ pub use fuel::{
 pub use host_call_policy::{
     get_host_call_policy, with_host_call_policy, HostCallPolicy, HostCallPolicyRequest,
     IntoHostCallPolicy,
+};
+pub use host_call_policy_observer::{
+    get_host_call_policy_observer, with_host_call_policy_observer, HostCallPolicyDecision,
+    HostCallPolicyObservation, HostCallPolicyObserver,
 };
 pub use import_resolver::{
     get_import_resolver, get_import_resolver_config, with_import_resolver,

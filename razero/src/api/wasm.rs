@@ -18,6 +18,7 @@ use crate::{
         close_notifier::CloseNotifier,
         fuel::FuelController,
         host_call_policy::HostCallPolicyRequest,
+        host_call_policy_observer::{notify_host_call_policy_observer, HostCallPolicyDecision},
         listener::{new_stack_iterator, FunctionListener, StackFrame},
         memory::LinearMemory,
         r#yield::{Resumer, YieldError, Yielder},
@@ -990,11 +991,23 @@ impl Function {
             .host_call_policy
             .clone()
             .or_else(|| module.host_call_policy());
-        if self.inner.is_host
-            && policy
+        let allowed = !self.inner.is_host
+            || !policy
                 .as_ref()
-                .is_some_and(|policy| !policy.allow_host_call(&invocation_ctx, &request))
-        {
+                .is_some_and(|policy| !policy.allow_host_call(&invocation_ctx, &request));
+        if self.inner.is_host {
+            notify_host_call_policy_observer(
+                &invocation_ctx,
+                &module,
+                &request,
+                if allowed {
+                    HostCallPolicyDecision::Allowed
+                } else {
+                    HostCallPolicyDecision::Denied
+                },
+            );
+        }
+        if !allowed {
             if let Some(stop) = &close_on_context_done {
                 stop.store(true, Ordering::SeqCst);
             }

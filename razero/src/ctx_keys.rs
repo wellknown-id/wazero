@@ -60,6 +60,8 @@ pub struct Context {
     pub(crate) import_resolver: Option<crate::experimental::import_resolver::ImportResolverConfig>,
     pub(crate) import_resolver_observer:
         Option<Arc<dyn crate::experimental::import_resolver_observer::ImportResolverObserver>>,
+    pub(crate) host_call_policy_observer:
+        Option<Arc<dyn crate::experimental::host_call_policy_observer::HostCallPolicyObserver>>,
     pub(crate) trap_observer: Option<Arc<dyn crate::experimental::trap::TrapObserver>>,
     pub(crate) yield_policy: Option<Arc<dyn YieldPolicy>>,
     pub(crate) invocation: Option<InvocationContext>,

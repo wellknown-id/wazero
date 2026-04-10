@@ -49,6 +49,7 @@ use crate::{
     experimental::{
         get_compilation_workers,
         host_call_policy::{get_host_call_policy, HostCallPolicyRequest},
+        host_call_policy_observer::{notify_host_call_policy_observer, HostCallPolicyDecision},
         listener::StackFrame,
         memory::{DefaultMemoryAllocator, MemoryAllocator},
         trap::{
@@ -371,10 +372,20 @@ fn enforce_host_call_policy(
         request = request.with_memory(memory.definition().clone());
     }
     let policy = get_host_call_policy(ctx).or_else(|| module.host_call_policy());
-    if policy
+    let allowed = !policy
         .as_ref()
-        .is_some_and(|policy| !policy.allow_host_call(ctx, &request))
-    {
+        .is_some_and(|policy| !policy.allow_host_call(ctx, &request));
+    notify_host_call_policy_observer(
+        ctx,
+        module,
+        &request,
+        if allowed {
+            HostCallPolicyDecision::Allowed
+        } else {
+            HostCallPolicyDecision::Denied
+        },
+    );
+    if !allowed {
         return Err(policy_denied_error("host call"));
     }
     Ok(())
@@ -1907,10 +1918,11 @@ mod tests {
         experimental::{
             add_fuel, get_snapshotter, get_yielder, remaining_fuel, trap_cause_of,
             with_close_notifier, with_compilation_workers, with_fuel_controller,
-            with_function_listener_factory, with_host_call_policy, with_snapshotter,
-            with_trap_observer, with_yield_policy, with_yielder, CloseNotifier, FuelController,
-            FunctionListener, FunctionListenerFactory, HostCallPolicyRequest, Snapshot,
-            StackIterator, TrapCause, TrapObservation, YieldPolicyRequest,
+            with_function_listener_factory, with_host_call_policy, with_host_call_policy_observer,
+            with_snapshotter, with_trap_observer, with_yield_policy, with_yielder, CloseNotifier,
+            FuelController, FunctionListener, FunctionListenerFactory, HostCallPolicyDecision,
+            HostCallPolicyObservation, HostCallPolicyRequest, Snapshot, StackIterator, TrapCause,
+            TrapObservation, YieldPolicyRequest,
         },
         CompiledModule, RuntimeConfig,
     };
@@ -4354,6 +4366,82 @@ mod tests {
     }
 
     #[test]
+    fn host_call_policy_observer_fires_before_direct_host_call_denial_trap() {
+        let runtime = Runtime::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let module = runtime
+            .new_host_module_builder("env")
+            .new_function_builder()
+            .with_func(
+                |_ctx, _module, params| Ok(vec![params[0]]),
+                &[ValueType::I32],
+                &[ValueType::I32],
+            )
+            .with_name("hook_impl")
+            .export("hook")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let policy_ctx = with_host_call_policy(&Context::default(), deny_hook_impl_host_call);
+        let observer_ctx = with_host_call_policy_observer(&policy_ctx, {
+            let events = events.clone();
+            move |_ctx: &Context, observation: HostCallPolicyObservation| {
+                events
+                    .lock()
+                    .expect("host-call observer events poisoned")
+                    .push((
+                        "policy".to_string(),
+                        observation.module.name().map(str::to_string),
+                        observation.request.name().map(str::to_string),
+                        observation.request.caller_module_name().map(str::to_string),
+                        observation.decision,
+                    ));
+            }
+        });
+        let ctx = with_trap_observer(&observer_ctx, {
+            let events = events.clone();
+            move |_ctx: &Context, observation: TrapObservation| {
+                events
+                    .lock()
+                    .expect("host-call observer events poisoned")
+                    .push((
+                        "trap".to_string(),
+                        observation.module.name().map(str::to_string),
+                        None,
+                        None,
+                        HostCallPolicyDecision::Denied,
+                    ));
+            }
+        });
+
+        let err = module
+            .exported_function("hook")
+            .unwrap()
+            .call_with_context(&ctx, &[1])
+            .unwrap_err();
+        assert_eq!("policy denied: host call", err.to_string());
+        assert_eq!(
+            vec![
+                (
+                    "policy".to_string(),
+                    Some("env".to_string()),
+                    Some("hook_impl".to_string()),
+                    Some("env".to_string()),
+                    HostCallPolicyDecision::Denied,
+                ),
+                (
+                    "trap".to_string(),
+                    Some("env".to_string()),
+                    None,
+                    None,
+                    HostCallPolicyDecision::Denied,
+                ),
+            ],
+            *events.lock().expect("host-call observer events poisoned")
+        );
+    }
+
+    #[test]
     fn host_call_policy_tracks_caller_module_name_on_direct_host_export() {
         let runtime = Runtime::new();
         let observed = Arc::new(Mutex::new(Vec::new()));
@@ -4403,6 +4491,79 @@ mod tests {
         assert_eq!("hook_impl", definition.name());
         assert_eq!(Some("example"), definition.module_name());
         assert_eq!(&["hook".to_string()], definition.export_names());
+    }
+
+    #[test]
+    fn host_call_policy_observer_records_allowed_guest_host_callbacks() {
+        let runtime = Runtime::new();
+        let called = Arc::new(AtomicU32::new(0));
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .new_host_module_builder("env")
+            .new_function_builder()
+            .with_func(
+                {
+                    let called = called.clone();
+                    move |_ctx, _module, _params| {
+                        called.fetch_add(1, Ordering::SeqCst);
+                        Ok(vec![7])
+                    }
+                },
+                &[ValueType::I32],
+                &[ValueType::I32],
+            )
+            .with_name("hook_impl")
+            .export("hook")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                &[
+                    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01,
+                    0x7f, 0x01, 0x7f, 0x02, 0x0c, 0x01, 0x03, b'e', b'n', b'v', 0x04, b'h', b'o',
+                    b'o', b'k', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r',
+                    b'u', b'n', 0x00, 0x01, 0x0a, 0x08, 0x01, 0x06, 0x00, 0x41, 0x2a, 0x10, 0x00,
+                    0x0b,
+                ],
+                ModuleConfig::new().with_name("guest"),
+            )
+            .unwrap();
+
+        let policy_ctx = with_host_call_policy(&Context::default(), allow_all_host_calls);
+        let ctx = with_host_call_policy_observer(&policy_ctx, {
+            let observations = observations.clone();
+            move |_ctx: &Context, observation: HostCallPolicyObservation| {
+                observations
+                    .lock()
+                    .expect("host-call observer observations poisoned")
+                    .push((
+                        observation.module.name().map(str::to_string),
+                        observation.request.name().map(str::to_string),
+                        observation.request.caller_module_name().map(str::to_string),
+                        observation.decision,
+                    ));
+            }
+        });
+
+        let results = guest
+            .exported_function("run")
+            .unwrap()
+            .call_with_context(&ctx, &[0])
+            .unwrap();
+        assert_eq!(vec![7], results);
+        assert_eq!(1, called.load(Ordering::SeqCst));
+        assert_eq!(
+            vec![(
+                Some("guest".to_string()),
+                Some("hook_impl".to_string()),
+                Some("guest".to_string()),
+                HostCallPolicyDecision::Allowed,
+            )],
+            *observations
+                .lock()
+                .expect("host-call observer observations poisoned")
+        );
     }
 
     #[test]

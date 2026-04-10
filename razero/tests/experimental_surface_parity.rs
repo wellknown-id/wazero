@@ -4,9 +4,10 @@ use std::sync::{
 };
 
 use razero::{
-    get_compilation_workers, get_host_call_policy, get_import_resolver, get_yield_policy,
-    with_compilation_workers, with_host_call_policy, with_import_resolver, with_yield_policy,
-    Context, ModuleConfig, Runtime, RuntimeConfig,
+    get_compilation_workers, get_host_call_policy, get_host_call_policy_observer,
+    get_import_resolver, get_yield_policy, with_compilation_workers, with_host_call_policy,
+    with_host_call_policy_observer, with_import_resolver, with_yield_policy, Context,
+    HostCallPolicyDecision, HostCallPolicyObservation, ModuleConfig, Runtime, RuntimeConfig,
 };
 
 const SIMPLE_EXPORT_WASM: &[u8] = &[
@@ -72,6 +73,34 @@ fn host_call_policy_round_trips_through_public_surface() {
         .with_host_call_policy(allow_host_calls)
         .host_call_policy()
         .is_some());
+}
+
+#[test]
+fn host_call_policy_observer_round_trips_through_public_surface() {
+    let observed = Arc::new(AtomicU32::new(0));
+    let ctx = with_host_call_policy_observer(&Context::default(), {
+        let observed = observed.clone();
+        move |_ctx: &Context, observation: HostCallPolicyObservation| {
+            assert_eq!(HostCallPolicyDecision::Allowed, observation.decision);
+            observed.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let observer = get_host_call_policy_observer(&ctx).expect("observer should be present");
+    let runtime = Runtime::new();
+    let compiled = runtime.compile(SIMPLE_EXPORT_WASM).unwrap();
+    let module = runtime
+        .instantiate(&compiled, ModuleConfig::new().with_name("guest"))
+        .unwrap();
+    observer.observe_host_call_policy(
+        &ctx,
+        HostCallPolicyObservation {
+            module,
+            request: razero::HostCallPolicyRequest::new(),
+            decision: HostCallPolicyDecision::Allowed,
+        },
+    );
+
+    assert_eq!(1, observed.load(Ordering::SeqCst));
 }
 
 #[test]
