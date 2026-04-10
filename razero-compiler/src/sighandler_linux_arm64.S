@@ -54,7 +54,7 @@ razero_jit_sig_handler:
     ldr x11, [x10, #200]
     cbz x11, .Lnot_jit
 
-    mov w16, #4
+    mov w16, #26
     str w16, [x11, #EXECCTX_EXITCODE_OFF]
 
     ldr x16, [x11, #EXECCTX_ORIGSP_OFF]

@@ -800,13 +800,14 @@ impl CompilerEngine {
         let Some(cache) = &self.cache else {
             return Ok(None);
         };
-        let Some(bytes) = cache.get(&file_cache_key(module)) else {
+        let Some(bytes) = cache.get(&file_cache_key(module, self.memory_isolation_enabled()))
+        else {
             return Ok(None);
         };
         let Some(cached) = deserialize_compiled_module(&self.version, &bytes)
             .map_err(|err| EngineError::new(err.to_string()))?
         else {
-            cache.delete(&file_cache_key(module));
+            cache.delete(&file_cache_key(module, self.memory_isolation_enabled()));
             return Ok(None);
         };
         Ok(Some(Arc::new(
@@ -819,6 +820,7 @@ impl CompilerEngine {
         module: &Module,
         cached: CachedCompiledModule,
     ) -> Result<CompiledModule, EngineError> {
+        let memory_isolation_enabled = self.memory_isolation_enabled();
         let mut executables = cached.executables;
         executables
             .executable
@@ -827,7 +829,6 @@ impl CompilerEngine {
         let (entry_preambles, entry_preamble_offsets) = compile_entry_preambles(module)?;
         executables.entry_preambles = entry_preambles;
         executables.entry_preamble_offsets = entry_preamble_offsets;
-        let memory_isolation_enabled = signal_handler::signal_handler_supported();
         if memory_isolation_enabled && !executables.executable.is_empty() {
             let start = executables.executable.as_ptr() as usize;
             let end = start + executables.executable.len();
@@ -884,8 +885,15 @@ impl CompilerEngine {
                 &compiled.source_map,
                 &compiled.aot,
             );
-            cache.insert(file_cache_key(module), bytes);
+            cache.insert(
+                file_cache_key(module, compiled.memory_isolation_enabled),
+                bytes,
+            );
         }
+    }
+
+    fn memory_isolation_enabled(&self) -> bool {
+        self.secure_mode && signal_handler::signal_handler_supported()
     }
 
     fn compile_module_impl(
@@ -958,6 +966,7 @@ impl CompilerEngine {
         module: &Module,
         options: &CompileOptions,
     ) -> Result<Arc<CompiledModule>, EngineError> {
+        let memory_isolation_enabled = self.memory_isolation_enabled();
         let executables = compile_entry_preambles(module)?;
         let mut function_offsets = Vec::with_capacity(module.code_section.len());
         let mut function_metadata = Vec::with_capacity(module.code_section.len());
@@ -965,7 +974,8 @@ impl CompilerEngine {
         let mut relocations = Vec::<(usize, Vec<RelocationInfo>)>::new();
         let mut aot_relocations = Vec::new();
         let mut source_map = SourceMap::default();
-        let compiled_functions = compile_functions(module, options.workers())?;
+        let compiled_functions =
+            compile_functions(module, options.workers(), memory_isolation_enabled)?;
 
         for (local_index, compiled) in compiled_functions.into_iter().enumerate() {
             align16_vec(&mut executable);
@@ -1053,13 +1063,13 @@ impl CompilerEngine {
                         },
                     )
                     .collect(),
-                signal_handler::signal_handler_supported(),
+                memory_isolation_enabled,
             ),
             shared_functions: self.shared_functions.clone(),
             ensure_termination: module.ensure_termination,
             fuel_enabled: false,
             fuel: 0,
-            memory_isolation_enabled: signal_handler::signal_handler_supported(),
+            memory_isolation_enabled,
             source_map,
         };
         if compiled.memory_isolation_enabled && !compiled.executables.executable.is_empty() {
@@ -1195,7 +1205,11 @@ struct CompiledFunction {
     source_offsets: Vec<SourceOffsetInfo>,
 }
 
-fn compile_function(module: &Module, local_index: usize) -> Result<CompiledFunction, EngineError> {
+fn compile_function(
+    module: &Module,
+    local_index: usize,
+    memory_isolation_enabled: bool,
+) -> Result<CompiledFunction, EngineError> {
     #[cfg(test)]
     note_compile_thread();
 
@@ -1209,7 +1223,7 @@ fn compile_function(module: &Module, local_index: usize) -> Result<CompiledFunct
             false,
             module.dwarf_lines.is_some(),
             false,
-            false,
+            memory_isolation_enabled,
         );
         frontend
             .init_with_module_function(module.import_function_count + local_index as u32, false);
@@ -1228,7 +1242,7 @@ fn compile_function(module: &Module, local_index: usize) -> Result<CompiledFunct
 
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        let _ = (module, local_index);
+        let _ = (module, local_index, memory_isolation_enabled);
         Err(EngineError::new("unsupported architecture"))
     }
 }
@@ -1236,12 +1250,13 @@ fn compile_function(module: &Module, local_index: usize) -> Result<CompiledFunct
 fn compile_functions(
     module: &Module,
     workers: usize,
+    memory_isolation_enabled: bool,
 ) -> Result<Vec<CompiledFunction>, EngineError> {
     let function_count = module.code_section.len();
     if workers <= 1 || function_count <= 1 {
         return (0..function_count)
             .map(|local_index| {
-                compile_function(module, local_index).map_err(|err| {
+                compile_function(module, local_index, memory_isolation_enabled).map_err(|err| {
                     EngineError::new(format!(
                         "compile function {local_index}/{}: {err}",
                         function_count.saturating_sub(1)
@@ -1271,7 +1286,7 @@ fn compile_functions(
                     return;
                 }
 
-                match compile_function(module, local_index) {
+                match compile_function(module, local_index, memory_isolation_enabled) {
                     Ok(compiled) => {
                         results.lock().expect("compile results poisoned")[local_index] =
                             Some(compiled);
@@ -2060,7 +2075,7 @@ mod tests {
             ..Module::default()
         };
 
-        let compiled = compile_function(&module, 0).unwrap();
+        let compiled = compile_function(&module, 0, false).unwrap();
         assert!(!compiled.code.is_empty());
         assert!(compiled.code.windows(5).any(|window| {
             window[0] == 0xE9 && i32::from_le_bytes(window[1..5].try_into().unwrap()) < 0
@@ -2072,8 +2087,9 @@ mod tests {
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     #[test]
-    fn compile_module_enables_memory_isolation_on_supported_linux_targets() {
+    fn compile_module_enables_memory_isolation_only_in_secure_mode_on_supported_linux_targets() {
         let mut engine = CompilerEngine::new();
+        let mut secure_engine = CompilerEngine::with_secure_mode(true);
         let module = Module {
             type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
             function_section: vec![0],
@@ -2086,7 +2102,10 @@ mod tests {
 
         engine.compile_module(&module).unwrap();
         let compiled = engine.compiled_module(&module).unwrap();
+        secure_engine.compile_module(&module).unwrap();
+        let secure_compiled = secure_engine.compiled_module(&module).unwrap();
 
-        assert!(compiled.memory_isolation_enabled);
+        assert!(!compiled.memory_isolation_enabled);
+        assert!(secure_compiled.memory_isolation_enabled);
     }
 }

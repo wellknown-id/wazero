@@ -109,11 +109,14 @@ impl CompiledModuleCache for InMemoryCompiledModuleCache {
     }
 }
 
-pub fn file_cache_key(module: &Module) -> ModuleId {
+pub fn file_cache_key(module: &Module, memory_isolation_enabled: bool) -> ModuleId {
     let mut key = module.id;
     let arch = std::env::consts::ARCH.as_bytes();
     for (index, byte) in MAGIC.iter().chain(arch.iter()).copied().enumerate() {
         key[index % key.len()] ^= byte;
+    }
+    if memory_isolation_enabled {
+        key[0] ^= 0x80;
     }
     key
 }
@@ -382,7 +385,19 @@ mod tests {
             id: [7; 32],
             ..Module::default()
         };
-        assert_ne!(file_cache_key(&module), module.id);
+        assert_ne!(file_cache_key(&module, false), module.id);
+    }
+
+    #[test]
+    fn cache_key_distinguishes_memory_isolation_mode() {
+        let module = Module {
+            id: [7; 32],
+            ..Module::default()
+        };
+        assert_ne!(
+            file_cache_key(&module, false),
+            file_cache_key(&module, true)
+        );
     }
 
     #[test]

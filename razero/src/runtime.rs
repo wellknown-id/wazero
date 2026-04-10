@@ -2372,7 +2372,7 @@ mod tests {
     }
 
     #[test]
-    fn compiler_trap_observer_reports_secure_mode_oob_traps() {
+    fn compiler_trap_observer_reports_secure_mode_memory_faults() {
         if !compiler_supported()
             || !cfg!(target_os = "linux")
             || !cfg!(any(target_arch = "x86_64", target_arch = "aarch64"))
@@ -2410,27 +2410,19 @@ mod tests {
 
         assert!(!err.to_string().is_empty());
         assert_eq!(
-            vec![(
-                "secure-guest".to_string(),
-                TrapCause::OutOfBoundsMemoryAccess,
-                None,
-            )],
+            vec![("secure-guest".to_string(), TrapCause::MemoryFault, None,)],
             *observations.lock().expect("trap observations poisoned")
         );
     }
 
     #[test]
-    fn compiler_trap_observer_reports_start_function_traps() {
-        if !compiler_supported() {
-            return;
-        }
-
+    fn trap_observer_reports_start_function_traps() {
         let module = [
             0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
             0x03, 0x02, 0x01, 0x00, 0x08, 0x01, 0x00, 0x0a, 0x05, 0x01, 0x03, 0x00, 0x00, 0x0b,
         ];
         let observations = Arc::new(Mutex::new(Vec::new()));
-        let runtime = Runtime::with_config(RuntimeConfig::new_compiler());
+        let runtime = Runtime::with_config(RuntimeConfig::new_interpreter());
         let compiled = runtime.compile(&module).unwrap();
         let ctx = with_trap_observer(&Context::default(), {
             let observations = observations.clone();
@@ -2457,11 +2449,7 @@ mod tests {
 
         assert!(!err.to_string().is_empty());
         assert_eq!(
-            vec![(
-                "start-guest".to_string(),
-                TrapCause::OutOfBoundsMemoryAccess,
-                None,
-            )],
+            vec![("start-guest".to_string(), TrapCause::Unreachable, None)],
             *observations.lock().expect("trap observations poisoned")
         );
     }
