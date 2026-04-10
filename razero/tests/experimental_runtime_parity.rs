@@ -46,6 +46,11 @@ const INDIRECT_CALL_TYPE_MISMATCH_WASM: &[u8] = &[
     0x03, b'r', b'u', b'n', 0x00, 0x01, 0x09, 0x07, 0x01, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x00, 0x0a,
     0x0c, 0x02, 0x02, 0x00, 0x0b, 0x07, 0x00, 0x41, 0x00, 0x11, 0x00, 0x00, 0x0b,
 ];
+const UNREACHABLE_WASM: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02,
+    0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x00, 0x0a, 0x05, 0x01, 0x03, 0x00,
+    0x00, 0x0b,
+];
 const GUEST_IMPORT_INC_WASM: &[u8] = &[
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f,
     0x02, 0x0b, 0x01, 0x03, b'e', b'n', b'v', 0x03, b'i', b'n', b'c', 0x00, 0x00, 0x03, 0x02, 0x01,
@@ -799,6 +804,31 @@ fn interpreter_indirect_call_type_mismatch_trap_notifies_observer() {
             TrapCause::IndirectCallTypeMismatch,
             "indirect call type mismatch".to_string()
         )],
+        *observations.lock().expect("trap observations poisoned")
+    );
+}
+
+#[test]
+fn interpreter_unreachable_trap_notifies_observer() {
+    let runtime = Runtime::with_config(RuntimeConfig::new_interpreter());
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let guest = runtime
+        .instantiate_binary(UNREACHABLE_WASM, ModuleConfig::new())
+        .unwrap();
+    let ctx = with_trap_observer(
+        &Context::default(),
+        record_trap_observations(observations.clone()),
+    );
+
+    let err = guest
+        .exported_function("run")
+        .unwrap()
+        .call_with_context(&ctx, &[])
+        .unwrap_err();
+
+    assert_eq!(Some(TrapCause::Unreachable), trap_cause_of(&err));
+    assert_eq!(
+        vec![(TrapCause::Unreachable, "unreachable".to_string())],
         *observations.lock().expect("trap observations poisoned")
     );
 }
