@@ -367,6 +367,9 @@ fn enforce_host_call_policy(
     if let Some(module_name) = module.name() {
         request = request.with_caller_module_name(module_name);
     }
+    if let Some(memory) = module.memory() {
+        request = request.with_memory(memory.definition().clone());
+    }
     let policy = get_host_call_policy(ctx).or_else(|| module.host_call_policy());
     if policy
         .as_ref()
@@ -4620,6 +4623,79 @@ mod tests {
     }
 
     #[test]
+    fn host_call_policy_tracks_memory_metadata_on_guest_callbacks() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("env")
+            .new_function_builder()
+            .with_func(|_ctx, _module, _params| Ok(Vec::new()), &[], &[])
+            .with_name("write_impl")
+            .export("write")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_with_context(
+                &Context::default(),
+                &runtime
+                    .compile(&[
+                        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60,
+                        0x00, 0x00, 0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b'w', b'r',
+                        b'i', b't', b'e', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01,
+                        0x00, 0x01, 0x07, 0x10, 0x02, 0x03, b'r', b'u', b'n', 0x00, 0x01, 0x06,
+                        b'm', b'e', b'm', b'o', b'r', b'y', 0x02, 0x00, 0x0a, 0x06, 0x01, 0x04,
+                        0x00, 0x10, 0x00, 0x0b,
+                    ])
+                    .unwrap(),
+                ModuleConfig::new().with_name("guest"),
+            )
+            .unwrap();
+
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let ctx = with_host_call_policy(&Context::default(), {
+            let observed = observed.clone();
+            move |_ctx: &Context, request: &HostCallPolicyRequest| {
+                observed
+                    .lock()
+                    .expect("observed host-call metadata poisoned")
+                    .push((
+                        request.caller_module_name().map(str::to_string),
+                        request.memory().map(|memory| {
+                            (
+                                memory.minimum_pages(),
+                                memory.maximum_pages(),
+                                memory.module_name().map(str::to_string),
+                                memory.export_names().to_vec(),
+                            )
+                        }),
+                        request
+                            .function
+                            .clone()
+                            .expect("host call policy should receive metadata"),
+                    ));
+                false
+            }
+        });
+        let err = guest
+            .exported_function("run")
+            .unwrap()
+            .call_with_context(&ctx, &[])
+            .unwrap_err();
+        assert_eq!("policy denied: host call", err.to_string());
+        assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+
+        let observed = observed
+            .lock()
+            .expect("observed host-call metadata poisoned");
+        assert_eq!(1, observed.len());
+        let (caller_module, memory, definition) = &observed[0];
+        assert_eq!(Some("guest".to_string()), *caller_module);
+        assert_eq!(Some((1, None, None, vec!["memory".to_string()],)), *memory);
+        assert_eq!("write_impl", definition.name());
+        assert_eq!(Some("env"), definition.module_name());
+    }
+
+    #[test]
     fn memory_supports_read_write_and_grow() {
         let runtime = Runtime::new();
         let bytes = [
@@ -5799,6 +5875,86 @@ mod tests {
         assert_eq!(None, *caller_module);
         assert_eq!("run", definition.name());
         assert_eq!(None, definition.module_name());
+    }
+
+    #[test]
+    fn yield_policy_tracks_memory_metadata_on_guest_callbacks() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("env")
+            .new_function_builder()
+            .with_callback(
+                |ctx, _module, _params| {
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(Vec::new())
+                },
+                &[],
+                &[],
+            )
+            .with_name("yield_impl")
+            .export("yield")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_with_context(
+                &Context::default(),
+                &runtime
+                    .compile(&[
+                        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60,
+                        0x00, 0x00, 0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b'y', b'i',
+                        b'e', b'l', b'd', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01,
+                        0x00, 0x01, 0x07, 0x10, 0x02, 0x03, b'r', b'u', b'n', 0x00, 0x01, 0x06,
+                        b'm', b'e', b'm', b'o', b'r', b'y', 0x02, 0x00, 0x0a, 0x06, 0x01, 0x04,
+                        0x00, 0x10, 0x00, 0x0b,
+                    ])
+                    .unwrap(),
+                ModuleConfig::new().with_name("guest"),
+            )
+            .unwrap();
+
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let ctx = with_yield_policy(&with_yielder(&Context::default()), {
+            let observed = observed.clone();
+            move |_ctx: &Context, request: &YieldPolicyRequest| {
+                observed
+                    .lock()
+                    .expect("observed yield metadata poisoned")
+                    .push((
+                        request.caller_module_name().map(str::to_string),
+                        request.memory().map(|memory| {
+                            (
+                                memory.minimum_pages(),
+                                memory.maximum_pages(),
+                                memory.module_name().map(str::to_string),
+                                memory.export_names().to_vec(),
+                            )
+                        }),
+                        request
+                            .function
+                            .clone()
+                            .expect("yield policy should receive metadata"),
+                    ));
+                false
+            }
+        });
+        let err = guest
+            .exported_function("run")
+            .unwrap()
+            .call_with_context(&ctx, &[])
+            .unwrap_err();
+        assert_eq!("policy denied: cooperative yield", err.to_string());
+        assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+
+        let observed = observed.lock().expect("observed yield metadata poisoned");
+        assert_eq!(1, observed.len());
+        let (caller_module, memory, definition) = &observed[0];
+        assert_eq!(Some("guest".to_string()), *caller_module);
+        assert_eq!(Some((1, None, None, vec!["memory".to_string()],)), *memory);
+        assert_eq!("run", definition.name());
+        assert_eq!(&["run".to_string()], definition.export_names());
     }
 
     #[test]

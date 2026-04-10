@@ -921,6 +921,9 @@ impl Function {
         if let Some(module_name) = module.name() {
             request = request.with_caller_module_name(module_name);
         }
+        if let Some(memory) = module.memory() {
+            request = request.with_memory(memory.definition().clone());
+        }
         let policy = ctx
             .host_call_policy
             .clone()
@@ -1505,6 +1508,9 @@ impl Yielder for ActiveYielder {
                 });
             if let Some(module_name) = module.name() {
                 request = request.with_caller_module_name(module_name);
+            }
+            if let Some(memory) = module.memory() {
+                request = request.with_memory(memory.definition().clone());
             }
             let policy = ctx.yield_policy.clone().or_else(|| module.yield_policy());
             if policy
