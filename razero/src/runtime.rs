@@ -1881,7 +1881,7 @@ mod tests {
             FunctionListener, FunctionListenerFactory, HostCallPolicyRequest, Snapshot,
             StackIterator, TrapCause, TrapObservation, YieldPolicyRequest,
         },
-        RuntimeConfig,
+        CompiledModule, RuntimeConfig,
     };
     use std::time::Duration;
 
@@ -2855,6 +2855,28 @@ mod tests {
         }
     }
 
+    fn compile_guest_with_start_import(runtime: &Runtime, import_module: &str) -> CompiledModule {
+        let mut module = vec![
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x02,
+        ];
+        let import_len = import_module.len();
+        assert!(
+            import_len < 0x80,
+            "test helper only supports short module names"
+        );
+        module.push((import_len + 10) as u8);
+        module.push(0x01);
+        module.push(import_len as u8);
+        module.extend_from_slice(import_module.as_bytes());
+        module.extend_from_slice(&[
+            0x05, b's', b't', b'a', b'r', b't', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07,
+            0x01, 0x03, b'r', b'u', b'n', 0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00,
+            0x0b,
+        ]);
+        runtime.compile(&module).unwrap()
+    }
+
     #[test]
     fn import_resolver_acl_allows_store_fallback_by_exact_name() {
         let runtime = Runtime::new();
@@ -2952,6 +2974,43 @@ mod tests {
     }
 
     #[test]
+    fn import_resolver_acl_allows_store_fallback_by_prefix() {
+        let runtime = Runtime::new();
+        let store_count = Arc::new(AtomicU32::new(0));
+        runtime
+            .new_host_module_builder("wasi_snapshot_preview1")
+            .new_function_builder()
+            .with_func(
+                {
+                    let store_count = store_count.clone();
+                    move |_ctx, _module, _params| {
+                        store_count.fetch_add(1, Ordering::SeqCst);
+                        Ok(Vec::new())
+                    }
+                },
+                &[],
+                &[],
+            )
+            .with_name("start")
+            .export("start")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let ctx = crate::experimental::with_import_resolver_acl(
+            &Context::default(),
+            crate::experimental::ImportACL::new().allow_module_prefixes(["wasi_"]),
+        );
+        let compiled_guest = compile_guest_with_start_import(&runtime, "wasi_snapshot_preview1");
+
+        let guest = runtime
+            .instantiate_with_context(&ctx, &compiled_guest, ModuleConfig::new())
+            .unwrap();
+        guest.exported_function("run").unwrap().call(&[]).unwrap();
+
+        assert_eq!(1, store_count.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn import_resolver_acl_denies_store_import_by_exact_name() {
         let runtime = Runtime::new();
         runtime
@@ -3028,6 +3087,60 @@ mod tests {
     }
 
     #[test]
+    fn import_resolver_acl_denies_store_import_by_prefix() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("private.env")
+            .new_function_builder()
+            .with_callback(|_ctx, _module, _params| Ok(Vec::new()), &[], &[])
+            .export("start")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let ctx = crate::experimental::with_import_resolver_acl(
+            &Context::default(),
+            crate::experimental::ImportACL::new().deny_module_prefixes(["private."]),
+        );
+        let compiled_guest = compile_guest_with_start_import(&runtime, "private.env");
+
+        let err = runtime
+            .instantiate_with_context(&ctx, &compiled_guest, ModuleConfig::new())
+            .err()
+            .expect("instantiation should fail");
+        assert!(err
+            .to_string()
+            .contains("module[private.env] denied by import ACL"));
+    }
+
+    #[test]
+    fn import_resolver_acl_deny_prefix_takes_precedence_over_allow_prefix() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("env.internal")
+            .new_function_builder()
+            .with_callback(|_ctx, _module, _params| Ok(Vec::new()), &[], &[])
+            .export("start")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let ctx = crate::experimental::with_import_resolver_acl(
+            &Context::default(),
+            crate::experimental::ImportACL::new()
+                .allow_module_prefixes(["env."])
+                .deny_module_prefixes(["env.internal"]),
+        );
+        let compiled_guest = compile_guest_with_start_import(&runtime, "env.internal");
+
+        let err = runtime
+            .instantiate_with_context(&ctx, &compiled_guest, ModuleConfig::new())
+            .err()
+            .expect("instantiation should fail");
+        assert!(err
+            .to_string()
+            .contains("module[env.internal] denied by import ACL"));
+    }
+
+    #[test]
     fn import_resolver_acl_allowlist_blocks_unlisted_import() {
         let runtime = Runtime::new();
         runtime
@@ -3058,6 +3171,51 @@ mod tests {
         assert!(err
             .to_string()
             .contains("module[env] not allowed by import ACL"));
+    }
+
+    #[test]
+    fn import_resolver_observer_reports_acl_allowed_then_store_fallback_by_prefix() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("wasi_snapshot_preview1")
+            .new_function_builder()
+            .with_callback(|_ctx, _module, _params| Ok(Vec::new()), &[], &[])
+            .export("start")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let ctx = crate::with_import_resolver_observer(
+            &crate::experimental::with_import_resolver_acl(
+                &Context::default(),
+                crate::experimental::ImportACL::new().allow_module_prefixes(["wasi_"]),
+            ),
+            RecordingImportResolverObserver {
+                events: events.clone(),
+            },
+        );
+        let compiled_guest = compile_guest_with_start_import(&runtime, "wasi_snapshot_preview1");
+
+        let guest = runtime
+            .instantiate_with_context(&ctx, &compiled_guest, ModuleConfig::new())
+            .unwrap();
+        guest.exported_function("run").unwrap().call(&[]).unwrap();
+
+        assert_eq!(
+            vec![
+                ImportObserverRecord {
+                    import_module: "wasi_snapshot_preview1".to_string(),
+                    event: crate::ImportResolverEvent::AclAllowed,
+                    resolved: false,
+                },
+                ImportObserverRecord {
+                    import_module: "wasi_snapshot_preview1".to_string(),
+                    event: crate::ImportResolverEvent::StoreFallback,
+                    resolved: false,
+                },
+            ],
+            *events.lock().expect("import observer events poisoned")
+        );
     }
 
     #[test]
@@ -3653,7 +3811,10 @@ mod tests {
             assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
             assert_eq!(0, called.load(Ordering::SeqCst));
             assert_eq!(
-                vec![(TrapCause::PolicyDenied, "policy denied: host call".to_string())],
+                vec![(
+                    TrapCause::PolicyDenied,
+                    "policy denied: host call".to_string()
+                )],
                 *observations.lock().expect("trap observations poisoned")
             );
         }
@@ -3702,7 +3863,10 @@ mod tests {
         assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
         assert_eq!(0, called.load(Ordering::SeqCst));
         assert_eq!(
-            vec![(TrapCause::PolicyDenied, "policy denied: host call".to_string())],
+            vec![(
+                TrapCause::PolicyDenied,
+                "policy denied: host call".to_string()
+            )],
             *observations.lock().expect("trap observations poisoned")
         );
     }

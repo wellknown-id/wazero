@@ -116,7 +116,10 @@ impl ImportACL {
         prefixes: &[String],
         module_name: &str,
     ) -> bool {
-        exact.contains(module_name) || prefixes.iter().any(|prefix| module_name.starts_with(prefix))
+        exact.contains(module_name)
+            || prefixes
+                .iter()
+                .any(|prefix| module_name.starts_with(prefix))
     }
 }
 
@@ -257,9 +260,52 @@ mod tests {
 
         let cfg = get_import_resolver_config(&ctx).expect("config should be present");
         assert!(cfg.resolver.is_some());
-        assert_eq!(
-            Some(ImportACL::new().allow_modules(["env"])),
-            cfg.acl,
-        );
+        assert_eq!(Some(ImportACL::new().allow_modules(["env"])), cfg.acl,);
+    }
+
+    #[test]
+    fn import_acl_allow_prefixes_match_module_names() {
+        let acl = ImportACL::new().allow_module_prefixes(["wasi_", "env."]);
+
+        assert!(acl.check_import("wasi_snapshot_preview1").is_ok());
+        assert!(acl.check_import("env.clock").is_ok());
+        assert!(acl
+            .check_import("other")
+            .expect_err("unexpected module should be rejected")
+            .to_string()
+            .contains("module[other] not allowed by import ACL"));
+    }
+
+    #[test]
+    fn import_acl_deny_prefixes_block_module_names() {
+        let acl = ImportACL::new().deny_module_prefixes(["__internal_", "private."]);
+
+        assert!(acl
+            .check_import("__internal_clock")
+            .expect_err("internal module should be denied")
+            .to_string()
+            .contains("module[__internal_clock] denied by import ACL"));
+        assert!(acl
+            .check_import("private.env")
+            .expect_err("private module should be denied")
+            .to_string()
+            .contains("module[private.env] denied by import ACL"));
+        assert!(acl.check_import("env").is_ok());
+    }
+
+    #[test]
+    fn import_acl_deny_prefixes_take_precedence_over_allow_rules() {
+        let acl = ImportACL::new()
+            .allow_module_prefixes(["env."])
+            .allow_modules(["wasi_snapshot_preview1"])
+            .deny_module_prefixes(["env.internal."]);
+
+        assert!(acl.check_import("env.public.clock").is_ok());
+        assert!(acl.check_import("wasi_snapshot_preview1").is_ok());
+        assert!(acl
+            .check_import("env.internal.clock")
+            .expect_err("deny prefix should win")
+            .to_string()
+            .contains("module[env.internal.clock] denied by import ACL"));
     }
 }
