@@ -2,7 +2,7 @@
 
 use std::ops::{Deref, DerefMut};
 
-use razero_secmem::{GuardPageAllocator, GuardedAllocation};
+use razero_secmem::{GuardPageAllocator, GuardedAllocation, SecMemError};
 
 use crate::memory_definition::MemoryDefinition;
 use crate::module::Memory;
@@ -150,15 +150,15 @@ impl MemoryInstance {
         }
     }
 
-    pub fn new_guarded(memory: &Memory) -> Option<Self> {
+    pub fn new_guarded(memory: &Memory) -> Result<Self, SecMemError> {
         let min_bytes = memory_pages_to_bytes_num(memory.min) as usize;
         let cap = memory.cap.max(memory.min);
         let cap_bytes = memory_pages_to_bytes_num(cap) as usize;
-        let mut bytes = GuardPageAllocator.allocate_zeroed(cap_bytes).ok()?;
+        let mut bytes = GuardPageAllocator.allocate_zeroed(cap_bytes)?;
         if cap_bytes > min_bytes {
             bytes.as_mut_slice()[min_bytes..cap_bytes].fill(0);
         }
-        Some(Self {
+        Ok(Self {
             bytes: MemoryBytes::guarded(bytes, min_bytes),
             min: memory.min,
             cap,

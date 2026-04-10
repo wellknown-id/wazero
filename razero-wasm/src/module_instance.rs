@@ -7,6 +7,8 @@ use std::sync::{
     Arc,
 };
 
+use razero_secmem::SecMemError;
+
 use crate::const_expr::{
     evaluate_const_expr as evaluate_runtime_const_expr, ConstExpr, ConstExprError,
 };
@@ -364,10 +366,10 @@ impl ModuleInstance {
         self.memory_instance = Some(MemoryInstance::new(memory));
     }
 
-    pub fn define_memory_guarded(&mut self, memory: &Memory) -> bool {
+    pub fn define_memory_guarded(&mut self, memory: &Memory) -> Result<(), SecMemError> {
         self.memory_type = Some(memory.clone());
-        self.memory_instance = MemoryInstance::new_guarded(memory);
-        self.memory_instance.is_some()
+        self.memory_instance = Some(MemoryInstance::new_guarded(memory)?);
+        Ok(())
     }
 
     pub fn add_defined_table(&mut self, table: &Table) {

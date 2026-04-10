@@ -4,6 +4,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use razero_platform::GuardPageError;
+use razero_secmem::SecMemError;
+
 use crate::engine::{
     CompileOptions, Engine as WasmEngine, EngineError, ModuleEngine as WasmModuleEngine, NullEngine,
 };
@@ -486,10 +489,16 @@ impl<E> Store<E> {
         if instance.memory_instance.is_none() {
             if let Some(memory) = &source.memory_section {
                 if self.secure_memory {
-                    if !instance.define_memory_guarded(memory) {
-                        return Err(StoreError::Instantiation(
-                            "memory allocation failed".to_string(),
-                        ));
+                    match instance.define_memory_guarded(memory) {
+                        Ok(()) => {}
+                        Err(SecMemError::Platform(GuardPageError::Unsupported(_))) => {
+                            instance.define_memory(memory);
+                        }
+                        Err(_) => {
+                            return Err(StoreError::Instantiation(
+                                "memory allocation failed".to_string(),
+                            ));
+                        }
                     }
                 } else {
                     instance.define_memory(memory);
@@ -637,6 +646,7 @@ mod tests {
     use super::*;
     use crate::const_expr::ConstExpr;
     use crate::engine::{EngineError, FunctionHandle, ModuleEngine, NullFunctionHandle};
+    use crate::memory::MemoryBytes;
     use crate::module::{
         Code, DataSegment, ElementMode, ElementSegment, Export, ExternType, FunctionType, Global,
         GlobalType, Memory, Module, RefType, Table, ValueType,
@@ -821,6 +831,62 @@ mod tests {
             &[0xaa, 0xbb],
             &instance.memory_instance.as_ref().unwrap().bytes[1..3]
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn instantiate_with_secure_memory_uses_guarded_backing_when_supported() {
+        let mut store = Store::<NullEngine>::default();
+        store.set_secure_memory(true);
+        let module = Module {
+            memory_section: Some(Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                ..Memory::default()
+            }),
+            ..Module::default()
+        };
+
+        let instance_id = store.instantiate(module, "secure", None).unwrap();
+        let instance = store.instance(instance_id).unwrap();
+
+        assert!(matches!(
+            instance
+                .memory_instance
+                .as_ref()
+                .expect("memory instance")
+                .bytes,
+            MemoryBytes::Guarded { .. }
+        ));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn instantiate_with_secure_memory_falls_back_to_plain_backing_when_guard_pages_unsupported() {
+        let mut store = Store::<NullEngine>::default();
+        store.set_secure_memory(true);
+        let module = Module {
+            memory_section: Some(Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                ..Memory::default()
+            }),
+            ..Module::default()
+        };
+
+        let instance_id = store.instantiate(module, "secure", None).unwrap();
+        let instance = store.instance(instance_id).unwrap();
+
+        assert!(matches!(
+            instance
+                .memory_instance
+                .as_ref()
+                .expect("memory instance")
+                .bytes,
+            MemoryBytes::Plain(..)
+        ));
     }
 
     #[test]
