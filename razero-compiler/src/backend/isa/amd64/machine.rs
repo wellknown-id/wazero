@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::ptr::NonNull;
 
 use crate::backend::machine::{BackendError, Machine as BackendMachine};
-use crate::backend::{AbiArgKind, CompilerContext, FunctionAbi, RealReg, RelocationInfo, VReg};
+use crate::backend::{
+    AbiArgKind, CompilerContext, FunctionAbi, RealReg, RegType, RelocationInfo, VReg,
+};
 use crate::ssa::{
     cmp::IntegerCmpCond, BasicBlock, BasicBlockId, Instruction, Opcode, Signature, SourceOffset,
     Type, Value,
@@ -255,6 +257,153 @@ impl Amd64Machine {
             10 => IntegerCmpCond::UnsignedLessThanOrEqual,
             _ => panic!("invalid integer comparison condition"),
         }
+    }
+
+    fn lower_idivrem(&mut self, instruction: &Instruction, is_div: bool, is_signed: bool) {
+        let dst = self.compiler().v_reg_of(instruction.return_());
+        let lhs = self.compiler().v_reg_of(instruction.v);
+        let rhs = self.compiler().v_reg_of(instruction.v2);
+        let exec_ctx = self.compiler().v_reg_of(instruction.v3);
+        let is_64 = instruction.typ.bits() == 64;
+        let rax = VReg::from_real_reg(super::reg::RAX, RegType::Int);
+        let rdx = VReg::from_real_reg(super::reg::RDX, RegType::Int);
+
+        let div_block = self.next_synthetic_block_id();
+        self.current_block_mut()
+            .instructions
+            .push(Amd64Instr::cmp_rmi_r(
+                Operand::reg(rhs),
+                rhs,
+                false,
+                is_64,
+            ));
+        self.current_block_mut()
+            .instructions
+            .push(Amd64Instr::jmp_if(Cond::NZ, Operand::label(Label(div_block))));
+        self.link_branch_edge(BasicBlockId(div_block));
+        self.emit_exit_with_code(exec_ctx, ExitCode::INTEGER_DIVISION_BY_ZERO);
+        self.start_synthetic_block(div_block);
+
+        self.current_block_mut()
+            .instructions
+            .push(Amd64Instr::mov_rr(lhs, rax, is_64));
+
+        if is_signed {
+            let neg1 = self.compiler_mut().allocate_vreg(instruction.typ);
+            self.current_block_mut()
+                .instructions
+                .push(Amd64Instr::imm(
+                    neg1,
+                    if is_64 { u64::MAX } else { u32::MAX as u64 },
+                    is_64,
+                ));
+            if is_div {
+                let normal_block = self.next_synthetic_block_id();
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::cmp_rmi_r(
+                        Operand::reg(neg1),
+                        rhs,
+                        true,
+                        is_64,
+                    ));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::jmp_if(
+                        Cond::NZ,
+                        Operand::label(Label(normal_block)),
+                    ));
+
+                let min_int = self.compiler_mut().allocate_vreg(instruction.typ);
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::imm(
+                        min_int,
+                        if is_64 {
+                            0x8000_0000_0000_0000
+                        } else {
+                            0x8000_0000
+                        },
+                        is_64,
+                    ));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::cmp_rmi_r(
+                        Operand::reg(min_int),
+                        lhs,
+                        true,
+                        is_64,
+                    ));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::jmp_if(
+                        Cond::NZ,
+                        Operand::label(Label(normal_block)),
+                    ));
+                self.link_branch_edge(BasicBlockId(normal_block));
+                self.emit_exit_with_code(exec_ctx, ExitCode::INTEGER_OVERFLOW);
+                self.start_synthetic_block(normal_block);
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::sign_extend_data(is_64));
+            } else {
+                let normal_block = self.next_synthetic_block_id();
+                let done_block = normal_block + 1;
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::cmp_rmi_r(
+                        Operand::reg(neg1),
+                        rhs,
+                        true,
+                        is_64,
+                    ));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::jmp_if(
+                        Cond::NZ,
+                        Operand::label(Label(normal_block)),
+                    ));
+                self.link_branch_edge(BasicBlockId(normal_block));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::imm(rdx, 0, false));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::jmp(Operand::label(Label(done_block))));
+                self.link_branch_edge(BasicBlockId(done_block));
+
+                self.start_synthetic_block(normal_block);
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::sign_extend_data(is_64));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::div(Operand::reg(rhs), true, is_64));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::jmp(Operand::label(Label(done_block))));
+                self.link_branch_edge(BasicBlockId(done_block));
+
+                self.start_synthetic_block(done_block);
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::mov_rr(rdx, dst, is_64));
+                return;
+            }
+        } else {
+            self.current_block_mut()
+                .instructions
+                .push(Amd64Instr::imm(rdx, 0, false));
+        }
+
+        self.current_block_mut()
+            .instructions
+            .push(Amd64Instr::div(Operand::reg(rhs), is_signed, is_64));
+        self.current_block_mut().instructions.push(Amd64Instr::mov_rr(
+            if is_div { rax } else { rdx },
+            dst,
+            is_64,
+        ));
     }
 
     fn link_branch_edge(&mut self, target: BasicBlock) {
@@ -545,6 +694,11 @@ impl BackendMachine for Amd64Machine {
                 self.current_block_mut()
                     .instructions
                     .push(Amd64Instr::movzx_rm_r(ExtMode::BQ, Operand::reg(tmp), dst));
+            }
+            Opcode::Sdiv | Opcode::Udiv | Opcode::Srem | Opcode::Urem => {
+                let is_div = matches!(instruction.opcode, Opcode::Sdiv | Opcode::Udiv);
+                let is_signed = matches!(instruction.opcode, Opcode::Sdiv | Opcode::Srem);
+                self.lower_idivrem(instruction, is_div, is_signed);
             }
             Opcode::Select => {
                 let dst = self.compiler().v_reg_of(instruction.return_());
@@ -1287,6 +1441,32 @@ mod tests {
         m.format()
     }
 
+    fn lower_divrem_opcode(opcode: Opcode, ty: Type) -> String {
+        let mut m = Amd64Machine::new();
+        m.start_lowering_function(BasicBlockId(0));
+        m.start_block(BasicBlockId(0));
+
+        let mut compiler = Box::new(TestCompilerContext::default());
+        compiler.regs = vec![
+            VReg::from_real_reg(3, RegType::Int),
+            VReg::from_real_reg(4, RegType::Int),
+            VReg::from_real_reg(7, RegType::Int),
+            VReg::from_real_reg(8, RegType::Int),
+        ];
+        let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
+        m.set_compiler(ptr);
+
+        let mut instruction = crate::ssa::Instruction::new().with_opcode(opcode);
+        instruction.v = Value(0).with_type(ty);
+        instruction.v2 = Value(1).with_type(ty);
+        instruction.v3 = Value(2).with_type(Type::I64);
+        instruction.r_value = Value(3).with_type(ty);
+        instruction.typ = ty;
+
+        m.lower_instr(&instruction);
+        m.format()
+    }
+
     fn lower_icmp_opcode(ty: Type, cond: IntegerCmpCond) -> String {
         let mut m = Amd64Machine::new();
         m.start_lowering_function(BasicBlockId(0));
@@ -1456,6 +1636,36 @@ mod tests {
     fn lowers_uextend_i32_to_i64_to_amd64_movzx_lq() {
         let formatted = lower_uextend_opcode();
         assert!(formatted.contains("movzx.lq %rax, %rsi"));
+    }
+
+    #[test]
+    fn lowers_i64_udiv_with_zero_guard_and_rax_result() {
+        let formatted = lower_divrem_opcode(Opcode::Udiv, Type::I64);
+        assert!(formatted.contains("testq "));
+        assert!(formatted.contains("movl $10, %r11d"));
+        assert!(formatted.contains("movq "));
+        assert!(formatted.contains("movl $0, %edx"));
+        assert!(formatted.contains("divq "));
+        assert!(formatted.contains("movq %rax"));
+    }
+
+    #[test]
+    fn lowers_i64_sdiv_with_overflow_guard() {
+        let formatted = lower_divrem_opcode(Opcode::Sdiv, Type::I64);
+        assert!(formatted.contains("testq "));
+        assert!(formatted.contains("movl $11, %r11d"));
+        assert!(formatted.contains("cqo"));
+        assert!(formatted.contains("idivq "));
+        assert!(formatted.contains("movq %rax"));
+    }
+
+    #[test]
+    fn lowers_i32_srem_with_neg1_fast_path() {
+        let formatted = lower_divrem_opcode(Opcode::Srem, Type::I32);
+        assert!(formatted.contains("testl "));
+        assert!(formatted.contains("movl $0, %edx"));
+        assert!(formatted.contains("idivl "));
+        assert!(formatted.contains("movl %edx"));
     }
 
     #[test]

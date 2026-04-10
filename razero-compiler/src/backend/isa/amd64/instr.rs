@@ -458,7 +458,6 @@ impl Amd64Instr {
         let d = self.0.borrow();
         match d.kind {
             InstructionKind::Ret
-            | InstructionKind::SignExtendData
             | InstructionKind::CmpRmiR
             | InstructionKind::Push64
             | InstructionKind::Jmp
@@ -473,12 +472,11 @@ impl Amd64Instr {
                     out.push(vreg_for_real_reg(reg));
                 }
             }
-            InstructionKind::Div => {
-                out.push(if d.u1 != 0 {
-                    vreg_for_real_reg(RAX)
-                } else {
-                    vreg_for_real_reg(RDX)
-                });
+            InstructionKind::Div | InstructionKind::SignExtendData => {
+                out.push(vreg_for_real_reg(RDX));
+                if matches!(d.kind, InstructionKind::Div) {
+                    out.push(vreg_for_real_reg(RAX));
+                }
             }
             InstructionKind::Pop64 => {
                 if let Some(Operand::Reg(reg)) = d.op1 {
@@ -535,6 +533,16 @@ impl Amd64Instr {
                 for &reg in FLOAT_ARG_RESULT_REGS.iter().take(arg_float as usize) {
                     out.push(vreg_for_real_reg(reg));
                 }
+            }
+            InstructionKind::Div => {
+                out.push(vreg_for_real_reg(RAX));
+                out.push(vreg_for_real_reg(RDX));
+                if let Some(op1) = &d.op1 {
+                    op1.uses(out);
+                }
+            }
+            InstructionKind::SignExtendData => {
+                out.push(vreg_for_real_reg(RAX));
             }
             InstructionKind::AluRmiR
             | InstructionKind::CmpRmiR
