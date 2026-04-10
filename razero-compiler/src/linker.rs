@@ -2450,6 +2450,39 @@ int main(void) {
     }
 
     #[test]
+    fn package_metadata_bundle_rejects_truncated_host_import_count() {
+        let bundle = NativePackageMetadataBundle {
+            modules: vec![NativePackageMetadataEntry {
+                module_name: "guest".to_string(),
+                metadata_sidecar_bytes: vec![1, 2, 3],
+            }],
+            host_imports: vec![PackagedHostImportDescriptor {
+                guest_module_name: "guest".to_string(),
+                import_module: "env".to_string(),
+                import_name: "inc".to_string(),
+                function_import_index: 0,
+                type_index: 0,
+                host_symbol_name: "env_inc_handler".to_string(),
+            }],
+        };
+        let mut encoded = serialize_native_package_metadata_bundle(&bundle);
+        let truncate_at = NATIVE_PACKAGE_MAGIC.len()
+            + 4
+            + 4
+            + bundle.modules[0].module_name.len()
+            + 8
+            + bundle.modules[0].metadata_sidecar_bytes.len()
+            + 2;
+        encoded.truncate(truncate_at);
+
+        let err = deserialize_native_package_metadata_bundle(&encoded).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "native package metadata: invalid u32 field"
+        );
+    }
+
+    #[test]
     fn package_metadata_bundle_rejects_truncated_host_import_metadata() {
         let bundle = NativePackageMetadataBundle {
             modules: vec![NativePackageMetadataEntry {
