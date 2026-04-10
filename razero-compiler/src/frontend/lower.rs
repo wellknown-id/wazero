@@ -3209,6 +3209,64 @@ mod tests {
     }
 
     #[test]
+    fn lowers_f32_load_without_local_memory_bounds_check_when_memory_isolation_enabled() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::F32])],
+            function_section: vec![0],
+            memory_section: Some(wasm::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                is_shared: false,
+            }),
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_F32_LOAD, 2, 0, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for_with_memory_isolation_enabled(&module, true);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32)\n\tv3:i64 = UExtend v2\n\tv4:i64 = Load module_ctx, 0x8\n\tv5:i64 = Iadd v4, v3\n\tv6:f32 = Load v5, 0x0\n\tJump blk_ret, v6\n"
+        );
+    }
+
+    #[test]
+    fn lowers_f64_load_without_local_memory_bounds_check_when_memory_isolation_enabled() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::F64])],
+            function_section: vec![0],
+            memory_section: Some(wasm::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                is_shared: false,
+            }),
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_F64_LOAD, 3, 0, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for_with_memory_isolation_enabled(&module, true);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32)\n\tv3:i64 = UExtend v2\n\tv4:i64 = Load module_ctx, 0x8\n\tv5:i64 = Iadd v4, v3\n\tv6:f64 = Load v5, 0x0\n\tJump blk_ret, v6\n"
+        );
+    }
+
+    #[test]
     fn lowers_i32_store_without_local_memory_bounds_check_when_memory_isolation_enabled() {
         let module = Module {
             type_section: vec![function_type(&[ValueType::I32, ValueType::I32], &[])],
@@ -3547,6 +3605,82 @@ mod tests {
         assert_eq!(
             compiler.format(),
             "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32, v3:f64)\n\tv4:i64 = UExtend v2\n\tv5:i64 = Iconst 8\n\tv6:i64 = Iadd v4, v5\n\tv7:i64 = Uload32 module_ctx, 0x10\n\tv8:i32 = Icmp v7, v6\n\tExitIfTrueWithCode v8, exec_ctx, memory_out_of_bounds\n\tv9:i64 = Load module_ctx, 0x8\n\tv10:i64 = Iadd v9, v4\n\tStore v3, v10, 0x0\n\tJump blk_ret\n"
+        );
+    }
+
+    #[test]
+    fn lowers_f32_store_without_local_memory_bounds_check_when_memory_isolation_enabled() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32, ValueType::F32], &[])],
+            function_section: vec![0],
+            memory_section: Some(wasm::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                is_shared: false,
+            }),
+            code_section: vec![Code {
+                body: vec![
+                    OPCODE_LOCAL_GET,
+                    0,
+                    OPCODE_LOCAL_GET,
+                    1,
+                    OPCODE_F32_STORE,
+                    2,
+                    0,
+                    OPCODE_END,
+                ],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for_with_memory_isolation_enabled(&module, true);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32, v3:f32)\n\tv4:i64 = UExtend v2\n\tv5:i64 = Load module_ctx, 0x8\n\tv6:i64 = Iadd v5, v4\n\tStore v3, v6, 0x0\n\tJump blk_ret\n"
+        );
+    }
+
+    #[test]
+    fn lowers_f64_store_without_local_memory_bounds_check_when_memory_isolation_enabled() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32, ValueType::F64], &[])],
+            function_section: vec![0],
+            memory_section: Some(wasm::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                is_shared: false,
+            }),
+            code_section: vec![Code {
+                body: vec![
+                    OPCODE_LOCAL_GET,
+                    0,
+                    OPCODE_LOCAL_GET,
+                    1,
+                    OPCODE_F64_STORE,
+                    3,
+                    0,
+                    OPCODE_END,
+                ],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for_with_memory_isolation_enabled(&module, true);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32, v3:f64)\n\tv4:i64 = UExtend v2\n\tv5:i64 = Load module_ctx, 0x8\n\tv6:i64 = Iadd v5, v4\n\tStore v3, v6, 0x0\n\tJump blk_ret\n"
         );
     }
 
