@@ -2342,6 +2342,16 @@ int main(void) {
         fs::remove_dir_all(workspace).unwrap();
     }
 
+    fn sample_package_metadata_bundle() -> NativePackageMetadataBundle {
+        NativePackageMetadataBundle {
+            modules: vec![NativePackageMetadataEntry {
+                module_name: "guest".to_string(),
+                metadata_sidecar_bytes: vec![1, 2, 3],
+            }],
+            host_imports: Vec::new(),
+        }
+    }
+
     #[test]
     fn package_metadata_bundle_round_trips() {
         let bundle = NativePackageMetadataBundle {
@@ -2381,6 +2391,65 @@ int main(void) {
     }
 
     #[test]
+    fn package_metadata_bundle_rejects_invalid_magic_number() {
+        let bundle = sample_package_metadata_bundle();
+        let mut encoded = serialize_native_package_metadata_bundle(&bundle);
+        encoded[..NATIVE_PACKAGE_MAGIC.len()].copy_from_slice(b"BADMAGIC");
+
+        let err = deserialize_native_package_metadata_bundle(&encoded).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "native package metadata: invalid magic number"
+        );
+    }
+
+    #[test]
+    fn package_metadata_bundle_rejects_truncated_magic_header() {
+        let bundle = sample_package_metadata_bundle();
+        let mut encoded = serialize_native_package_metadata_bundle(&bundle);
+        encoded.truncate(4);
+
+        let err = deserialize_native_package_metadata_bundle(&encoded).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "native package metadata: invalid header length"
+        );
+    }
+
+    #[test]
+    fn package_metadata_bundle_rejects_truncated_module_count() {
+        let bundle = sample_package_metadata_bundle();
+        let mut encoded = serialize_native_package_metadata_bundle(&bundle);
+        encoded.truncate(NATIVE_PACKAGE_MAGIC.len() + 2);
+
+        let err = deserialize_native_package_metadata_bundle(&encoded).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "native package metadata: invalid u32 field"
+        );
+    }
+
+    #[test]
+    fn package_metadata_bundle_rejects_truncated_module_sidecar() {
+        let bundle = sample_package_metadata_bundle();
+        let mut encoded = serialize_native_package_metadata_bundle(&bundle);
+        let truncate_at = NATIVE_PACKAGE_MAGIC.len()
+            + 4
+            + 4
+            + bundle.modules[0].module_name.len()
+            + 8
+            + bundle.modules[0].metadata_sidecar_bytes.len()
+            - 1;
+        encoded.truncate(truncate_at);
+
+        let err = deserialize_native_package_metadata_bundle(&encoded).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "native package metadata: invalid module sidecar"
+        );
+    }
+
+    #[test]
     fn package_metadata_bundle_rejects_truncated_host_import_metadata() {
         let bundle = NativePackageMetadataBundle {
             modules: vec![NativePackageMetadataEntry {
@@ -2403,6 +2472,19 @@ int main(void) {
         assert_eq!(
             err.to_string(),
             "native package metadata: invalid host symbol name"
+        );
+    }
+
+    #[test]
+    fn package_metadata_bundle_rejects_unexpected_trailing_bytes() {
+        let bundle = sample_package_metadata_bundle();
+        let mut encoded = serialize_native_package_metadata_bundle(&bundle);
+        encoded.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+
+        let err = deserialize_native_package_metadata_bundle(&encoded).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "native package metadata: unexpected trailing bytes"
         );
     }
 
