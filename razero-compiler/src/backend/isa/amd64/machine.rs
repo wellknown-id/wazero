@@ -4,7 +4,8 @@ use std::ptr::NonNull;
 use crate::backend::machine::{BackendError, Machine as BackendMachine};
 use crate::backend::{AbiArgKind, CompilerContext, FunctionAbi, RealReg, RelocationInfo, VReg};
 use crate::ssa::{
-    BasicBlock, BasicBlockId, Instruction, Opcode, Signature, SourceOffset, Type, Value,
+    cmp::IntegerCmpCond, BasicBlock, BasicBlockId, Instruction, Opcode, Signature, SourceOffset,
+    Type, Value,
 };
 use crate::wazevoapi::ExitCode;
 
@@ -203,6 +204,57 @@ impl Amd64Machine {
             4,
         ));
         append_epilogue(self);
+    }
+
+    fn next_synthetic_block_id(&self) -> u32 {
+        self.blocks
+            .iter()
+            .map(|block| block.id.max(0) as u32)
+            .max()
+            .unwrap_or(0)
+            + 1
+    }
+
+    fn start_synthetic_block(&mut self, id: u32) {
+        let block = BasicBlockId(id);
+        let idx = self.ensure_block(block);
+        self.current_block = Some(idx);
+        self.blocks[idx].entry = false;
+        self.blocks[idx].params.clear();
+        let id = id as i32;
+        if !self.block_order.contains(&id) {
+            self.block_order.push(id);
+        }
+    }
+
+    fn lower_icmp_to_flags(&mut self, x: Value, y: Value, cond: IntegerCmpCond) -> Cond {
+        let lhs = self.compiler().v_reg_of(x);
+        let rhs = self.compiler().v_reg_of(y);
+        self.current_block_mut()
+            .instructions
+            .push(Amd64Instr::cmp_rmi_r(
+                Operand::reg(rhs),
+                lhs,
+                true,
+                x.ty().bits() == 64,
+            ));
+        Cond::from_int_cmp(cond)
+    }
+
+    fn integer_cmp_cond_from_u8(raw: u8) -> IntegerCmpCond {
+        match raw {
+            1 => IntegerCmpCond::Equal,
+            2 => IntegerCmpCond::NotEqual,
+            3 => IntegerCmpCond::SignedLessThan,
+            4 => IntegerCmpCond::SignedGreaterThanOrEqual,
+            5 => IntegerCmpCond::SignedGreaterThan,
+            6 => IntegerCmpCond::SignedLessThanOrEqual,
+            7 => IntegerCmpCond::UnsignedLessThan,
+            8 => IntegerCmpCond::UnsignedGreaterThanOrEqual,
+            9 => IntegerCmpCond::UnsignedGreaterThan,
+            10 => IntegerCmpCond::UnsignedLessThanOrEqual,
+            _ => panic!("invalid integer comparison condition"),
+        }
     }
 
     fn link_branch_edge(&mut self, target: BasicBlock) {
@@ -635,6 +687,39 @@ impl BackendMachine for Amd64Machine {
                 let exec_ctx = self.compiler().v_reg_of(ctx);
                 self.emit_exit_with_code(exec_ctx, code);
             }
+            Opcode::ExitIfTrueWithCode => {
+                let (ctx, cond, code) = instruction.exit_if_true_with_code_data();
+                let exec_ctx = self.compiler().v_reg_of(ctx);
+                let current_id = self.current_block_mut().id as u32;
+                let cont_id = self.next_synthetic_block_id();
+                let cond_def = self.compiler().value_definition(cond);
+                let continue_cond = if self.compiler().match_instr(cond_def, Opcode::Icmp) {
+                    let icmp = self
+                        .compiler()
+                        .ssa_builder()
+                        .instruction_of_value(cond)
+                        .expect("icmp value must map to instruction");
+                    let cond = Self::integer_cmp_cond_from_u8(icmp.u1 as u8);
+                    self.lower_icmp_to_flags(icmp.v, icmp.v2, cond).invert()
+                } else {
+                    let cond_reg = self.compiler().v_reg_of(cond);
+                    self.current_block_mut()
+                        .instructions
+                        .push(Amd64Instr::cmp_rmi_r(
+                            Operand::reg(cond_reg),
+                            cond_reg,
+                            false,
+                            false,
+                        ));
+                    Cond::Z
+                };
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::jmp_if(continue_cond, Operand::label(Label(cont_id))));
+                self.link_adjacent_blocks(BasicBlockId(current_id), BasicBlockId(cont_id));
+                self.emit_exit_with_code(exec_ctx, code);
+                self.start_synthetic_block(cont_id);
+            }
             Opcode::Call => {
                 let (func_ref, sig, args) = instruction.call_data();
                 let signature = self
@@ -880,13 +965,15 @@ mod tests {
         CompilerContext, FunctionAbi, RegType, SSAValueDefinition, SourceOffsetInfo, VReg,
     };
     use crate::ssa::{
-        BasicBlockId, Builder, FuncRef, Opcode, Signature, SourceOffset, Type, Value,
+        cmp::IntegerCmpCond, BasicBlockId, Builder, FuncRef, Opcode, Signature, SourceOffset, Type,
+        Value,
     };
     use crate::wazevoapi::ExitCode;
 
     struct TestCompilerContext {
         builder: Builder,
         regs: Vec<VReg>,
+        defs: Vec<SSAValueDefinition>,
         abi: FunctionAbi,
         buf: Vec<u8>,
         source_offsets: Vec<SourceOffsetInfo>,
@@ -897,6 +984,7 @@ mod tests {
             Self {
                 builder: Builder::new(),
                 regs: Vec::new(),
+                defs: Vec::new(),
                 abi: FunctionAbi::default(),
                 buf: Vec::new(),
                 source_offsets: Vec::new(),
@@ -917,8 +1005,8 @@ mod tests {
             VReg::INVALID
         }
 
-        fn value_definition(&self, _value: Value) -> SSAValueDefinition {
-            SSAValueDefinition::default()
+        fn value_definition(&self, value: Value) -> SSAValueDefinition {
+            self.defs.get(value.id().0 as usize).copied().unwrap_or_default()
         }
 
         fn v_reg_of(&self, value: Value) -> VReg {
@@ -933,12 +1021,22 @@ mod tests {
             }
         }
 
-        fn match_instr(&self, _def: SSAValueDefinition, _opcode: Opcode) -> bool {
-            false
+        fn match_instr(&self, def: SSAValueDefinition, opcode: Opcode) -> bool {
+            def.instr
+                .map(|id| self.builder.instruction(id).opcode == opcode)
+                .unwrap_or(false)
         }
 
-        fn match_instr_one_of(&self, _def: SSAValueDefinition, _opcodes: &[Opcode]) -> Opcode {
-            Opcode::Undefined
+        fn match_instr_one_of(&self, def: SSAValueDefinition, opcodes: &[Opcode]) -> Opcode {
+            let Some(id) = def.instr else {
+                return Opcode::Undefined;
+            };
+            let opcode = self.builder.instruction(id).opcode;
+            if opcodes.contains(&opcode) {
+                opcode
+            } else {
+                Opcode::Undefined
+            }
         }
 
         fn add_relocation_info(&mut self, _func_ref: FuncRef, _is_tail_call: bool) {}
@@ -1174,6 +1272,71 @@ mod tests {
         m.format()
     }
 
+    fn lower_exit_if_true_with_code_generic(exit_code: ExitCode) -> String {
+        let mut m = Amd64Machine::new();
+        m.start_lowering_function(BasicBlockId(0));
+        m.start_block(BasicBlockId(0));
+
+        let mut compiler = Box::new(TestCompilerContext::default());
+        compiler.regs = vec![
+            VReg::from_real_reg(1, RegType::Int),
+            VReg::from_real_reg(4, RegType::Int),
+        ];
+        let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
+        m.set_compiler(ptr);
+
+        let mut instruction = crate::ssa::Instruction::new().with_opcode(Opcode::ExitIfTrueWithCode);
+        instruction.v = Value(0).with_type(Type::I64);
+        instruction.v2 = Value(1).with_type(Type::I32);
+        instruction.u1 = exit_code.raw() as u64;
+
+        m.lower_instr(&instruction);
+        m.format()
+    }
+
+    fn lower_exit_if_true_with_code_icmp(exit_code: ExitCode) -> String {
+        let mut m = Amd64Machine::new();
+        m.start_lowering_function(BasicBlockId(0));
+        m.start_block(BasicBlockId(0));
+
+        let mut compiler = Box::new(TestCompilerContext::default());
+        let bb = compiler.builder.allocate_basic_block();
+        compiler.builder.set_current_block(bb);
+        let x = compiler.builder.allocate_value(Type::I32);
+        let y = compiler.builder.allocate_value(Type::I32);
+        let icmp_id = compiler
+            .builder
+            .insert_instruction(compiler.builder.allocate_instruction().as_icmp(
+                x,
+                y,
+                IntegerCmpCond::Equal,
+            ));
+        let cond = compiler.builder.instruction(icmp_id).return_();
+        let exec_ctx = compiler.builder.allocate_value(Type::I64);
+        compiler.regs = vec![
+            VReg::from_real_reg(4, RegType::Int),
+            VReg::from_real_reg(2, RegType::Int),
+            VReg::from_real_reg(3, RegType::Int),
+            VReg::from_real_reg(1, RegType::Int),
+        ];
+        compiler.defs.resize(cond.id().0 as usize + 1, SSAValueDefinition::default());
+        compiler.defs[cond.id().0 as usize] = SSAValueDefinition {
+            value: cond,
+            instr: Some(icmp_id),
+            ref_count: 1,
+        };
+        let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
+        m.set_compiler(ptr);
+
+        let mut instruction = crate::ssa::Instruction::new().with_opcode(Opcode::ExitIfTrueWithCode);
+        instruction.v = exec_ctx;
+        instruction.v2 = cond;
+        instruction.u1 = exit_code.raw() as u64;
+
+        m.lower_instr(&instruction);
+        m.format()
+    }
+
     fn lower_partial_load_opcode(opcode: Opcode, typ: Type) -> String {
         let mut m = Amd64Machine::new();
         m.start_lowering_function(BasicBlockId(0));
@@ -1247,6 +1410,24 @@ mod tests {
         assert!(formatted.contains("movq %rbp, %rsp"));
         assert!(formatted.contains("popq %rbp"));
         assert!(formatted.contains("ret"));
+    }
+
+    #[test]
+    fn lowers_exit_if_true_with_code_from_generic_cond() {
+        let formatted = lower_exit_if_true_with_code_generic(ExitCode::UNREACHABLE);
+        assert!(formatted.contains("testl %ebx, %ebx"));
+        assert!(formatted.contains("jz L1"));
+        assert!(formatted.contains("movl $3, %r11d"));
+        assert!(formatted.contains("blk1:"));
+    }
+
+    #[test]
+    fn lowers_exit_if_true_with_code_from_icmp() {
+        let formatted = lower_exit_if_true_with_code_icmp(ExitCode::INTEGER_DIVISION_BY_ZERO);
+        assert!(formatted.contains("cmpl %ecx, %ebx"));
+        assert!(formatted.contains("jnz L1"));
+        assert!(formatted.contains("movl $10, %r11d"));
+        assert!(formatted.contains("blk1:"));
     }
 
     #[test]
