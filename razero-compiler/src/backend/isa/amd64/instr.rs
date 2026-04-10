@@ -110,6 +110,7 @@ pub enum InstructionKind {
     CallIndirect,
     Xchg,
     XmmUnaryRmR,
+    XmmCmpRmR,
     XmmMovRM,
     XmmLoadConst,
 }
@@ -439,6 +440,17 @@ impl Amd64Instr {
         inst
     }
 
+    pub fn xmm_cmp_rm_r(op: SseOpcode, src: Operand, dst: VReg) -> Self {
+        let inst = Self::new(InstructionKind::XmmCmpRmR);
+        {
+            let mut d = inst.0.borrow_mut();
+            d.op1 = Some(src);
+            d.op2 = Some(Operand::reg(dst));
+            d.u1 = op as u64;
+        }
+        inst
+    }
+
     pub fn xmm_load_const(dst: VReg, bits: u64) -> Self {
         let inst = Self::new(InstructionKind::XmmLoadConst);
         {
@@ -459,6 +471,7 @@ impl Amd64Instr {
         match d.kind {
             InstructionKind::Ret
             | InstructionKind::CmpRmiR
+            | InstructionKind::XmmCmpRmR
             | InstructionKind::Push64
             | InstructionKind::Jmp
             | InstructionKind::JmpIf
@@ -547,7 +560,8 @@ impl Amd64Instr {
             InstructionKind::AluRmiR
             | InstructionKind::CmpRmiR
             | InstructionKind::Cmove
-            | InstructionKind::Xchg => {
+            | InstructionKind::Xchg
+            | InstructionKind::XmmCmpRmR => {
                 if let Some(op1) = &d.op1 {
                     op1.uses(out);
                 }
@@ -851,6 +865,13 @@ impl fmt::Display for Amd64Instr {
                 SseOpcode::from_u64(d.u1),
                 op1.expect("xmm src").format(false),
                 op2.expect("xmm dst").format(false)
+            ),
+            InstructionKind::XmmCmpRmR => write!(
+                f,
+                "{} {}, {}",
+                SseOpcode::from_u64(d.u1),
+                op1.expect("xmmcmp src").format(false),
+                op2.expect("xmmcmp dst").format(false)
             ),
             InstructionKind::XmmMovRM => write!(
                 f,

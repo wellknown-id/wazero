@@ -61,6 +61,7 @@ pub fn encode_instruction(inst: &Amd64Instr, buf: &mut Vec<u8>) -> Result<(), Ba
         InstructionKind::CallIndirect => encode_unary_subopcode(buf, op1(&d)?, 2, true, Some(0xFF)),
         InstructionKind::Xchg => encode_xchg(buf, &d)?,
         InstructionKind::XmmUnaryRmR => encode_xmm_unary_rm_r(buf, &d)?,
+        InstructionKind::XmmCmpRmR => encode_xmm_cmp_rm_r(buf, &d)?,
         InstructionKind::XmmMovRM => encode_xmm_mov_rm(buf, &d)?,
         InstructionKind::XmmLoadConst => {
             return Err(BackendError::new("xmm const pools are not wired yet"));
@@ -335,6 +336,22 @@ fn encode_xmm_mov_rm(
         }
         _ => Err(BackendError::new("xmm store requires memory destination")),
     }
+}
+
+fn encode_xmm_cmp_rm_r(
+    buf: &mut Vec<u8>,
+    d: &super::instr::Amd64InstrData,
+) -> Result<(), BackendError> {
+    let op = sse_opcode_from_u64(d.u1);
+    let enc = op.encoding();
+    encode_reg_rm_opcode(
+        buf,
+        enc.load_opcode,
+        op2_reg(d)?,
+        op1(d)?,
+        false,
+        enc.prefix,
+    )
 }
 
 fn encode_reg_rm_opcode(

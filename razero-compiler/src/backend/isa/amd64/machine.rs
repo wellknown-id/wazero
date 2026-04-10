@@ -6,8 +6,8 @@ use crate::backend::{
     AbiArgKind, CompilerContext, FunctionAbi, RealReg, RegType, RelocationInfo, VReg,
 };
 use crate::ssa::{
-    cmp::IntegerCmpCond, BasicBlock, BasicBlockId, Instruction, Opcode, Signature, SourceOffset,
-    Type, Value,
+    cmp::{FloatCmpCond, IntegerCmpCond}, BasicBlock, BasicBlockId, Instruction, Opcode, Signature,
+    SourceOffset, Type, Value,
 };
 use crate::wazevoapi::ExitCode;
 
@@ -243,6 +243,42 @@ impl Amd64Machine {
         Cond::from_int_cmp(cond)
     }
 
+    fn lower_fcmp_to_flags(&mut self, instruction: &Instruction) -> (Cond, Option<(Cond, bool)>) {
+        let mut x = instruction.v;
+        let mut y = instruction.v2;
+        let cond = Self::float_cmp_cond_from_u8(instruction.u1 as u8);
+        let (first, second) = match cond {
+            FloatCmpCond::Equal => (Cond::NP, Some((Cond::Z, true))),
+            FloatCmpCond::NotEqual => (Cond::P, Some((Cond::NZ, false))),
+            FloatCmpCond::LessThan => {
+                x = instruction.v2;
+                y = instruction.v;
+                (Cond::from_float_cmp(FloatCmpCond::GreaterThan), None)
+            }
+            FloatCmpCond::LessThanOrEqual => {
+                x = instruction.v2;
+                y = instruction.v;
+                (Cond::from_float_cmp(FloatCmpCond::GreaterThanOrEqual), None)
+            }
+            FloatCmpCond::GreaterThan | FloatCmpCond::GreaterThanOrEqual => {
+                (Cond::from_float_cmp(cond), None)
+            }
+            FloatCmpCond::Invalid => panic!("invalid float comparison condition"),
+        };
+
+        let op = match x.ty() {
+            Type::F32 => SseOpcode::Ucomiss,
+            Type::F64 => SseOpcode::Ucomisd,
+            _ => panic!("unsupported amd64 float comparison type: {:?}", x.ty()),
+        };
+        let lhs = self.compiler().v_reg_of(x);
+        let rhs = self.compiler().v_reg_of(y);
+        self.current_block_mut()
+            .instructions
+            .push(Amd64Instr::xmm_cmp_rm_r(op, Operand::reg(rhs), lhs));
+        (first, second)
+    }
+
     fn integer_cmp_cond_from_u8(raw: u8) -> IntegerCmpCond {
         match raw {
             1 => IntegerCmpCond::Equal,
@@ -256,6 +292,18 @@ impl Amd64Machine {
             9 => IntegerCmpCond::UnsignedGreaterThan,
             10 => IntegerCmpCond::UnsignedLessThanOrEqual,
             _ => panic!("invalid integer comparison condition"),
+        }
+    }
+
+    fn float_cmp_cond_from_u8(raw: u8) -> FloatCmpCond {
+        match raw {
+            1 => FloatCmpCond::Equal,
+            2 => FloatCmpCond::NotEqual,
+            3 => FloatCmpCond::LessThan,
+            4 => FloatCmpCond::LessThanOrEqual,
+            5 => FloatCmpCond::GreaterThan,
+            6 => FloatCmpCond::GreaterThanOrEqual,
+            _ => panic!("invalid float comparison condition"),
         }
     }
 
@@ -682,6 +730,44 @@ impl BackendMachine for Amd64Machine {
                 self.current_block_mut()
                     .instructions
                     .push(Amd64Instr::unary_rm_r(op, Operand::reg(src), dst, is_64));
+            }
+            Opcode::Fcmp => {
+                let dst = self.compiler().v_reg_of(instruction.return_());
+                let (first, second) = self.lower_fcmp_to_flags(instruction);
+                match second {
+                    None => {
+                        let tmp = self.compiler_mut().allocate_vreg(Type::I32);
+                        self.current_block_mut()
+                            .instructions
+                            .push(Amd64Instr::setcc(first, tmp));
+                        self.current_block_mut()
+                            .instructions
+                            .push(Amd64Instr::movzx_rm_r(ExtMode::BQ, Operand::reg(tmp), dst));
+                    }
+                    Some((second_cond, and)) => {
+                        let tmp1 = self.compiler_mut().allocate_vreg(Type::I32);
+                        let tmp2 = self.compiler_mut().allocate_vreg(Type::I32);
+                        self.current_block_mut()
+                            .instructions
+                            .push(Amd64Instr::setcc(first, tmp1));
+                        self.current_block_mut()
+                            .instructions
+                            .push(Amd64Instr::setcc(second_cond, tmp2));
+                        self.current_block_mut().instructions.push(Amd64Instr::alu_rmi_r(
+                            if and {
+                                super::AluRmiROpcode::And
+                            } else {
+                                super::AluRmiROpcode::Or
+                            },
+                            Operand::reg(tmp1),
+                            tmp2,
+                            false,
+                        ));
+                        self.current_block_mut()
+                            .instructions
+                            .push(Amd64Instr::movzx_rm_r(ExtMode::BQ, Operand::reg(tmp2), dst));
+                    }
+                }
             }
             Opcode::Fadd | Opcode::Fsub | Opcode::Fmul | Opcode::Fdiv => {
                 let dst = self.compiler().v_reg_of(instruction.return_());
@@ -1161,8 +1247,8 @@ mod tests {
         CompilerContext, FunctionAbi, RegType, SSAValueDefinition, SourceOffsetInfo, VReg,
     };
     use crate::ssa::{
-        cmp::IntegerCmpCond, BasicBlockId, Builder, FuncRef, Opcode, Signature, SourceOffset, Type,
-        Value,
+        cmp::{FloatCmpCond, IntegerCmpCond}, BasicBlockId, Builder, FuncRef, Opcode, Signature,
+        SourceOffset, Type, Value,
     };
     use crate::wazevoapi::ExitCode;
 
@@ -1521,6 +1607,31 @@ mod tests {
         m.format()
     }
 
+    fn lower_fcmp_opcode(ty: Type, cond: FloatCmpCond) -> String {
+        let mut m = Amd64Machine::new();
+        m.start_lowering_function(BasicBlockId(0));
+        m.start_block(BasicBlockId(0));
+
+        let mut compiler = Box::new(TestCompilerContext::default());
+        compiler.regs = vec![
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::XMM0, RegType::Float),
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::XMM1, RegType::Float),
+            VReg::from_real_reg(4, RegType::Int),
+        ];
+        let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
+        m.set_compiler(ptr);
+
+        let mut instruction = crate::ssa::Instruction::new().with_opcode(Opcode::Fcmp);
+        instruction.v = Value(0).with_type(ty);
+        instruction.v2 = Value(1).with_type(ty);
+        instruction.r_value = Value(2).with_type(Type::I32);
+        instruction.typ = Type::I32;
+        instruction.u1 = cond as u64;
+
+        m.lower_instr(&instruction);
+        m.format()
+    }
+
     fn lower_icmp_opcode(ty: Type, cond: IntegerCmpCond) -> String {
         let mut m = Amd64Machine::new();
         m.start_lowering_function(BasicBlockId(0));
@@ -1705,6 +1816,34 @@ mod tests {
         let formatted = lower_float_binary_opcode(Opcode::Fdiv, Type::F64);
         assert!(formatted.contains("movsd %xmm0, %xmm2"));
         assert!(formatted.contains("divsd %xmm1, %xmm2"));
+    }
+
+    #[test]
+    fn lowers_f32_fcmp_eq_with_nan_safe_flag_sequence() {
+        let formatted = lower_fcmp_opcode(Type::F32, FloatCmpCond::Equal);
+        assert!(formatted.contains("ucomiss %xmm1, %xmm0"));
+        assert!(formatted.contains("setnp"));
+        assert!(formatted.contains("setz"));
+        assert!(formatted.contains("and "));
+        assert!(formatted.contains("movzx.bq"));
+    }
+
+    #[test]
+    fn lowers_f64_fcmp_ne_with_nan_safe_flag_sequence() {
+        let formatted = lower_fcmp_opcode(Type::F64, FloatCmpCond::NotEqual);
+        assert!(formatted.contains("ucomisd %xmm1, %xmm0"));
+        assert!(formatted.contains("setp"));
+        assert!(formatted.contains("setnz"));
+        assert!(formatted.contains("or "));
+        assert!(formatted.contains("movzx.bq"));
+    }
+
+    #[test]
+    fn lowers_f64_fcmp_gt_with_single_condition() {
+        let formatted = lower_fcmp_opcode(Type::F64, FloatCmpCond::GreaterThan);
+        assert!(formatted.contains("ucomisd %xmm1, %xmm0"));
+        assert!(formatted.contains("setnbe"));
+        assert!(formatted.contains("movzx.bq"));
     }
 
     #[test]

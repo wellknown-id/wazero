@@ -15,6 +15,8 @@ pub enum SseOpcode {
     Mulsd,
     Divss,
     Divsd,
+    Ucomiss,
+    Ucomisd,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,6 +96,18 @@ impl SseOpcode {
                 store_opcode: 0x0F5E,
                 opcode_len: 2,
             },
+            Self::Ucomiss => SseEncoding {
+                prefix: Some(0xF3),
+                load_opcode: 0x0F2E,
+                store_opcode: 0x0F2E,
+                opcode_len: 2,
+            },
+            Self::Ucomisd => SseEncoding {
+                prefix: Some(0xF2),
+                load_opcode: 0x0F2E,
+                store_opcode: 0x0F2E,
+                opcode_len: 2,
+            },
         }
     }
 
@@ -109,7 +123,9 @@ impl SseOpcode {
             7 => Self::Mulss,
             8 => Self::Mulsd,
             9 => Self::Divss,
-            _ => Self::Divsd,
+            10 => Self::Divsd,
+            11 => Self::Ucomiss,
+            _ => Self::Ucomisd,
         }
     }
 
@@ -132,6 +148,8 @@ impl fmt::Display for SseOpcode {
             Self::Mulsd => "mulsd",
             Self::Divss => "divss",
             Self::Divsd => "divsd",
+            Self::Ucomiss => "ucomiss",
+            Self::Ucomisd => "ucomisd",
         })
     }
 }
@@ -144,11 +162,14 @@ mod tests {
     fn sse_encodings_are_stable() {
         let movsd = SseOpcode::Movsd.encoding();
         let addss = SseOpcode::Addss.encoding();
+        let ucomisd = SseOpcode::Ucomisd.encoding();
         assert_eq!(movsd.prefix, Some(0xF2));
         assert_eq!(movsd.load_opcode, 0x0F10);
         assert_eq!(addss.prefix, Some(0xF3));
         assert_eq!(addss.load_opcode, 0x0F58);
+        assert_eq!(ucomisd.load_opcode, 0x0F2E);
         assert_eq!(SseOpcode::Movdqu.to_string(), "movdqu");
         assert_eq!(SseOpcode::Divsd.to_string(), "divsd");
+        assert_eq!(SseOpcode::Ucomiss.to_string(), "ucomiss");
     }
 }
