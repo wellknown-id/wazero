@@ -186,6 +186,25 @@ impl Amd64Machine {
         append_epilogue(self);
     }
 
+    fn emit_exit_with_code(&mut self, exec_ctx: VReg, exit_code: ExitCode) {
+        let tmp = crate::backend::VReg::from_real_reg(
+            super::reg::R11,
+            crate::backend::RegType::Int,
+        );
+        self.current_block_mut()
+            .instructions
+            .push(Amd64Instr::imm(tmp, exit_code.raw() as u64, false));
+        self.current_block_mut().instructions.push(Amd64Instr::mov_rm(
+            tmp,
+            Operand::mem(AddressMode::imm_reg(
+                crate::wazevoapi::offsetdata::EXECUTION_CONTEXT_OFFSET_EXIT_CODE_OFFSET.u32(),
+                exec_ctx,
+            )),
+            4,
+        ));
+        append_epilogue(self);
+    }
+
     fn link_branch_edge(&mut self, target: BasicBlock) {
         let Some(current) = self.current_block else {
             return;
@@ -611,6 +630,11 @@ impl BackendMachine for Amd64Machine {
                 };
                 self.current_block_mut().instructions.push(inst);
             }
+            Opcode::ExitWithCode => {
+                let (ctx, code) = instruction.exit_with_code_data();
+                let exec_ctx = self.compiler().v_reg_of(ctx);
+                self.emit_exit_with_code(exec_ctx, code);
+            }
             Opcode::Call => {
                 let (func_ref, sig, args) = instruction.call_data();
                 let signature = self
@@ -858,6 +882,7 @@ mod tests {
     use crate::ssa::{
         BasicBlockId, Builder, FuncRef, Opcode, Signature, SourceOffset, Type, Value,
     };
+    use crate::wazevoapi::ExitCode;
 
     struct TestCompilerContext {
         builder: Builder,
@@ -1131,6 +1156,24 @@ mod tests {
         m.format()
     }
 
+    fn lower_exit_with_code(exit_code: ExitCode) -> String {
+        let mut m = Amd64Machine::new();
+        m.start_lowering_function(BasicBlockId(0));
+        m.start_block(BasicBlockId(0));
+
+        let mut compiler = Box::new(TestCompilerContext::default());
+        compiler.regs = vec![VReg::from_real_reg(1, RegType::Int)];
+        let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
+        m.set_compiler(ptr);
+
+        let mut instruction = crate::ssa::Instruction::new().with_opcode(Opcode::ExitWithCode);
+        instruction.v = Value(0).with_type(Type::I64);
+        instruction.u1 = exit_code.raw() as u64;
+
+        m.lower_instr(&instruction);
+        m.format()
+    }
+
     fn lower_partial_load_opcode(opcode: Opcode, typ: Type) -> String {
         let mut m = Amd64Machine::new();
         m.start_lowering_function(BasicBlockId(0));
@@ -1194,6 +1237,16 @@ mod tests {
     fn lowers_uextend_i32_to_i64_to_amd64_movzx_lq() {
         let formatted = lower_uextend_opcode();
         assert!(formatted.contains("movzx.lq %rax, %rsi"));
+    }
+
+    #[test]
+    fn lowers_exit_with_code_to_exec_ctx_store_and_ret() {
+        let formatted = lower_exit_with_code(ExitCode::UNREACHABLE);
+        assert!(formatted.contains("movl $3, %r11d"));
+        assert!(formatted.contains("mov.l %r11, (%rax)"));
+        assert!(formatted.contains("movq %rbp, %rsp"));
+        assert!(formatted.contains("popq %rbp"));
+        assert!(formatted.contains("ret"));
     }
 
     #[test]
