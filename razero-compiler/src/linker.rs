@@ -3107,6 +3107,58 @@ int main(void) {
     }
 
     #[test]
+    fn packaged_module_sidecar_rejects_corrupted_element_segment_ref_type() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            function_section: vec![0],
+            table_section: vec![Table {
+                min: 1,
+                max: Some(1),
+                ty: RefType::FUNCREF,
+            }],
+            code_section: vec![Code {
+                body: vec![0x41, 0x05, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            element_section: vec![ElementSegment {
+                offset_expr: ConstExpr::from_i32(0),
+                table_index: 0,
+                init: vec![ConstExpr::from_opcode(0xd2, &[0])],
+                ty: RefType::FUNCREF,
+                mode: ElementMode::Active,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let metadata = compile_module_metadata(&module);
+        assert_eq!(metadata.element_segments.len(), 1);
+        assert_eq!(metadata.element_segments[0].init_expressions.len(), 1);
+
+        let mut sidecar = serialize_aot_metadata(&metadata);
+        let encoded_init_expr_len = 4 + metadata.element_segments[0].init_expressions[0].len();
+        let ref_type_offset = sidecar.len() - 2 - 4 - encoded_init_expr_len;
+        sidecar[ref_type_offset] = 0xff;
+
+        let encoded = serialize_native_package_metadata_bundle(&NativePackageMetadataBundle {
+            modules: vec![NativePackageMetadataEntry {
+                module_name: "guest".to_string(),
+                metadata_sidecar_bytes: sidecar,
+            }],
+            host_imports: Vec::new(),
+        });
+
+        let decoded = deserialize_native_package_metadata_bundle(&encoded).unwrap();
+        let err = crate::aot::deserialize_aot_metadata(&decoded.modules[0].metadata_sidecar_bytes)
+            .unwrap_err();
+        assert_eq!(err.to_string(), "aot metadata: invalid element ref type");
+    }
+
+    #[test]
     fn packaged_module_sidecar_rejects_corrupted_table_max_flag() {
         let module = Module {
             type_section: vec![function_type(&[], &[ValueType::I32])],

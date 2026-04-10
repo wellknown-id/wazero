@@ -1405,7 +1405,15 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
                             let offset_expression =
                                 read_bytes(&mut cursor, "element offset expression")?;
                             let table_index = read_u32(&mut cursor)?;
-                            let ty = RefType(read_u8(&mut cursor)?);
+                            let ty = match read_u8(&mut cursor)? {
+                                0x70 => RefType::FUNCREF,
+                                0x6f => RefType::EXTERNREF,
+                                _ => {
+                                    return Err(AotMetadataError::InvalidHeader(
+                                        "aot metadata: invalid element ref type".to_string(),
+                                    ));
+                                }
+                            };
                             let mode = match read_u8(&mut cursor)? {
                                 0 => ElementMode::Active,
                                 1 => ElementMode::Passive,
