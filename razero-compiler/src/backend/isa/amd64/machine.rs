@@ -799,6 +799,18 @@ impl BackendMachine for Amd64Machine {
                     .instructions
                     .push(Amd64Instr::xmm_unary_rm_r(op, Operand::reg(rhs), dst));
             }
+            Opcode::Sqrt => {
+                let dst = self.compiler().v_reg_of(instruction.return_());
+                let src = self.compiler().v_reg_of(instruction.v);
+                let op = match instruction.typ {
+                    Type::F32 => SseOpcode::Sqrtss,
+                    Type::F64 => SseOpcode::Sqrtsd,
+                    _ => panic!("unsupported amd64 sqrt type: {:?}", instruction.typ),
+                };
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::xmm_unary_rm_r(op, Operand::reg(src), dst));
+            }
             Opcode::Icmp => {
                 let dst = self.compiler().v_reg_of(instruction.return_());
                 let cond = Self::integer_cmp_cond_from_u8(instruction.u1 as u8);
@@ -1607,6 +1619,28 @@ mod tests {
         m.format()
     }
 
+    fn lower_sqrt_opcode(ty: Type) -> String {
+        let mut m = Amd64Machine::new();
+        m.start_lowering_function(BasicBlockId(0));
+        m.start_block(BasicBlockId(0));
+
+        let mut compiler = Box::new(TestCompilerContext::default());
+        compiler.regs = vec![
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::XMM0, RegType::Float),
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::XMM2, RegType::Float),
+        ];
+        let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
+        m.set_compiler(ptr);
+
+        let mut instruction = crate::ssa::Instruction::new().with_opcode(Opcode::Sqrt);
+        instruction.v = Value(0).with_type(ty);
+        instruction.r_value = Value(1).with_type(ty);
+        instruction.typ = ty;
+
+        m.lower_instr(&instruction);
+        m.format()
+    }
+
     fn lower_fcmp_opcode(ty: Type, cond: FloatCmpCond) -> String {
         let mut m = Amd64Machine::new();
         m.start_lowering_function(BasicBlockId(0));
@@ -1816,6 +1850,18 @@ mod tests {
         let formatted = lower_float_binary_opcode(Opcode::Fdiv, Type::F64);
         assert!(formatted.contains("movsd %xmm0, %xmm2"));
         assert!(formatted.contains("divsd %xmm1, %xmm2"));
+    }
+
+    #[test]
+    fn lowers_f32_sqrt_with_sse_sequence() {
+        let formatted = lower_sqrt_opcode(Type::F32);
+        assert!(formatted.contains("sqrtss %xmm0, %xmm2"));
+    }
+
+    #[test]
+    fn lowers_f64_sqrt_with_sse_sequence() {
+        let formatted = lower_sqrt_opcode(Type::F64);
+        assert!(formatted.contains("sqrtsd %xmm0, %xmm2"));
     }
 
     #[test]

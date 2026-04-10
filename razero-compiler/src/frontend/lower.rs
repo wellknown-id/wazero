@@ -189,6 +189,7 @@ impl<'a> Compiler<'a> {
             OPCODE_F32_SUB | OPCODE_F64_SUB => self.lower_binary_generic(Opcode::Fsub),
             OPCODE_F32_MUL | OPCODE_F64_MUL => self.lower_binary_generic(Opcode::Fmul),
             OPCODE_F32_DIV | OPCODE_F64_DIV => self.lower_binary_generic(Opcode::Fdiv),
+            OPCODE_F32_SQRT | OPCODE_F64_SQRT => self.lower_unary_generic(Opcode::Sqrt),
             OPCODE_I32_AND | OPCODE_I64_AND => self.lower_binary_generic(Opcode::Band),
             OPCODE_I32_OR | OPCODE_I64_OR => self.lower_binary_generic(Opcode::Bor),
             OPCODE_I32_XOR | OPCODE_I64_XOR => self.lower_binary_generic(Opcode::Bxor),
@@ -1533,6 +1534,50 @@ mod tests {
         assert_eq!(
             compiler.format(),
             "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i64, v3:i64)\n\tv4:i64 = Urem v2, v3, exec_ctx\n\tJump blk_ret, v4\n"
+        );
+    }
+
+    #[test]
+    fn lowers_f32_sqrt_to_ssa() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::F32], &[ValueType::F32])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_F32_SQRT, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:f32)\n\tv3:f32 = Sqrt v2\n\tJump blk_ret, v3\n"
+        );
+    }
+
+    #[test]
+    fn lowers_f64_sqrt_to_ssa() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::F64], &[ValueType::F64])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_F64_SQRT, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:f64)\n\tv3:f64 = Sqrt v2\n\tJump blk_ret, v3\n"
         );
     }
 

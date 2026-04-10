@@ -17,6 +17,8 @@ pub enum SseOpcode {
     Divsd,
     Ucomiss,
     Ucomisd,
+    Sqrtss,
+    Sqrtsd,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,6 +110,18 @@ impl SseOpcode {
                 store_opcode: 0x0F2E,
                 opcode_len: 2,
             },
+            Self::Sqrtss => SseEncoding {
+                prefix: Some(0xF3),
+                load_opcode: 0x0F51,
+                store_opcode: 0x0F51,
+                opcode_len: 2,
+            },
+            Self::Sqrtsd => SseEncoding {
+                prefix: Some(0xF2),
+                load_opcode: 0x0F51,
+                store_opcode: 0x0F51,
+                opcode_len: 2,
+            },
         }
     }
 
@@ -125,7 +139,9 @@ impl SseOpcode {
             9 => Self::Divss,
             10 => Self::Divsd,
             11 => Self::Ucomiss,
-            _ => Self::Ucomisd,
+            12 => Self::Ucomisd,
+            13 => Self::Sqrtss,
+            _ => Self::Sqrtsd,
         }
     }
 
@@ -150,6 +166,8 @@ impl fmt::Display for SseOpcode {
             Self::Divsd => "divsd",
             Self::Ucomiss => "ucomiss",
             Self::Ucomisd => "ucomisd",
+            Self::Sqrtss => "sqrtss",
+            Self::Sqrtsd => "sqrtsd",
         })
     }
 }
@@ -163,13 +181,16 @@ mod tests {
         let movsd = SseOpcode::Movsd.encoding();
         let addss = SseOpcode::Addss.encoding();
         let ucomisd = SseOpcode::Ucomisd.encoding();
+        let sqrtsd = SseOpcode::Sqrtsd.encoding();
         assert_eq!(movsd.prefix, Some(0xF2));
         assert_eq!(movsd.load_opcode, 0x0F10);
         assert_eq!(addss.prefix, Some(0xF3));
         assert_eq!(addss.load_opcode, 0x0F58);
         assert_eq!(ucomisd.load_opcode, 0x0F2E);
+        assert_eq!(sqrtsd.load_opcode, 0x0F51);
         assert_eq!(SseOpcode::Movdqu.to_string(), "movdqu");
         assert_eq!(SseOpcode::Divsd.to_string(), "divsd");
         assert_eq!(SseOpcode::Ucomiss.to_string(), "ucomiss");
+        assert_eq!(SseOpcode::Sqrtss.to_string(), "sqrtss");
     }
 }
