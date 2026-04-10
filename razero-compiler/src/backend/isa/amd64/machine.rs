@@ -980,6 +980,105 @@ impl BackendMachine for Amd64Machine {
                     self.start_synthetic_block(done_block);
                 }
             }
+            Opcode::FcvtToSint => {
+                let dst = self.compiler().v_reg_of(instruction.return_());
+                let src = self.compiler().v_reg_of(instruction.v);
+                let exec_ctx = self.compiler().v_reg_of(instruction.v3);
+                let (cmp_op, trunc_op, min_int_bits, move_op, src_64, above_threshold) =
+                    match (instruction.v.ty(), instruction.typ) {
+                        (Type::F32, Type::I32) => (
+                            SseOpcode::Ucomiss,
+                            SseOpcode::Cvttss2si,
+                            0xCF00_0000,
+                            SseOpcode::Movd,
+                            false,
+                            Cond::NB,
+                        ),
+                        (Type::F64, Type::I32) => (
+                            SseOpcode::Ucomisd,
+                            SseOpcode::Cvttsd2si,
+                            0xC1E0_0000_0020_0000,
+                            SseOpcode::Movq,
+                            true,
+                            Cond::NBE,
+                        ),
+                        _ => panic!(
+                            "unsupported amd64 float-to-signed-int conversion: {:?} -> {:?}",
+                            instruction.v.ty(),
+                            instruction.typ
+                        ),
+                    };
+
+                let done_block = self.next_synthetic_block_id();
+                let not_nan_block = done_block + 1;
+                let check_positive_block = not_nan_block + 1;
+
+                let tmp_gp = self.compiler_mut().allocate_vreg(Type::I64);
+                let tmp_xmm = self.compiler_mut().allocate_vreg(instruction.v.ty());
+
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::xmm_to_gpr(trunc_op, src, dst, false));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::cmp_rmi_r(Operand::imm32(1), dst, true, false));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::jmp_if(Cond::NO, Operand::label(Label(done_block))));
+                self.link_branch_edge(BasicBlockId(done_block));
+
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::xmm_cmp_rm_r(cmp_op, Operand::reg(src), src));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::jmp_if(Cond::NP, Operand::label(Label(not_nan_block))));
+                self.link_branch_edge(BasicBlockId(not_nan_block));
+                self.emit_exit_with_code(exec_ctx, ExitCode::INVALID_CONVERSION_TO_INTEGER);
+
+                self.start_synthetic_block(not_nan_block);
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::imm(tmp_gp, min_int_bits, src_64));
+                self.current_block_mut().instructions.push(Amd64Instr::gpr_to_xmm(
+                    move_op,
+                    Operand::reg(tmp_gp),
+                    tmp_xmm,
+                    src_64,
+                ));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::xmm_cmp_rm_r(cmp_op, Operand::reg(tmp_xmm), src));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::jmp_if(
+                        above_threshold,
+                        Operand::label(Label(check_positive_block)),
+                    ));
+                self.link_branch_edge(BasicBlockId(check_positive_block));
+                self.emit_exit_with_code(exec_ctx, ExitCode::INTEGER_OVERFLOW);
+
+                self.start_synthetic_block(check_positive_block);
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::imm(tmp_gp, 0, false));
+                self.current_block_mut().instructions.push(Amd64Instr::gpr_to_xmm(
+                    move_op,
+                    Operand::reg(tmp_gp),
+                    tmp_xmm,
+                    src_64,
+                ));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::xmm_cmp_rm_r(cmp_op, Operand::reg(src), tmp_xmm));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::jmp_if(Cond::NB, Operand::label(Label(done_block))));
+                self.link_branch_edge(BasicBlockId(done_block));
+                self.emit_exit_with_code(exec_ctx, ExitCode::INTEGER_OVERFLOW);
+
+                self.start_synthetic_block(done_block);
+            }
             Opcode::Ceil | Opcode::Floor | Opcode::Trunc | Opcode::Nearest => {
                 let dst = self.compiler().v_reg_of(instruction.return_());
                 let src = self.compiler().v_reg_of(instruction.v);
@@ -2075,6 +2174,30 @@ mod tests {
         m.format()
     }
 
+    fn lower_fcvt_to_sint_opcode(src_ty: Type, dst_ty: Type) -> String {
+        let mut m = Amd64Machine::new();
+        m.start_lowering_function(BasicBlockId(0));
+        m.start_block(BasicBlockId(0));
+
+        let mut compiler = Box::new(TestCompilerContext::default());
+        compiler.regs = vec![
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::XMM0, RegType::Float),
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::RAX, RegType::Int),
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::RBX, RegType::Int),
+        ];
+        let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
+        m.set_compiler(ptr);
+
+        let mut instruction = crate::ssa::Instruction::new().with_opcode(Opcode::FcvtToSint);
+        instruction.v = Value(0).with_type(src_ty);
+        instruction.r_value = Value(1).with_type(dst_ty);
+        instruction.v3 = Value(2).with_type(Type::I64);
+        instruction.typ = dst_ty;
+
+        m.lower_instr(&instruction);
+        m.format()
+    }
+
     fn lower_round_opcode(opcode: Opcode, ty: Type) -> String {
         let mut m = Amd64Machine::new();
         m.start_lowering_function(BasicBlockId(0));
@@ -2378,6 +2501,29 @@ mod tests {
     fn lowers_i64_to_f64_with_cvtsi2sd_sequence() {
         let formatted = lower_fcvt_from_sint_opcode(Type::I64, Type::F64);
         assert!(formatted.contains("cvtsi2sd %rax, %xmm2"));
+    }
+
+    #[test]
+    fn lowers_f32_to_i32_with_cvttss2si_and_trap_guards() {
+        let formatted = lower_fcvt_to_sint_opcode(Type::F32, Type::I32);
+        assert!(formatted.contains("cvttss2si %xmm0, %eax"));
+        assert!(formatted.contains("cmpl $1, %eax"));
+        assert!(formatted.contains("jno L"));
+        assert!(formatted.contains("ucomiss %xmm0, %xmm0"));
+        assert!(formatted.contains("jnp L"));
+        assert!(formatted.contains("movd "));
+        assert!(formatted.contains("movl $12, %r11d"));
+        assert!(formatted.contains("movl $11, %r11d"));
+    }
+
+    #[test]
+    fn lowers_f64_to_i32_with_cvttsd2si_and_threshold_guard() {
+        let formatted = lower_fcvt_to_sint_opcode(Type::F64, Type::I32);
+        assert!(formatted.contains("cvttsd2si %xmm0, %eax"));
+        assert!(formatted.contains("ucomisd %xmm0, %xmm0"));
+        assert!(formatted.contains("jnbe L"));
+        assert!(formatted.contains("movq "));
+        assert!(formatted.contains("movabsq $"));
     }
 
     #[test]

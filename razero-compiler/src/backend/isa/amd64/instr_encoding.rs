@@ -334,7 +334,14 @@ fn encode_xmm_to_gpr(
 ) -> Result<(), BackendError> {
     let op = sse_opcode_from_u64(d.u1);
     let enc = op.encoding();
-    encode_reg_reg(buf, enc.store_opcode, op1_reg_from_op1(d)?, op2_reg(d)?, d.b1, enc.prefix);
+    match op {
+        super::SseOpcode::Cvttss2si | super::SseOpcode::Cvttsd2si => {
+            encode_reg_reg(buf, enc.store_opcode, op2_reg(d)?, op1_reg_from_op1(d)?, d.b1, enc.prefix);
+        }
+        _ => {
+            encode_reg_reg(buf, enc.store_opcode, op1_reg_from_op1(d)?, op2_reg(d)?, d.b1, enc.prefix);
+        }
+    }
     Ok(())
 }
 

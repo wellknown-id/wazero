@@ -35,6 +35,8 @@ pub enum SseOpcode {
     Cvtsd2ss,
     Cvtsi2ss,
     Cvtsi2sd,
+    Cvttss2si,
+    Cvttsd2si,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -234,6 +236,18 @@ impl SseOpcode {
                 store_opcode: 0x0F2A,
                 opcode_len: 2,
             },
+            Self::Cvttss2si => SseEncoding {
+                prefix: Some(0xF3),
+                load_opcode: 0x0F2C,
+                store_opcode: 0x0F2C,
+                opcode_len: 2,
+            },
+            Self::Cvttsd2si => SseEncoding {
+                prefix: Some(0xF2),
+                load_opcode: 0x0F2C,
+                store_opcode: 0x0F2C,
+                opcode_len: 2,
+            },
         }
     }
 
@@ -269,7 +283,9 @@ impl SseOpcode {
             27 => Self::Cvtss2sd,
             28 => Self::Cvtsd2ss,
             29 => Self::Cvtsi2ss,
-            _ => Self::Cvtsi2sd,
+            30 => Self::Cvtsi2sd,
+            31 => Self::Cvttss2si,
+            _ => Self::Cvttsd2si,
         }
     }
 
@@ -312,6 +328,8 @@ impl fmt::Display for SseOpcode {
             Self::Cvtsd2ss => "cvtsd2ss",
             Self::Cvtsi2ss => "cvtsi2ss",
             Self::Cvtsi2sd => "cvtsi2sd",
+            Self::Cvttss2si => "cvttss2si",
+            Self::Cvttsd2si => "cvttsd2si",
         })
     }
 }
@@ -332,6 +350,7 @@ mod tests {
         let minpd = SseOpcode::Minpd.encoding();
         let cvtss2sd = SseOpcode::Cvtss2sd.encoding();
         let cvtsi2sd = SseOpcode::Cvtsi2sd.encoding();
+        let cvttsd2si = SseOpcode::Cvttsd2si.encoding();
         assert_eq!(movsd.prefix, Some(0xF2));
         assert_eq!(movsd.load_opcode, 0x0F10);
         assert_eq!(movd.load_opcode, 0x0F6E);
@@ -345,6 +364,7 @@ mod tests {
         assert_eq!(minpd.load_opcode, 0x0F5D);
         assert_eq!(cvtss2sd.load_opcode, 0x0F5A);
         assert_eq!(cvtsi2sd.load_opcode, 0x0F2A);
+        assert_eq!(cvttsd2si.load_opcode, 0x0F2C);
         assert_eq!(SseOpcode::Movdqu.to_string(), "movdqu");
         assert_eq!(SseOpcode::Movd.to_string(), "movd");
         assert_eq!(SseOpcode::Movq.to_string(), "movq");
@@ -355,5 +375,6 @@ mod tests {
         assert_eq!(SseOpcode::Maxps.to_string(), "maxps");
         assert_eq!(SseOpcode::Cvtsd2ss.to_string(), "cvtsd2ss");
         assert_eq!(SseOpcode::Cvtsi2ss.to_string(), "cvtsi2ss");
+        assert_eq!(SseOpcode::Cvttss2si.to_string(), "cvttss2si");
     }
 }

@@ -193,6 +193,8 @@ impl<'a> Compiler<'a> {
             OPCODE_F32_MAX | OPCODE_F64_MAX => self.lower_binary_generic(Opcode::Fmax),
             OPCODE_F32_SQRT | OPCODE_F64_SQRT => self.lower_unary_generic(Opcode::Sqrt),
             OPCODE_I32_WRAP_I64 => self.lower_typed_unary(Opcode::Ireduce, Type::I32),
+            OPCODE_I32_TRUNC_F32_S => self.lower_typed_unary(Opcode::FcvtToSint, Type::I32),
+            OPCODE_I32_TRUNC_F64_S => self.lower_typed_unary(Opcode::FcvtToSint, Type::I32),
             OPCODE_I64_EXTEND_I32_S => self.lower_typed_unary(Opcode::SExtend, Type::I64),
             OPCODE_I64_EXTEND_I32_U => self.lower_typed_unary(Opcode::UExtend, Type::I64),
             OPCODE_I32_REINTERPRET_F32 => self.lower_typed_unary(Opcode::Bitcast, Type::I32),
@@ -1001,6 +1003,15 @@ impl<'a> Compiler<'a> {
     fn emit_unary(&mut self, opcode: Opcode, x: Value, result_ty: Type) -> Value {
         let mut instr = self.ssa_builder.allocate_instruction().with_opcode(opcode);
         instr.v = x;
+        if matches!(
+            opcode,
+            Opcode::FcvtToSint
+                | Opcode::FcvtToUint
+                | Opcode::FcvtToSintSat
+                | Opcode::FcvtToUintSat
+        ) {
+            instr.v3 = self.exec_ctx_ptr_value;
+        }
         instr.typ = result_ty;
         let id = self.ssa_builder.insert_instruction(instr);
         self.ssa_builder.instruction(id).return_()
@@ -1807,6 +1818,50 @@ mod tests {
         assert_eq!(
             compiler.format(),
             "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i64)\n\tv3:i32 = Ireduce v2\n\tJump blk_ret, v3\n"
+        );
+    }
+
+    #[test]
+    fn lowers_i32_trunc_f32_s_to_ssa() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::F32], &[ValueType::I32])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_I32_TRUNC_F32_S, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:f32)\n\tv3:i32 = FcvtToSint v2, exec_ctx\n\tJump blk_ret, v3\n"
+        );
+    }
+
+    #[test]
+    fn lowers_i32_trunc_f64_s_to_ssa() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::F64], &[ValueType::I32])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_I32_TRUNC_F64_S, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:f64)\n\tv3:i32 = FcvtToSint v2, exec_ctx\n\tJump blk_ret, v3\n"
         );
     }
 
