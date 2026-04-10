@@ -460,6 +460,7 @@ mod tests {
         assert_eq!(pages_to_unit_of_bytes(u32::MAX), "3 Ti");
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn guarded_constructor_uses_guarded_backing() {
         let memory = Memory {
@@ -473,5 +474,30 @@ mod tests {
         assert!(matches!(guarded.bytes, super::MemoryBytes::Guarded { .. }));
         assert_eq!(MEMORY_PAGE_SIZE as usize, guarded.len());
         assert_eq!(2, guarded.cap);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn guarded_memory_grow_preserves_backing_and_zero_fills_new_pages() {
+        let memory = Memory {
+            min: 1,
+            cap: 3,
+            max: 3,
+            is_max_encoded: true,
+            is_shared: false,
+        };
+        let mut guarded = MemoryInstance::new_guarded(&memory).expect("guarded allocation");
+        let reserved_len = guarded.bytes.reserved_len();
+
+        assert!(matches!(guarded.bytes, super::MemoryBytes::Guarded { .. }));
+        assert!(guarded.write_u32_le(MEMORY_PAGE_SIZE - 4, 0x1122_3344));
+        assert_eq!(Some(0x1122_3344), guarded.read_u32_le(MEMORY_PAGE_SIZE - 4));
+        assert_eq!(Some(1), guarded.grow(1));
+        assert!(matches!(guarded.bytes, super::MemoryBytes::Guarded { .. }));
+        assert_eq!(reserved_len, guarded.bytes.reserved_len());
+        assert_eq!(2, guarded.pages());
+        assert_eq!(Some(0), guarded.read_byte(MEMORY_PAGE_SIZE));
+        assert!(guarded.write_u32_le(MEMORY_PAGE_SIZE, 0x5566_7788));
+        assert_eq!(Some(0x5566_7788), guarded.read_u32_le(MEMORY_PAGE_SIZE));
     }
 }

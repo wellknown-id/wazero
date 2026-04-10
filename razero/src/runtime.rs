@@ -2380,6 +2380,54 @@ mod tests {
     }
 
     #[test]
+    fn secure_mode_memory_growth_preserves_expected_backing() {
+        let runtime = Runtime::with_config(RuntimeConfig::new().with_secure_mode(true));
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x05, 0x04, 0x01, 0x01, 0x01, 0x03,
+            0x07, 0x0a, 0x01, 0x06, b'm', b'e', b'm', b'o', b'r', b'y', 0x02, 0x00,
+        ];
+        let compiled = runtime.compile(&bytes).unwrap();
+        let instance = runtime.instantiate(&compiled, ModuleConfig::new()).unwrap();
+        let module_id = instance.store_module_id().expect("guest module id");
+        let memory = instance.exported_memory("memory").expect("exported memory");
+        let reserved_len_before = {
+            let store = runtime.inner.store.lock().expect("runtime store poisoned");
+            let guest_memory = store
+                .instance(module_id)
+                .and_then(|module| module.memory_instance.as_ref())
+                .expect("guest memory instance");
+
+            if supports_guard_pages() {
+                assert!(matches!(guest_memory.bytes, MemoryBytes::Guarded { .. }));
+            } else {
+                assert!(matches!(guest_memory.bytes, MemoryBytes::Plain(..)));
+            }
+
+            guest_memory.bytes.reserved_len()
+        };
+
+        assert_eq!(65_536, memory.size());
+        assert!(memory.write_u32_le(8, 0x1122_3344));
+        assert_eq!(Some(0x1122_3344), memory.read_u32_le(8));
+        assert_eq!(Some(1), memory.grow(1));
+        assert_eq!(131_072, memory.size());
+        assert!(memory.write_u32_le(65_536, 0x5566_7788));
+        assert_eq!(Some(0x5566_7788), memory.read_u32_le(65_536));
+
+        let store = runtime.inner.store.lock().expect("runtime store poisoned");
+        let guest_memory = store
+            .instance(module_id)
+            .and_then(|module| module.memory_instance.as_ref())
+            .expect("guest memory instance");
+        if supports_guard_pages() {
+            assert!(matches!(guest_memory.bytes, MemoryBytes::Guarded { .. }));
+            assert_eq!(reserved_len_before, guest_memory.bytes.reserved_len());
+        } else {
+            assert!(matches!(guest_memory.bytes, MemoryBytes::Plain(..)));
+        }
+    }
+
+    #[test]
     fn runtime_defaults_to_interpreter_until_auto_is_safe() {
         let runtime = Runtime::new();
         let compiled = runtime
