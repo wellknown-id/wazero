@@ -11,9 +11,10 @@ use std::{
 use razero::{
     add_fuel, get_fuel_controller, get_import_resolver, get_snapshotter, get_yielder,
     remaining_fuel, with_fuel_controller, with_function_listener_factory, with_import_resolver,
-    with_snapshotter, with_yielder, Context, FunctionDefinition, FunctionListener,
+    with_snapshotter, with_yield_policy, with_yielder, trap_cause_of, Context,
+    FunctionDefinition, FunctionListener,
     FunctionListenerFactory, Module, ModuleConfig, Runtime, RuntimeConfig, RuntimeError, Snapshot,
-    ValueType, YieldError, ERR_YIELDED,
+    TrapCause, ValueType, YieldError, ERR_YIELDED,
 };
 
 const YIELD_WASM: &[u8] = include_bytes!("../../experimental/testdata/yield.wasm");
@@ -46,7 +47,11 @@ impl razero::FuelController for TrackingFuelController {
 }
 
 fn setup_yield_runtime() -> (Runtime, Module) {
-    let runtime = Runtime::new();
+    setup_yield_runtime_with_config(RuntimeConfig::new())
+}
+
+fn setup_yield_runtime_with_config(config: RuntimeConfig) -> (Runtime, Module) {
+    let runtime = Runtime::with_config(config);
     runtime
         .new_host_module_builder("example")
         .new_function_builder()
@@ -69,6 +74,14 @@ fn setup_yield_runtime() -> (Runtime, Module) {
         .instantiate_binary(YIELD_WASM, ModuleConfig::new())
         .unwrap();
     (runtime, guest)
+}
+
+fn deny_all_yields(_ctx: &Context, _request: &razero::YieldPolicyRequest) -> bool {
+    false
+}
+
+fn allow_all_yields(_ctx: &Context, _request: &razero::YieldPolicyRequest) -> bool {
+    true
 }
 
 fn yielded(err: RuntimeError) -> YieldError {
@@ -256,6 +269,63 @@ fn yield_reyield_uses_fresh_resumer() {
             .resume(&with_yielder(&Context::default()), &[2])
             .unwrap()
     );
+}
+
+#[test]
+fn yield_policy_denies_guest_suspension_via_public_runtime() {
+    let (_runtime, guest) =
+        setup_yield_runtime_with_config(RuntimeConfig::new().with_yield_policy(deny_all_yields));
+
+    let err = guest
+        .exported_function("run")
+        .unwrap()
+        .call_with_context(&with_yielder(&Context::default()), &[])
+        .unwrap_err();
+
+    assert_eq!("policy denied: cooperative yield", err.to_string());
+    assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+}
+
+#[test]
+fn yield_policy_denies_follow_on_suspension_via_public_resume_path() {
+    let (_runtime, guest) = setup_yield_runtime();
+
+    let err = guest
+        .exported_function("run_twice")
+        .unwrap()
+        .call_with_context(&with_yielder(&Context::default()), &[])
+        .unwrap_err();
+    let resumer = yielded(err).resumer().expect("resumer should be present");
+
+    let err = resumer
+        .resume(
+            &with_yield_policy(&with_yielder(&Context::default()), deny_all_yields),
+            &[40],
+        )
+        .unwrap_err();
+
+    assert_eq!("policy denied: cooperative yield", err.to_string());
+    assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+}
+
+#[test]
+fn yield_policy_context_overrides_runtime_default_via_public_runtime() {
+    let (_runtime, guest) =
+        setup_yield_runtime_with_config(RuntimeConfig::new().with_yield_policy(deny_all_yields));
+
+    let err = guest
+        .exported_function("run")
+        .unwrap()
+        .call_with_context(
+            &with_yield_policy(&with_yielder(&Context::default()), allow_all_yields),
+            &[],
+        )
+        .unwrap_err();
+    let yield_error = yielded(err);
+    yield_error
+        .resumer()
+        .expect("resumer should be present")
+        .cancel();
 }
 
 #[test]
