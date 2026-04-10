@@ -3107,6 +3107,62 @@ int main(void) {
     }
 
     #[test]
+    fn packaged_module_sidecar_rejects_corrupted_table_max_flag() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            function_section: vec![0],
+            table_section: vec![Table {
+                min: 1,
+                max: Some(1),
+                ty: RefType::FUNCREF,
+            }],
+            code_section: vec![Code {
+                body: vec![0x41, 0x05, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let metadata = compile_module_metadata(&module);
+        assert_eq!(metadata.tables.len(), 1);
+
+        let mut sidecar = serialize_aot_metadata(&metadata);
+        let mut table_pattern = Vec::new();
+        table_pattern.extend_from_slice(&(metadata.tables.len() as u32).to_le_bytes());
+        table_pattern.extend_from_slice(&metadata.tables[0].min.to_le_bytes());
+        table_pattern.push(1);
+        table_pattern.extend_from_slice(&metadata.tables[0].max.unwrap().to_le_bytes());
+        table_pattern.push(metadata.tables[0].ty.0);
+
+        let matches = sidecar
+            .windows(table_pattern.len())
+            .enumerate()
+            .filter_map(|(offset, window)| (window == table_pattern.as_slice()).then_some(offset))
+            .collect::<Vec<_>>();
+        assert_eq!(1, matches.len());
+        let max_flag_offset = matches[0] + 4 + 4;
+        sidecar[max_flag_offset] = 0xff;
+
+        let encoded = serialize_native_package_metadata_bundle(&NativePackageMetadataBundle {
+            modules: vec![NativePackageMetadataEntry {
+                module_name: "guest".to_string(),
+                metadata_sidecar_bytes: sidecar,
+            }],
+            host_imports: Vec::new(),
+        });
+
+        let decoded = deserialize_native_package_metadata_bundle(&encoded).unwrap();
+        let err = crate::aot::deserialize_aot_metadata(&decoded.modules[0].metadata_sidecar_bytes)
+            .unwrap_err();
+        assert_eq!(err.to_string(), "aot metadata: invalid table max flag");
+    }
+
+    #[test]
     fn package_metadata_bundle_round_trips_with_memory_config_variants() {
         let modules = [
             (
