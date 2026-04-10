@@ -2959,6 +2959,102 @@ int main(void) {
     }
 
     #[test]
+    fn package_metadata_bundle_round_trips_with_multiple_element_segments_mixed_modes() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            function_section: vec![0, 0],
+            table_section: vec![
+                Table {
+                    min: 1,
+                    max: Some(1),
+                    ty: RefType::FUNCREF,
+                },
+                Table {
+                    min: 2,
+                    max: Some(2),
+                    ty: RefType::FUNCREF,
+                },
+            ],
+            code_section: vec![
+                Code {
+                    body: vec![0x41, 0x05, 0x0b],
+                    ..Code::default()
+                },
+                Code {
+                    body: vec![0x41, 0x07, 0x0b],
+                    ..Code::default()
+                },
+            ],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            element_section: vec![
+                ElementSegment {
+                    offset_expr: ConstExpr::from_i32(0),
+                    table_index: 0,
+                    init: vec![ConstExpr::from_opcode(0xd2, &[0])],
+                    ty: RefType::FUNCREF,
+                    mode: ElementMode::Active,
+                },
+                ElementSegment {
+                    offset_expr: ConstExpr::from_i32(0),
+                    table_index: 1,
+                    init: vec![
+                        ConstExpr::from_opcode(0xd2, &[0]),
+                        ConstExpr::from_opcode(0xd2, &[1]),
+                    ],
+                    ty: RefType::FUNCREF,
+                    mode: ElementMode::Passive,
+                },
+                ElementSegment {
+                    offset_expr: ConstExpr::from_i32(0),
+                    table_index: 0,
+                    init: vec![ConstExpr::from_opcode(0xd2, &[1])],
+                    ty: RefType::FUNCREF,
+                    mode: ElementMode::Declarative,
+                },
+            ],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let metadata = compile_module_metadata(&module);
+        let sidecar = serialize_aot_metadata(&metadata);
+        let bundle = NativePackageMetadataBundle {
+            modules: vec![NativePackageMetadataEntry {
+                module_name: "guest".to_string(),
+                metadata_sidecar_bytes: sidecar,
+            }],
+            host_imports: Vec::new(),
+        };
+
+        let encoded = serialize_native_package_metadata_bundle(&bundle);
+        let decoded = deserialize_native_package_metadata_bundle(&encoded).unwrap();
+        assert_eq!(decoded, bundle);
+        let decoded_metadata =
+            crate::aot::deserialize_aot_metadata(&decoded.modules[0].metadata_sidecar_bytes)
+                .unwrap();
+        assert_eq!(decoded_metadata, metadata);
+        assert_eq!(
+            decoded_metadata
+                .element_segments
+                .iter()
+                .map(|segment| (
+                    segment.table_index,
+                    segment.mode,
+                    segment.init_expressions.len()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, ElementMode::Active, 1),
+                (1, ElementMode::Passive, 2),
+                (0, ElementMode::Declarative, 1),
+            ]
+        );
+    }
+
+    #[test]
     fn package_metadata_bundle_rejects_invalid_magic_number() {
         let bundle = sample_package_metadata_bundle();
         let mut encoded = serialize_native_package_metadata_bundle(&bundle);
