@@ -129,7 +129,11 @@ impl std::error::Error for SecMemError {}
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_os = "linux"))]
+    use super::SecMemError;
     use super::{GuardPageAllocator, GuardedAllocation};
+    #[cfg(not(target_os = "linux"))]
+    use razero_platform::GuardPageError;
 
     #[test]
     fn allocation_is_zeroed() {
@@ -158,5 +162,18 @@ mod tests {
             .expect("allocation should succeed");
         assert!(allocation.is_empty());
         assert!(allocation.as_slice().is_empty());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn allocation_reports_unsupported_on_unsupported_targets() {
+        let err = GuardPageAllocator
+            .allocate_zeroed(64)
+            .expect_err("unsupported targets should reject guard-page allocation");
+
+        assert!(matches!(
+            err,
+            SecMemError::Platform(GuardPageError::Unsupported(_))
+        ));
     }
 }

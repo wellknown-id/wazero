@@ -20,7 +20,7 @@ use razero_interp::{
     interpreter::{active_host_call_stack, Module as InterpRuntimeModule},
     signature::Signature as InterpSignature,
 };
-use razero_platform::compiler_supported;
+use razero_platform::{compiler_supported, supports_guard_pages};
 use razero_secmem::GuardPageAllocator;
 use razero_wasm::{
     engine::{
@@ -984,7 +984,7 @@ fn instantiate_memory(
     let allocator: Arc<dyn MemoryAllocator> = if let Some(allocator) = ctx.memory_allocator.clone()
     {
         allocator
-    } else if config.secure_mode() {
+    } else if config.secure_mode() && supports_guard_pages() {
         Arc::new(GuardPageMemoryAllocator)
     } else {
         Arc::new(DefaultMemoryAllocator)
@@ -1009,10 +1009,15 @@ impl MemoryAllocator for GuardPageMemoryAllocator {
         cap: usize,
         max: usize,
     ) -> Option<crate::experimental::memory::LinearMemory> {
-        let allocation = GuardPageAllocator.allocate_zeroed(max).ok()?;
-        Some(crate::experimental::memory::LinearMemory::from_guarded(
-            allocation, cap, max,
-        ))
+        match GuardPageAllocator.allocate_zeroed(max) {
+            Ok(allocation) => Some(crate::experimental::memory::LinearMemory::from_guarded(
+                allocation, cap, max,
+            )),
+            Err(razero_secmem::SecMemError::Platform(
+                razero_platform::GuardPageError::Unsupported(_),
+            )) => DefaultMemoryAllocator.allocate(cap, max),
+            Err(_) => None,
+        }
     }
 }
 
@@ -1793,7 +1798,7 @@ pub(crate) fn to_wasm_value_type(value_type: ValueType) -> WasmValueType {
 mod tests {
     use razero_compiler::module_engine::CompilerModuleEngine;
     use razero_interp::engine::InterpModuleEngine;
-    use razero_platform::compiler_supported;
+    use razero_platform::{compiler_supported, supports_guard_pages};
     use razero_wasm::engine::Engine as _;
     use std::sync::{
         atomic::{AtomicI64, AtomicU32, Ordering},
@@ -2186,7 +2191,7 @@ mod tests {
     }
 
     #[test]
-    fn secure_mode_uses_guarded_guest_memory_and_preserves_oob_traps() {
+    fn secure_mode_uses_guarded_guest_memory_only_when_supported_and_preserves_oob_traps() {
         let module = include_bytes!("../../testdata/oob_load.wasm");
 
         for secure_mode in [false, true] {
@@ -2201,7 +2206,11 @@ mod tests {
                     .instance(module_id)
                     .and_then(|module| module.memory_instance.as_ref())
                     .expect("guest memory instance");
-                assert!(matches!(memory.bytes, MemoryBytes::Guarded { .. }));
+                if supports_guard_pages() {
+                    assert!(matches!(memory.bytes, MemoryBytes::Guarded { .. }));
+                } else {
+                    assert!(matches!(memory.bytes, MemoryBytes::Plain(..)));
+                }
             }
 
             let err = instance
@@ -2211,6 +2220,24 @@ mod tests {
                 .expect_err("out-of-bounds load should trap");
             assert!(err.to_string().contains("out of bounds memory access"));
         }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn secure_mode_falls_back_to_plain_guest_memory_when_guard_pages_are_unsupported() {
+        let runtime = Runtime::with_config(RuntimeConfig::new().with_secure_mode(true));
+        let compiled = runtime
+            .compile(include_bytes!("../../testdata/oob_load.wasm"))
+            .unwrap();
+        let instance = runtime.instantiate(&compiled, ModuleConfig::new()).unwrap();
+        let store = runtime.inner.store.lock().expect("runtime store poisoned");
+        let module_id = instance.store_module_id().expect("guest module id");
+        let memory = store
+            .instance(module_id)
+            .and_then(|module| module.memory_instance.as_ref())
+            .expect("guest memory instance");
+
+        assert!(matches!(memory.bytes, MemoryBytes::Plain(..)));
     }
 
     #[test]
