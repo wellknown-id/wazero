@@ -1637,16 +1637,27 @@ fn interp_memory_grow(
     {
         return engine.memory_grow(delta, maximum);
     }
-    let previous = {
+    let (previous, memory_snapshot) = {
         let instance = store.instance_mut(module_id)?;
         let memory = instance.memory_instance.as_mut()?;
         if let Some(maximum) = maximum {
             memory.max = memory.max.min(maximum);
         }
-        memory.grow(delta)?
+        let previous = memory.grow(delta)?;
+        let snapshot = (
+            memory.bytes.to_vec(),
+            instance
+                .memory_type
+                .as_ref()
+                .and_then(|memory_type| memory_type.is_max_encoded.then_some(memory_type.max)),
+            memory.shared,
+        );
+        (previous, snapshot)
     };
     if let Some(engine) = store.module_engine_mut(module_id) {
-        engine.memory_grown();
+        if !engine.overwrite_memory(&memory_snapshot.0, memory_snapshot.1, memory_snapshot.2) {
+            engine.memory_grown();
+        }
     }
     Some(previous)
 }
@@ -2428,6 +2439,30 @@ mod tests {
     }
 
     #[test]
+    fn secure_mode_oob_after_memory_growth_still_traps() {
+        let runtime = Runtime::with_config(RuntimeConfig::new().with_secure_mode(true));
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f,
+            0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x05, 0x04, 0x01, 0x01, 0x01, 0x02, 0x07, 0x10,
+            0x02, 0x06, b'm', b'e', b'm', b'o', b'r', b'y', 0x02, 0x00, 0x03, b'o', b'o', b'b',
+            0x00, 0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x28, 0x02, 0x00, 0x0b,
+        ];
+        let compiled = runtime.compile(&bytes).unwrap();
+        let module = runtime.instantiate(&compiled, ModuleConfig::new()).unwrap();
+        let memory = module.exported_memory("memory").unwrap();
+        let oob = module.exported_function("oob").unwrap();
+
+        assert_eq!(Some(1), memory.grow(1));
+        assert_eq!(131_072, memory.size());
+        assert_eq!(vec![0], oob.call(&[131_068]).unwrap());
+
+        let err = oob
+            .call(&[131_072])
+            .expect_err("load at new boundary should still trap");
+        assert!(err.to_string().contains("out of bounds memory access"));
+    }
+
+    #[test]
     fn runtime_defaults_to_interpreter_until_auto_is_safe() {
         let runtime = Runtime::new();
         let compiled = runtime
@@ -2628,6 +2663,73 @@ mod tests {
         assert!(!err.to_string().is_empty());
         assert_eq!(
             vec![("secure-guest".to_string(), TrapCause::MemoryFault, None,)],
+            *observations.lock().expect("trap observations poisoned")
+        );
+    }
+
+    #[test]
+    fn compiler_trap_observer_reports_memory_faults_after_memory_growth() {
+        if !compiler_supported()
+            || !cfg!(target_os = "linux")
+            || !cfg!(any(target_arch = "x86_64", target_arch = "aarch64"))
+        {
+            return;
+        }
+
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f,
+            0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x05, 0x04, 0x01, 0x01, 0x01, 0x02, 0x07, 0x10,
+            0x02, 0x06, b'm', b'e', b'm', b'o', b'r', b'y', 0x02, 0x00, 0x03, b'o', b'o', b'b',
+            0x00, 0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x28, 0x02, 0x00, 0x0b,
+        ];
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::with_config(RuntimeConfig::new_compiler().with_secure_mode(true));
+        let compiled = runtime.compile(&bytes).unwrap();
+        let module = runtime
+            .instantiate(
+                &compiled,
+                ModuleConfig::new().with_name("grown-secure-guest"),
+            )
+            .unwrap();
+        let memory = module.exported_memory("memory").unwrap();
+        let ctx = with_trap_observer(&Context::default(), {
+            let observations = observations.clone();
+            move |_ctx: &Context, observation: TrapObservation| {
+                observations
+                    .lock()
+                    .expect("trap observations poisoned")
+                    .push((
+                        observation.module.name().unwrap_or_default().to_string(),
+                        observation.cause,
+                        observation.err.exit_code(),
+                    ));
+            }
+        });
+
+        assert_eq!(Some(1), memory.grow(1));
+        assert_eq!(131_072, memory.size());
+        assert_eq!(
+            vec![0],
+            module
+                .exported_function("oob")
+                .unwrap()
+                .call_with_context(&ctx, &[131_068])
+                .unwrap()
+        );
+
+        let err = module
+            .exported_function("oob")
+            .unwrap()
+            .call_with_context(&ctx, &[131_072])
+            .expect_err("load at grown boundary should trap");
+
+        assert!(!err.to_string().is_empty());
+        assert_eq!(
+            vec![(
+                "grown-secure-guest".to_string(),
+                TrapCause::MemoryFault,
+                None,
+            )],
             *observations.lock().expect("trap observations poisoned")
         );
     }

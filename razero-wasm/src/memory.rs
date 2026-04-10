@@ -2,7 +2,7 @@
 
 use std::ops::{Deref, DerefMut};
 
-use razero_secmem::{GuardPageAllocator, GuardedAllocation, SecMemError};
+use razero_secmem::{GuardedAllocation, SecMemError};
 
 use crate::memory_definition::MemoryDefinition;
 use crate::module::Memory;
@@ -71,11 +71,16 @@ impl MemoryBytes {
         match self {
             Self::Plain(bytes) => bytes.resize(new_len, value),
             Self::Guarded { allocation, len } => {
-                let slice = allocation.as_mut_slice();
                 let old_len = *len;
-                if new_len > slice.len() {
+                if new_len > allocation.len() {
                     panic!("guarded resize beyond reserved length");
                 }
+                if new_len > allocation.committed_len() {
+                    allocation
+                        .grow(new_len)
+                        .expect("guarded grow within reserved length should succeed");
+                }
+                let slice = allocation.as_mut_slice();
                 if new_len > old_len {
                     slice[old_len..new_len].fill(value);
                 } else if new_len < old_len {
@@ -152,12 +157,10 @@ impl MemoryInstance {
 
     pub fn new_guarded(memory: &Memory) -> Result<Self, SecMemError> {
         let min_bytes = memory_pages_to_bytes_num(memory.min) as usize;
-        let cap = memory.cap.max(memory.min);
+        let cap = memory.max.max(memory.cap).max(memory.min);
         let cap_bytes = memory_pages_to_bytes_num(cap) as usize;
-        let mut bytes = GuardPageAllocator.allocate_zeroed(cap_bytes)?;
-        if cap_bytes > min_bytes {
-            bytes.as_mut_slice()[min_bytes..cap_bytes].fill(0);
-        }
+        let bytes = GuardedAllocation::with_reservation(min_bytes, cap_bytes)?;
+        debug_assert_eq!(min_bytes, bytes.committed_len());
         Ok(Self {
             bytes: MemoryBytes::guarded(bytes, min_bytes),
             min: memory.min,

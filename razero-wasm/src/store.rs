@@ -545,7 +545,7 @@ impl<E> Store<E> {
         if let Some(imported_module) = self.modules.get_mut(&imported_id) {
             imported_module.memory_instance = Some(memory.clone());
         }
-        if let Some(engine) = self.module_engines.get(&imported_id) {
+        if let Some(engine) = self.module_engines.get_mut(&imported_id) {
             let _ = engine.overwrite_memory(
                 memory.bytes.as_ref(),
                 instance

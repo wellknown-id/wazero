@@ -722,7 +722,7 @@ impl WasmModuleEngine for InterpModuleEngine {
             .map(|memory| (memory.bytes().to_vec(), memory.max_pages, memory.shared))
     }
 
-    fn overwrite_memory(&self, bytes: &[u8], maximum_pages: Option<u32>, shared: bool) -> bool {
+    fn overwrite_memory(&mut self, bytes: &[u8], maximum_pages: Option<u32>, shared: bool) -> bool {
         let mut state = lock_or_poison(&self.runtime.state);
         let Some(memory) = state.module_mut().memory.as_mut() else {
             return false;

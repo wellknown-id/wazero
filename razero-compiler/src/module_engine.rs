@@ -363,6 +363,21 @@ impl WasmModuleEngine for CompilerModuleEngine {
         })
     }
 
+    fn overwrite_memory(&mut self, bytes: &[u8], maximum_pages: Option<u32>, shared: bool) -> bool {
+        let Some(memory) = self.module.memory_instance.as_mut() else {
+            return false;
+        };
+        memory.bytes.resize(bytes.len(), 0);
+        memory.bytes[..bytes.len()].copy_from_slice(bytes);
+        memory.shared = shared;
+        memory.cap = memory.pages();
+        if let Some(maximum_pages) = maximum_pages {
+            memory.max = maximum_pages;
+        }
+        self.put_local_memory();
+        true
+    }
+
     fn lookup_function(
         &self,
         table: &TableInstance,

@@ -22,17 +22,22 @@ pub struct GuardedAllocation {
 
 impl GuardedAllocation {
     pub fn new(len: usize) -> SecMemResult<Self> {
-        if len == 0 {
+        Self::with_reservation(len, len)
+    }
+
+    pub fn with_reservation(committed_len: usize, reserved_len: usize) -> SecMemResult<Self> {
+        if committed_len == 0 && reserved_len == 0 {
             return Ok(Self {
                 memory: None,
                 len: 0,
             });
         }
 
-        let memory = LinearMemory::reserve(len, len).map_err(SecMemError::Platform)?;
+        let memory =
+            LinearMemory::reserve(reserved_len, committed_len).map_err(SecMemError::Platform)?;
         Ok(Self {
             memory: Some(memory),
-            len,
+            len: reserved_len,
         })
     }
 
@@ -42,6 +47,10 @@ impl GuardedAllocation {
 
     pub fn is_empty(&self) -> bool {
         self.len == 0
+    }
+
+    pub fn committed_len(&self) -> usize {
+        self.as_slice().len()
     }
 
     pub fn as_slice(&self) -> &[u8] {
@@ -58,6 +67,17 @@ impl GuardedAllocation {
         }
     }
 
+    pub fn grow(&mut self, new_len: usize) -> SecMemResult<()> {
+        match &mut self.memory {
+            Some(memory) => memory.grow(new_len).map_err(SecMemError::Platform),
+            None if new_len == 0 => Ok(()),
+            None => {
+                *self = Self::with_reservation(new_len, new_len)?;
+                Ok(())
+            }
+        }
+    }
+
     fn clear(&mut self) {
         if let Some(memory) = &mut self.memory {
             memory.committed_slice_mut().fill(0);
@@ -70,8 +90,9 @@ impl GuardedAllocation {
 
 impl Clone for GuardedAllocation {
     fn clone(&self) -> Self {
-        let mut cloned = Self::new(self.len).expect("guarded allocation clone should succeed");
-        if self.len != 0 {
+        let mut cloned = Self::with_reservation(self.committed_len(), self.len)
+            .expect("guarded allocation clone should succeed");
+        if self.committed_len() != 0 {
             cloned.as_mut_slice().copy_from_slice(self.as_slice());
         }
         cloned
@@ -81,7 +102,8 @@ impl Clone for GuardedAllocation {
 impl std::fmt::Debug for GuardedAllocation {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GuardedAllocation")
-            .field("len", &self.len)
+            .field("reserved_len", &self.len)
+            .field("committed_len", &self.committed_len())
             .finish()
     }
 }
@@ -141,6 +163,7 @@ mod tests {
             .allocate_zeroed(64)
             .expect("allocation should succeed");
         assert_eq!(64, allocation.len());
+        assert_eq!(64, allocation.committed_len());
         assert!(allocation.as_slice().iter().all(|byte| *byte == 0));
     }
 
@@ -162,6 +185,22 @@ mod tests {
             .expect("allocation should succeed");
         assert!(allocation.is_empty());
         assert!(allocation.as_slice().is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn allocation_can_reserve_more_than_it_commits_and_grow() {
+        let mut allocation = GuardedAllocation::with_reservation(64 << 10, 128 << 10)
+            .expect("allocation should succeed");
+        assert_eq!(128 << 10, allocation.len());
+        assert_eq!(64 << 10, allocation.committed_len());
+        allocation.as_mut_slice().fill(0xaa);
+
+        allocation.grow(96 << 10).expect("grow should succeed");
+        assert_eq!(96 << 10, allocation.committed_len());
+        assert!(allocation.as_slice()[(64 << 10)..(96 << 10)]
+            .iter()
+            .all(|byte| *byte == 0));
     }
 
     #[cfg(not(target_os = "linux"))]

@@ -99,7 +99,12 @@ pub trait ModuleEngine: Send + Sync {
         None
     }
 
-    fn overwrite_memory(&self, _bytes: &[u8], _maximum_pages: Option<u32>, _shared: bool) -> bool {
+    fn overwrite_memory(
+        &mut self,
+        _bytes: &[u8],
+        _maximum_pages: Option<u32>,
+        _shared: bool,
+    ) -> bool {
         false
     }
 
