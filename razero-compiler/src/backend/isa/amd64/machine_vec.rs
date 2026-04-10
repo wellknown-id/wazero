@@ -29,6 +29,8 @@ pub enum SseOpcode {
     Minpd,
     Maxps,
     Maxpd,
+    Cvtss2sd,
+    Cvtsd2ss,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,6 +194,18 @@ impl SseOpcode {
                 store_opcode: 0x0F5F,
                 opcode_len: 2,
             },
+            Self::Cvtss2sd => SseEncoding {
+                prefix: Some(0xF3),
+                load_opcode: 0x0F5A,
+                store_opcode: 0x0F5A,
+                opcode_len: 2,
+            },
+            Self::Cvtsd2ss => SseEncoding {
+                prefix: Some(0xF2),
+                load_opcode: 0x0F5A,
+                store_opcode: 0x0F5A,
+                opcode_len: 2,
+            },
         }
     }
 
@@ -221,7 +235,9 @@ impl SseOpcode {
             21 => Self::Minps,
             22 => Self::Minpd,
             23 => Self::Maxps,
-            _ => Self::Maxpd,
+            24 => Self::Maxpd,
+            25 => Self::Cvtss2sd,
+            _ => Self::Cvtsd2ss,
         }
     }
 
@@ -258,6 +274,8 @@ impl fmt::Display for SseOpcode {
             Self::Minpd => "minpd",
             Self::Maxps => "maxps",
             Self::Maxpd => "maxpd",
+            Self::Cvtss2sd => "cvtss2sd",
+            Self::Cvtsd2ss => "cvtsd2ss",
         })
     }
 }
@@ -274,6 +292,7 @@ mod tests {
         let sqrtsd = SseOpcode::Sqrtsd.encoding();
         let roundss = SseOpcode::Roundss.encoding();
         let minpd = SseOpcode::Minpd.encoding();
+        let cvtss2sd = SseOpcode::Cvtss2sd.encoding();
         assert_eq!(movsd.prefix, Some(0xF2));
         assert_eq!(movsd.load_opcode, 0x0F10);
         assert_eq!(addss.prefix, Some(0xF3));
@@ -283,11 +302,13 @@ mod tests {
         assert_eq!(roundss.load_opcode, 0x0F3A0A);
         assert_eq!(minpd.prefix, Some(0x66));
         assert_eq!(minpd.load_opcode, 0x0F5D);
+        assert_eq!(cvtss2sd.load_opcode, 0x0F5A);
         assert_eq!(SseOpcode::Movdqu.to_string(), "movdqu");
         assert_eq!(SseOpcode::Divsd.to_string(), "divsd");
         assert_eq!(SseOpcode::Ucomiss.to_string(), "ucomiss");
         assert_eq!(SseOpcode::Sqrtss.to_string(), "sqrtss");
         assert_eq!(SseOpcode::Roundsd.to_string(), "roundsd");
         assert_eq!(SseOpcode::Maxps.to_string(), "maxps");
+        assert_eq!(SseOpcode::Cvtsd2ss.to_string(), "cvtsd2ss");
     }
 }

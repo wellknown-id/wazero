@@ -811,6 +811,18 @@ impl BackendMachine for Amd64Machine {
                     .instructions
                     .push(Amd64Instr::xmm_unary_rm_r(op, Operand::reg(src), dst));
             }
+            Opcode::Fpromote | Opcode::Fdemote => {
+                let dst = self.compiler().v_reg_of(instruction.return_());
+                let src = self.compiler().v_reg_of(instruction.v);
+                let op = match instruction.opcode {
+                    Opcode::Fpromote => SseOpcode::Cvtss2sd,
+                    Opcode::Fdemote => SseOpcode::Cvtsd2ss,
+                    _ => unreachable!(),
+                };
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::xmm_unary_rm_r(op, Operand::reg(src), dst));
+            }
             Opcode::Ceil | Opcode::Floor | Opcode::Trunc | Opcode::Nearest => {
                 let dst = self.compiler().v_reg_of(instruction.return_());
                 let src = self.compiler().v_reg_of(instruction.v);
@@ -1748,6 +1760,28 @@ mod tests {
         m.format()
     }
 
+    fn lower_float_convert_opcode(opcode: Opcode, src_ty: Type, dst_ty: Type) -> String {
+        let mut m = Amd64Machine::new();
+        m.start_lowering_function(BasicBlockId(0));
+        m.start_block(BasicBlockId(0));
+
+        let mut compiler = Box::new(TestCompilerContext::default());
+        compiler.regs = vec![
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::XMM0, RegType::Float),
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::XMM2, RegType::Float),
+        ];
+        let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
+        m.set_compiler(ptr);
+
+        let mut instruction = crate::ssa::Instruction::new().with_opcode(opcode);
+        instruction.v = Value(0).with_type(src_ty);
+        instruction.r_value = Value(1).with_type(dst_ty);
+        instruction.typ = dst_ty;
+
+        m.lower_instr(&instruction);
+        m.format()
+    }
+
     fn lower_round_opcode(opcode: Opcode, ty: Type) -> String {
         let mut m = Amd64Machine::new();
         m.start_lowering_function(BasicBlockId(0));
@@ -2015,6 +2049,18 @@ mod tests {
     fn lowers_f64_sqrt_with_sse_sequence() {
         let formatted = lower_sqrt_opcode(Type::F64);
         assert!(formatted.contains("sqrtsd %xmm0, %xmm2"));
+    }
+
+    #[test]
+    fn lowers_f32_promote_to_f64_with_sse_sequence() {
+        let formatted = lower_float_convert_opcode(Opcode::Fpromote, Type::F32, Type::F64);
+        assert!(formatted.contains("cvtss2sd %xmm0, %xmm2"));
+    }
+
+    #[test]
+    fn lowers_f64_demote_to_f32_with_sse_sequence() {
+        let formatted = lower_float_convert_opcode(Opcode::Fdemote, Type::F64, Type::F32);
+        assert!(formatted.contains("cvtsd2ss %xmm0, %xmm2"));
     }
 
     #[test]
