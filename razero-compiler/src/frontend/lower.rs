@@ -198,7 +198,9 @@ impl<'a> Compiler<'a> {
             OPCODE_I32_TRUNC_F64_S => self.lower_typed_unary(Opcode::FcvtToSint, Type::I32),
             OPCODE_I32_TRUNC_F64_U => self.lower_typed_unary(Opcode::FcvtToUint, Type::I32),
             OPCODE_I64_TRUNC_F32_S => self.lower_typed_unary(Opcode::FcvtToSint, Type::I64),
+            OPCODE_I64_TRUNC_F32_U => self.lower_typed_unary(Opcode::FcvtToUint, Type::I64),
             OPCODE_I64_TRUNC_F64_S => self.lower_typed_unary(Opcode::FcvtToSint, Type::I64),
+            OPCODE_I64_TRUNC_F64_U => self.lower_typed_unary(Opcode::FcvtToUint, Type::I64),
             OPCODE_I64_EXTEND_I32_S => self.lower_typed_unary(Opcode::SExtend, Type::I64),
             OPCODE_I64_EXTEND_I32_U => self.lower_typed_unary(Opcode::UExtend, Type::I64),
             OPCODE_I32_REINTERPRET_F32 => self.lower_typed_unary(Opcode::Bitcast, Type::I32),
@@ -1961,6 +1963,50 @@ mod tests {
         assert_eq!(
             compiler.format(),
             "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:f64)\n\tv3:i64 = FcvtToSint v2, exec_ctx\n\tJump blk_ret, v3\n"
+        );
+    }
+
+    #[test]
+    fn lowers_i64_trunc_f32_u_to_ssa() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::F32], &[ValueType::I64])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_I64_TRUNC_F32_U, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:f32)\n\tv3:i64 = FcvtToUint v2, exec_ctx\n\tJump blk_ret, v3\n"
+        );
+    }
+
+    #[test]
+    fn lowers_i64_trunc_f64_u_to_ssa() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::F64], &[ValueType::I64])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_I64_TRUNC_F64_U, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:f64)\n\tv3:i64 = FcvtToUint v2, exec_ctx\n\tJump blk_ret, v3\n"
         );
     }
 

@@ -1130,7 +1130,7 @@ impl BackendMachine for Amd64Machine {
                 let dst = self.compiler().v_reg_of(instruction.return_());
                 let src = self.compiler().v_reg_of(instruction.v);
                 let exec_ctx = self.compiler().v_reg_of(instruction.v3);
-                let (cmp_op, trunc_op, threshold_bits, move_op, sub_op, src_64) =
+                let (cmp_op, trunc_op, threshold_bits, move_op, sub_op, src_64, dst_64) =
                     match (instruction.v.ty(), instruction.typ) {
                         (Type::F32, Type::I32) => (
                             SseOpcode::Ucomiss,
@@ -1139,6 +1139,7 @@ impl BackendMachine for Amd64Machine {
                             SseOpcode::Movd,
                             SseOpcode::Subss,
                             false,
+                            false,
                         ),
                         (Type::F64, Type::I32) => (
                             SseOpcode::Ucomisd,
@@ -1146,6 +1147,25 @@ impl BackendMachine for Amd64Machine {
                             0x41E0_0000_0000_0000,
                             SseOpcode::Movq,
                             SseOpcode::Subsd,
+                            true,
+                            false,
+                        ),
+                        (Type::F32, Type::I64) => (
+                            SseOpcode::Ucomiss,
+                            SseOpcode::Cvttss2si,
+                            0x5F00_0000,
+                            SseOpcode::Movd,
+                            SseOpcode::Subss,
+                            false,
+                            true,
+                        ),
+                        (Type::F64, Type::I64) => (
+                            SseOpcode::Ucomisd,
+                            SseOpcode::Cvttsd2si,
+                            0x43E0_0000_0000_0000,
+                            SseOpcode::Movq,
+                            SseOpcode::Subsd,
+                            true,
                             true,
                         ),
                         _ => panic!(
@@ -1199,10 +1219,10 @@ impl BackendMachine for Amd64Machine {
                 self.start_synthetic_block(not_nan_block);
                 self.current_block_mut()
                     .instructions
-                    .push(Amd64Instr::xmm_to_gpr(trunc_op, src, dst, false));
+                    .push(Amd64Instr::xmm_to_gpr(trunc_op, src, dst, dst_64));
                 self.current_block_mut()
                     .instructions
-                    .push(Amd64Instr::cmp_rmi_r(Operand::imm32(0), dst, true, false));
+                    .push(Amd64Instr::cmp_rmi_r(Operand::imm32(0), dst, true, dst_64));
                 self.current_block_mut()
                     .instructions
                     .push(Amd64Instr::jmp_if(
@@ -1229,10 +1249,10 @@ impl BackendMachine for Amd64Machine {
                     ));
                 self.current_block_mut()
                     .instructions
-                    .push(Amd64Instr::xmm_to_gpr(trunc_op, tmp_xmm2, dst, false));
+                    .push(Amd64Instr::xmm_to_gpr(trunc_op, tmp_xmm2, dst, dst_64));
                 self.current_block_mut()
                     .instructions
-                    .push(Amd64Instr::cmp_rmi_r(Operand::imm32(0), dst, true, false));
+                    .push(Amd64Instr::cmp_rmi_r(Operand::imm32(0), dst, true, dst_64));
                 self.current_block_mut()
                     .instructions
                     .push(Amd64Instr::jmp_if(
@@ -1243,13 +1263,23 @@ impl BackendMachine for Amd64Machine {
                 self.emit_exit_with_code(exec_ctx, ExitCode::INTEGER_OVERFLOW);
 
                 self.start_synthetic_block(next_large_block);
+                let add_back = if dst_64 {
+                    self.current_block_mut().instructions.push(Amd64Instr::imm(
+                        tmp_gp,
+                        0x8000_0000_0000_0000,
+                        true,
+                    ));
+                    Operand::reg(tmp_gp)
+                } else {
+                    Operand::imm32(0x8000_0000)
+                };
                 self.current_block_mut()
                     .instructions
                     .push(Amd64Instr::alu_rmi_r(
                         super::instr::AluRmiROpcode::Add,
-                        Operand::imm32(0x8000_0000),
+                        add_back,
                         dst,
-                        false,
+                        dst_64,
                     ));
                 self.current_block_mut()
                     .instructions
@@ -2793,6 +2823,33 @@ mod tests {
         assert!(formatted.contains("cvttsd2si %xmm0, %eax"));
         assert!(formatted.contains("subsd "));
         assert!(formatted.contains("movabsq $4746794007248502784"));
+    }
+
+    #[test]
+    fn lowers_f32_to_u64_with_threshold_subtract_and_add_back() {
+        let formatted = lower_fcvt_to_uint_opcode(Type::F32, Type::I64);
+        assert!(formatted.contains("ucomiss "));
+        assert!(formatted.contains("cvttss2si %xmm0, %rax"));
+        assert!(formatted.contains("cmpq $0, %rax"));
+        assert!(formatted.contains("subss "));
+        assert!(formatted.contains("movabsq $-9223372036854775808"));
+        assert!(formatted.contains("add %"));
+        assert!(formatted.contains("movl $12, %r11d"));
+        assert!(formatted.contains("movl $11, %r11d"));
+    }
+
+    #[test]
+    fn lowers_f64_to_u64_with_threshold_subtract_and_add_back() {
+        let formatted = lower_fcvt_to_uint_opcode(Type::F64, Type::I64);
+        assert!(formatted.contains("ucomisd "));
+        assert!(formatted.contains("cvttsd2si %xmm0, %rax"));
+        assert!(formatted.contains("cmpq $0, %rax"));
+        assert!(formatted.contains("subsd "));
+        assert!(formatted.contains("movabsq $4890909195324358656"));
+        assert!(formatted.contains("movabsq $-9223372036854775808"));
+        assert!(formatted.contains("add %"));
+        assert!(formatted.contains("movl $12, %r11d"));
+        assert!(formatted.contains("movl $11, %r11d"));
     }
 
     #[test]
