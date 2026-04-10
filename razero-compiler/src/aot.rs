@@ -1679,12 +1679,25 @@ fn read_global_type_metadata(
 }
 
 fn read_memory_metadata(cursor: &mut Cursor<&[u8]>) -> Result<AotMemoryMetadata, AotMetadataError> {
+    let min = read_u32(cursor)?;
+    let cap = read_u32(cursor)?;
+    let max = read_u32(cursor)?;
+    let is_max_encoded = read_u8(cursor)? != 0;
+    let is_shared = match read_u8(cursor)? {
+        0 => false,
+        1 => true,
+        _ => {
+            return Err(AotMetadataError::InvalidHeader(
+                "aot metadata: invalid memory shared flag".to_string(),
+            ));
+        }
+    };
     Ok(AotMemoryMetadata {
-        min: read_u32(cursor)?,
-        cap: read_u32(cursor)?,
-        max: read_u32(cursor)?,
-        is_max_encoded: read_u8(cursor)? != 0,
-        is_shared: read_u8(cursor)? != 0,
+        min,
+        cap,
+        max,
+        is_max_encoded,
+        is_shared,
     })
 }
 
