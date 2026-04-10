@@ -823,6 +823,43 @@ impl BackendMachine for Amd64Machine {
                     .instructions
                     .push(Amd64Instr::xmm_unary_rm_r(op, Operand::reg(src), dst));
             }
+            Opcode::Bitcast => {
+                let dst = self.compiler().v_reg_of(instruction.return_());
+                let src = self.compiler().v_reg_of(instruction.v);
+                match (instruction.v.ty(), instruction.typ) {
+                    (Type::I32, Type::F32) => self
+                        .current_block_mut()
+                        .instructions
+                        .push(Amd64Instr::gpr_to_xmm(
+                            SseOpcode::Movd,
+                            Operand::reg(src),
+                            dst,
+                            false,
+                        )),
+                    (Type::F32, Type::I32) => self
+                        .current_block_mut()
+                        .instructions
+                        .push(Amd64Instr::xmm_to_gpr(SseOpcode::Movd, src, dst, false)),
+                    (Type::I64, Type::F64) => self
+                        .current_block_mut()
+                        .instructions
+                        .push(Amd64Instr::gpr_to_xmm(
+                            SseOpcode::Movq,
+                            Operand::reg(src),
+                            dst,
+                            true,
+                        )),
+                    (Type::F64, Type::I64) => self
+                        .current_block_mut()
+                        .instructions
+                        .push(Amd64Instr::xmm_to_gpr(SseOpcode::Movq, src, dst, true)),
+                    _ => panic!(
+                        "unsupported amd64 bitcast: {:?} -> {:?}",
+                        instruction.v.ty(),
+                        instruction.typ
+                    ),
+                }
+            }
             Opcode::FcvtFromSint => {
                 let dst = self.compiler().v_reg_of(instruction.return_());
                 let src = self.compiler().v_reg_of(instruction.v);
@@ -1843,6 +1880,42 @@ mod tests {
         m.format()
     }
 
+    fn lower_bitcast_opcode(src_ty: Type, dst_ty: Type) -> String {
+        let mut m = Amd64Machine::new();
+        m.start_lowering_function(BasicBlockId(0));
+        m.start_block(BasicBlockId(0));
+
+        let mut compiler = Box::new(TestCompilerContext::default());
+        compiler.regs = vec![
+            VReg::from_real_reg(
+                if matches!(src_ty, Type::I32 | Type::I64) {
+                    crate::backend::isa::amd64::reg::RAX
+                } else {
+                    crate::backend::isa::amd64::reg::XMM0
+                },
+                RegType::of(src_ty),
+            ),
+            VReg::from_real_reg(
+                if matches!(dst_ty, Type::I32 | Type::I64) {
+                    crate::backend::isa::amd64::reg::RAX
+                } else {
+                    crate::backend::isa::amd64::reg::XMM2
+                },
+                RegType::of(dst_ty),
+            ),
+        ];
+        let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
+        m.set_compiler(ptr);
+
+        let mut instruction = crate::ssa::Instruction::new().with_opcode(Opcode::Bitcast);
+        instruction.v = Value(0).with_type(src_ty);
+        instruction.r_value = Value(1).with_type(dst_ty);
+        instruction.typ = dst_ty;
+
+        m.lower_instr(&instruction);
+        m.format()
+    }
+
     fn lower_fcvt_from_uint_opcode(src_ty: Type, dst_ty: Type) -> String {
         let mut m = Amd64Machine::new();
         m.start_lowering_function(BasicBlockId(0));
@@ -2168,6 +2241,30 @@ mod tests {
     fn lowers_i64_to_f64_with_cvtsi2sd_sequence() {
         let formatted = lower_fcvt_from_sint_opcode(Type::I64, Type::F64);
         assert!(formatted.contains("cvtsi2sd %rax, %xmm2"));
+    }
+
+    #[test]
+    fn lowers_i32_to_f32_bitcast_with_movd_sequence() {
+        let formatted = lower_bitcast_opcode(Type::I32, Type::F32);
+        assert!(formatted.contains("movd %eax, %xmm2"));
+    }
+
+    #[test]
+    fn lowers_f32_to_i32_bitcast_with_movd_sequence() {
+        let formatted = lower_bitcast_opcode(Type::F32, Type::I32);
+        assert!(formatted.contains("movd %xmm0, %eax"));
+    }
+
+    #[test]
+    fn lowers_i64_to_f64_bitcast_with_movq_sequence() {
+        let formatted = lower_bitcast_opcode(Type::I64, Type::F64);
+        assert!(formatted.contains("movq %rax, %xmm2"));
+    }
+
+    #[test]
+    fn lowers_f64_to_i64_bitcast_with_movq_sequence() {
+        let formatted = lower_bitcast_opcode(Type::F64, Type::I64);
+        assert!(formatted.contains("movq %xmm0, %rax"));
     }
 
     #[test]

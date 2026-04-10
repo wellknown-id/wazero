@@ -6,6 +6,8 @@ use crate::backend::machine::BackendError;
 pub enum SseOpcode {
     Movss,
     Movsd,
+    Movd,
+    Movq,
     Movdqu,
     Addss,
     Addsd,
@@ -56,6 +58,18 @@ impl SseOpcode {
                 prefix: Some(0xF2),
                 load_opcode: 0x0F10,
                 store_opcode: 0x0F11,
+                opcode_len: 2,
+            },
+            Self::Movd => SseEncoding {
+                prefix: Some(0x66),
+                load_opcode: 0x0F6E,
+                store_opcode: 0x0F7E,
+                opcode_len: 2,
+            },
+            Self::Movq => SseEncoding {
+                prefix: Some(0x66),
+                load_opcode: 0x0F6E,
+                store_opcode: 0x0FD6,
                 opcode_len: 2,
             },
             Self::Movdqu => SseEncoding {
@@ -227,32 +241,34 @@ impl SseOpcode {
         match raw {
             0 => Self::Movss,
             1 => Self::Movsd,
-            2 => Self::Movdqu,
-            3 => Self::Addss,
-            4 => Self::Addsd,
-            5 => Self::Subss,
-            6 => Self::Subsd,
-            7 => Self::Mulss,
-            8 => Self::Mulsd,
-            9 => Self::Divss,
-            10 => Self::Divsd,
-            11 => Self::Ucomiss,
-            12 => Self::Ucomisd,
-            13 => Self::Sqrtss,
-            14 => Self::Sqrtsd,
-            15 => Self::Roundss,
-            16 => Self::Roundsd,
-            17 => Self::Andps,
-            18 => Self::Andpd,
-            19 => Self::Orps,
-            20 => Self::Orpd,
-            21 => Self::Minps,
-            22 => Self::Minpd,
-            23 => Self::Maxps,
-            24 => Self::Maxpd,
-            25 => Self::Cvtss2sd,
-            26 => Self::Cvtsd2ss,
-            27 => Self::Cvtsi2ss,
+            2 => Self::Movd,
+            3 => Self::Movq,
+            4 => Self::Movdqu,
+            5 => Self::Addss,
+            6 => Self::Addsd,
+            7 => Self::Subss,
+            8 => Self::Subsd,
+            9 => Self::Mulss,
+            10 => Self::Mulsd,
+            11 => Self::Divss,
+            12 => Self::Divsd,
+            13 => Self::Ucomiss,
+            14 => Self::Ucomisd,
+            15 => Self::Sqrtss,
+            16 => Self::Sqrtsd,
+            17 => Self::Roundss,
+            18 => Self::Roundsd,
+            19 => Self::Andps,
+            20 => Self::Andpd,
+            21 => Self::Orps,
+            22 => Self::Orpd,
+            23 => Self::Minps,
+            24 => Self::Minpd,
+            25 => Self::Maxps,
+            26 => Self::Maxpd,
+            27 => Self::Cvtss2sd,
+            28 => Self::Cvtsd2ss,
+            29 => Self::Cvtsi2ss,
             _ => Self::Cvtsi2sd,
         }
     }
@@ -267,6 +283,8 @@ impl fmt::Display for SseOpcode {
         f.write_str(match self {
             Self::Movss => "movss",
             Self::Movsd => "movsd",
+            Self::Movd => "movd",
+            Self::Movq => "movq",
             Self::Movdqu => "movdqu",
             Self::Addss => "addss",
             Self::Addsd => "addsd",
@@ -305,6 +323,8 @@ mod tests {
     #[test]
     fn sse_encodings_are_stable() {
         let movsd = SseOpcode::Movsd.encoding();
+        let movd = SseOpcode::Movd.encoding();
+        let movq = SseOpcode::Movq.encoding();
         let addss = SseOpcode::Addss.encoding();
         let ucomisd = SseOpcode::Ucomisd.encoding();
         let sqrtsd = SseOpcode::Sqrtsd.encoding();
@@ -314,6 +334,8 @@ mod tests {
         let cvtsi2sd = SseOpcode::Cvtsi2sd.encoding();
         assert_eq!(movsd.prefix, Some(0xF2));
         assert_eq!(movsd.load_opcode, 0x0F10);
+        assert_eq!(movd.load_opcode, 0x0F6E);
+        assert_eq!(movq.store_opcode, 0x0FD6);
         assert_eq!(addss.prefix, Some(0xF3));
         assert_eq!(addss.load_opcode, 0x0F58);
         assert_eq!(ucomisd.load_opcode, 0x0F2E);
@@ -324,6 +346,8 @@ mod tests {
         assert_eq!(cvtss2sd.load_opcode, 0x0F5A);
         assert_eq!(cvtsi2sd.load_opcode, 0x0F2A);
         assert_eq!(SseOpcode::Movdqu.to_string(), "movdqu");
+        assert_eq!(SseOpcode::Movd.to_string(), "movd");
+        assert_eq!(SseOpcode::Movq.to_string(), "movq");
         assert_eq!(SseOpcode::Divsd.to_string(), "divsd");
         assert_eq!(SseOpcode::Ucomiss.to_string(), "ucomiss");
         assert_eq!(SseOpcode::Sqrtss.to_string(), "sqrtss");

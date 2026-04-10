@@ -192,6 +192,10 @@ impl<'a> Compiler<'a> {
             OPCODE_F32_MIN | OPCODE_F64_MIN => self.lower_binary_generic(Opcode::Fmin),
             OPCODE_F32_MAX | OPCODE_F64_MAX => self.lower_binary_generic(Opcode::Fmax),
             OPCODE_F32_SQRT | OPCODE_F64_SQRT => self.lower_unary_generic(Opcode::Sqrt),
+            OPCODE_I32_REINTERPRET_F32 => self.lower_typed_unary(Opcode::Bitcast, Type::I32),
+            OPCODE_I64_REINTERPRET_F64 => self.lower_typed_unary(Opcode::Bitcast, Type::I64),
+            OPCODE_F32_REINTERPRET_I32 => self.lower_typed_unary(Opcode::Bitcast, Type::F32),
+            OPCODE_F64_REINTERPRET_I64 => self.lower_typed_unary(Opcode::Bitcast, Type::F64),
             OPCODE_F32_CONVERT_I32_S => self.lower_typed_unary(Opcode::FcvtFromSint, Type::F32),
             OPCODE_F64_CONVERT_I32_S => self.lower_typed_unary(Opcode::FcvtFromSint, Type::F64),
             OPCODE_F32_CONVERT_I64_S => self.lower_typed_unary(Opcode::FcvtFromSint, Type::F32),
@@ -1758,6 +1762,50 @@ mod tests {
     }
 
     #[test]
+    fn lowers_i32_reinterpret_f32_to_ssa() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::F32], &[ValueType::I32])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_I32_REINTERPRET_F32, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:f32)\n\tv3:i32 = Bitcast v2\n\tJump blk_ret, v3\n"
+        );
+    }
+
+    #[test]
+    fn lowers_f32_reinterpret_i32_to_ssa() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::F32])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_F32_REINTERPRET_I32, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32)\n\tv3:f32 = Bitcast v2\n\tJump blk_ret, v3\n"
+        );
+    }
+
+    #[test]
     fn lowers_f64_convert_i32_s_to_ssa() {
         let module = Module {
             type_section: vec![function_type(&[ValueType::I32], &[ValueType::F64])],
@@ -1776,6 +1824,50 @@ mod tests {
         assert_eq!(
             compiler.format(),
             "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32)\n\tv3:f64 = FcvtFromSint v2\n\tJump blk_ret, v3\n"
+        );
+    }
+
+    #[test]
+    fn lowers_i64_reinterpret_f64_to_ssa() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::F64], &[ValueType::I64])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_I64_REINTERPRET_F64, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:f64)\n\tv3:i64 = Bitcast v2\n\tJump blk_ret, v3\n"
+        );
+    }
+
+    #[test]
+    fn lowers_f64_reinterpret_i64_to_ssa() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I64], &[ValueType::F64])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_F64_REINTERPRET_I64, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i64)\n\tv3:f64 = Bitcast v2\n\tJump blk_ret, v3\n"
         );
     }
 
