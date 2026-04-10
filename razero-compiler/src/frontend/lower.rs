@@ -194,6 +194,8 @@ impl<'a> Compiler<'a> {
             OPCODE_F32_SQRT | OPCODE_F64_SQRT => self.lower_unary_generic(Opcode::Sqrt),
             OPCODE_F32_CONVERT_I32_S => self.lower_typed_unary(Opcode::FcvtFromSint, Type::F32),
             OPCODE_F64_CONVERT_I32_S => self.lower_typed_unary(Opcode::FcvtFromSint, Type::F64),
+            OPCODE_F32_CONVERT_I32_U => self.lower_typed_unary(Opcode::FcvtFromUint, Type::F32),
+            OPCODE_F64_CONVERT_I32_U => self.lower_typed_unary(Opcode::FcvtFromUint, Type::F64),
             OPCODE_F64_PROMOTE_F32 => self.lower_typed_unary(Opcode::Fpromote, Type::F64),
             OPCODE_F32_DEMOTE_F64 => self.lower_typed_unary(Opcode::Fdemote, Type::F32),
             OPCODE_F32_CEIL | OPCODE_F64_CEIL => self.lower_unary_generic(Opcode::Ceil),
@@ -1772,6 +1774,50 @@ mod tests {
         assert_eq!(
             compiler.format(),
             "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32)\n\tv3:f64 = FcvtFromSint v2\n\tJump blk_ret, v3\n"
+        );
+    }
+
+    #[test]
+    fn lowers_f32_convert_i32_u_to_ssa() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::F32])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_F32_CONVERT_I32_U, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32)\n\tv3:f32 = FcvtFromUint v2\n\tJump blk_ret, v3\n"
+        );
+    }
+
+    #[test]
+    fn lowers_f64_convert_i32_u_to_ssa() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::F64])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_F64_CONVERT_I32_U, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32)\n\tv3:f64 = FcvtFromUint v2\n\tJump blk_ret, v3\n"
         );
     }
 

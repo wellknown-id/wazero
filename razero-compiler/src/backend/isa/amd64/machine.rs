@@ -839,6 +839,26 @@ impl BackendMachine for Amd64Machine {
                     .instructions
                     .push(Amd64Instr::gpr_to_xmm(op, Operand::reg(src), dst, false));
             }
+            Opcode::FcvtFromUint => {
+                let dst = self.compiler().v_reg_of(instruction.return_());
+                let src = self.compiler().v_reg_of(instruction.v);
+                let op = match (instruction.v.ty(), instruction.typ) {
+                    (Type::I32, Type::F32) => SseOpcode::Cvtsi2ss,
+                    (Type::I32, Type::F64) => SseOpcode::Cvtsi2sd,
+                    _ => panic!(
+                        "unsupported amd64 unsigned int-to-float conversion: {:?} -> {:?}",
+                        instruction.v.ty(),
+                        instruction.typ
+                    ),
+                };
+                let tmp = self.compiler_mut().allocate_vreg(Type::I32);
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::movzx_rm_r(ExtMode::LQ, Operand::reg(src), tmp));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::gpr_to_xmm(op, Operand::reg(tmp), dst, true));
+            }
             Opcode::Ceil | Opcode::Floor | Opcode::Trunc | Opcode::Nearest => {
                 let dst = self.compiler().v_reg_of(instruction.return_());
                 let src = self.compiler().v_reg_of(instruction.v);
@@ -1820,6 +1840,28 @@ mod tests {
         m.format()
     }
 
+    fn lower_fcvt_from_uint_opcode(src_ty: Type, dst_ty: Type) -> String {
+        let mut m = Amd64Machine::new();
+        m.start_lowering_function(BasicBlockId(0));
+        m.start_block(BasicBlockId(0));
+
+        let mut compiler = Box::new(TestCompilerContext::default());
+        compiler.regs = vec![
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::RAX, RegType::Int),
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::XMM2, RegType::Float),
+        ];
+        let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
+        m.set_compiler(ptr);
+
+        let mut instruction = crate::ssa::Instruction::new().with_opcode(Opcode::FcvtFromUint);
+        instruction.v = Value(0).with_type(src_ty);
+        instruction.r_value = Value(1).with_type(dst_ty);
+        instruction.typ = dst_ty;
+
+        m.lower_instr(&instruction);
+        m.format()
+    }
+
     fn lower_round_opcode(opcode: Opcode, ty: Type) -> String {
         let mut m = Amd64Machine::new();
         m.start_lowering_function(BasicBlockId(0));
@@ -2111,6 +2153,20 @@ mod tests {
     fn lowers_i32_to_f64_with_cvtsi2sd_sequence() {
         let formatted = lower_fcvt_from_sint_opcode(Type::I32, Type::F64);
         assert!(formatted.contains("cvtsi2sd %eax, %xmm2"));
+    }
+
+    #[test]
+    fn lowers_u32_to_f32_with_zero_extend_then_cvtsi2ss_sequence() {
+        let formatted = lower_fcvt_from_uint_opcode(Type::I32, Type::F32);
+        assert!(formatted.contains("movzx.lq %rax, %r130?"));
+        assert!(formatted.contains("cvtsi2ss %r130?, %xmm2"));
+    }
+
+    #[test]
+    fn lowers_u32_to_f64_with_zero_extend_then_cvtsi2sd_sequence() {
+        let formatted = lower_fcvt_from_uint_opcode(Type::I32, Type::F64);
+        assert!(formatted.contains("movzx.lq %rax, %r130?"));
+        assert!(formatted.contains("cvtsi2sd %r130?, %xmm2"));
     }
 
     #[test]
