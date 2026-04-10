@@ -1247,6 +1247,17 @@ impl Module {
             .collect()
     }
 
+    pub fn imported_function_definitions(&self) -> Vec<FunctionDefinition> {
+        let Some(mut lower_module) = self.inner.lower_module.clone() else {
+            return Vec::new();
+        };
+        lower_module
+            .imported_functions()
+            .into_iter()
+            .map(crate::runtime::convert_function_definition)
+            .collect()
+    }
+
     pub fn exported_memory(&self, name: &str) -> Option<Memory> {
         self.inner
             .memory
@@ -1270,6 +1281,17 @@ impl Module {
             .export_names()
             .iter()
             .map(|name| (name.clone(), memory.definition().clone()))
+            .collect()
+    }
+
+    pub fn imported_memory_definitions(&self) -> Vec<MemoryDefinition> {
+        let Some(lower_module) = self.inner.lower_module.clone() else {
+            return Vec::new();
+        };
+        lower_module
+            .imported_memories()
+            .into_iter()
+            .map(crate::runtime::convert_memory_definition)
             .collect()
     }
 
