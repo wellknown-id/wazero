@@ -5139,6 +5139,26 @@ mod tests {
     }
 
     #[test]
+    fn public_memory_grow_exceeding_maximum_pages_returns_none() {
+        if !compiler_supported() {
+            return;
+        }
+
+        let runtime = Runtime::with_config(RuntimeConfig::new_compiler());
+        let compiled = runtime
+            .compile(&[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x05, 0x04, 0x01, 0x01, 0x01, 0x02,
+                0x07, 0x0a, 0x01, 0x06, b'm', b'e', b'm', b'o', b'r', b'y', 0x02, 0x00,
+            ])
+            .unwrap();
+        let module = runtime.instantiate(&compiled, ModuleConfig::new()).unwrap();
+        let memory = module.exported_memory("memory").unwrap();
+
+        assert_eq!(Some(1), memory.grow(1));
+        assert_eq!(None, memory.grow(1));
+    }
+
+    #[test]
     fn later_imported_host_functions_dispatch_correctly() {
         let runtime = Runtime::new();
         runtime
