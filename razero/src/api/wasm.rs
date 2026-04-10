@@ -1683,6 +1683,18 @@ mod tests {
     }
 
     #[test]
+    fn function_definition_tracks_module_and_import_metadata() {
+        let definition = FunctionDefinition::new("host_call")
+            .with_module_name(Some("env".to_string()))
+            .with_import("env", "call_handler")
+            .with_export_name("call");
+
+        assert_eq!(Some("env"), definition.module_name());
+        assert_eq!(Some(("env", "call_handler")), definition.import());
+        assert_eq!(&["call".to_string()], definition.export_names());
+    }
+
+    #[test]
     fn memory_definition_tracks_module_and_import_metadata() {
         let definition = MemoryDefinition::new(1, Some(2))
             .with_module_name(Some("guest".to_string()))
