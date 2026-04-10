@@ -835,6 +835,89 @@ impl BackendMachine for Amd64Machine {
                         dst,
                     ));
             }
+            Opcode::Fmin | Opcode::Fmax => {
+                let dst = self.compiler().v_reg_of(instruction.return_());
+                let lhs = self.compiler().v_reg_of(instruction.v);
+                let rhs = self.compiler().v_reg_of(instruction.v2);
+                let is_min = matches!(instruction.opcode, Opcode::Fmin);
+                let (cmp_op, diff_op, same_op, nan_op) = match (instruction.typ, is_min) {
+                    (Type::F32, true) => (
+                        SseOpcode::Ucomiss,
+                        SseOpcode::Minps,
+                        SseOpcode::Orps,
+                        SseOpcode::Addss,
+                    ),
+                    (Type::F32, false) => (
+                        SseOpcode::Ucomiss,
+                        SseOpcode::Maxps,
+                        SseOpcode::Andps,
+                        SseOpcode::Addss,
+                    ),
+                    (Type::F64, true) => (
+                        SseOpcode::Ucomisd,
+                        SseOpcode::Minpd,
+                        SseOpcode::Orpd,
+                        SseOpcode::Addsd,
+                    ),
+                    (Type::F64, false) => (
+                        SseOpcode::Ucomisd,
+                        SseOpcode::Maxpd,
+                        SseOpcode::Andpd,
+                        SseOpcode::Addsd,
+                    ),
+                    _ => panic!("unsupported amd64 min/max type: {:?}", instruction.typ),
+                };
+
+                let nan_block = self.next_synthetic_block_id();
+                let diff_block = nan_block + 1;
+                let done_block = diff_block + 1;
+
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::xmm_unary_rm_r(
+                        SseOpcode::Movdqu,
+                        Operand::reg(lhs),
+                        dst,
+                    ));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::xmm_cmp_rm_r(cmp_op, Operand::reg(rhs), dst));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::jmp_if(Cond::NZ, Operand::label(Label(diff_block))));
+                self.link_branch_edge(BasicBlockId(diff_block));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::jmp_if(Cond::P, Operand::label(Label(nan_block))));
+                self.link_branch_edge(BasicBlockId(nan_block));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::xmm_unary_rm_r(same_op, Operand::reg(rhs), dst));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::jmp(Operand::label(Label(done_block))));
+                self.link_branch_edge(BasicBlockId(done_block));
+
+                self.start_synthetic_block(nan_block);
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::xmm_unary_rm_r(nan_op, Operand::reg(rhs), dst));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::jmp(Operand::label(Label(done_block))));
+                self.link_branch_edge(BasicBlockId(done_block));
+
+                self.start_synthetic_block(diff_block);
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::xmm_unary_rm_r(diff_op, Operand::reg(rhs), dst));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::jmp(Operand::label(Label(done_block))));
+                self.link_branch_edge(BasicBlockId(done_block));
+
+                self.start_synthetic_block(done_block);
+            }
             Opcode::Icmp => {
                 let dst = self.compiler().v_reg_of(instruction.return_());
                 let cond = Self::integer_cmp_cond_from_u8(instruction.u1 as u8);
@@ -1687,6 +1770,30 @@ mod tests {
         m.format()
     }
 
+    fn lower_fminmax_opcode(opcode: Opcode, ty: Type) -> String {
+        let mut m = Amd64Machine::new();
+        m.start_lowering_function(BasicBlockId(0));
+        m.start_block(BasicBlockId(0));
+
+        let mut compiler = Box::new(TestCompilerContext::default());
+        compiler.regs = vec![
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::XMM0, RegType::Float),
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::XMM1, RegType::Float),
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::XMM2, RegType::Float),
+        ];
+        let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
+        m.set_compiler(ptr);
+
+        let mut instruction = crate::ssa::Instruction::new().with_opcode(opcode);
+        instruction.v = Value(0).with_type(ty);
+        instruction.v2 = Value(1).with_type(ty);
+        instruction.r_value = Value(2).with_type(ty);
+        instruction.typ = ty;
+
+        m.lower_instr(&instruction);
+        m.format()
+    }
+
     fn lower_fcmp_opcode(ty: Type, cond: FloatCmpCond) -> String {
         let mut m = Amd64Machine::new();
         m.start_lowering_function(BasicBlockId(0));
@@ -1932,6 +2039,30 @@ mod tests {
     fn lowers_f64_nearest_with_roundsd_nearest_mode() {
         let formatted = lower_round_opcode(Opcode::Nearest, Type::F64);
         assert!(formatted.contains("roundsd $0, %xmm0, %xmm2"));
+    }
+
+    #[test]
+    fn lowers_f32_fmin_with_nan_and_zero_sensitive_sequence() {
+        let formatted = lower_fminmax_opcode(Opcode::Fmin, Type::F32);
+        assert!(formatted.contains("movdqu %xmm0, %xmm2"));
+        assert!(formatted.contains("ucomiss %xmm1, %xmm2"));
+        assert!(formatted.contains("jnz L"));
+        assert!(formatted.contains("jp L"));
+        assert!(formatted.contains("orps %xmm1, %xmm2"));
+        assert!(formatted.contains("addss %xmm1, %xmm2"));
+        assert!(formatted.contains("minps %xmm1, %xmm2"));
+    }
+
+    #[test]
+    fn lowers_f64_fmax_with_nan_and_zero_sensitive_sequence() {
+        let formatted = lower_fminmax_opcode(Opcode::Fmax, Type::F64);
+        assert!(formatted.contains("movdqu %xmm0, %xmm2"));
+        assert!(formatted.contains("ucomisd %xmm1, %xmm2"));
+        assert!(formatted.contains("jnz L"));
+        assert!(formatted.contains("jp L"));
+        assert!(formatted.contains("andpd %xmm1, %xmm2"));
+        assert!(formatted.contains("addsd %xmm1, %xmm2"));
+        assert!(formatted.contains("maxpd %xmm1, %xmm2"));
     }
 
     #[test]

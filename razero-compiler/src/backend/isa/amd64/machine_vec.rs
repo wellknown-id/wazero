@@ -21,6 +21,14 @@ pub enum SseOpcode {
     Sqrtsd,
     Roundss,
     Roundsd,
+    Andps,
+    Andpd,
+    Orps,
+    Orpd,
+    Minps,
+    Minpd,
+    Maxps,
+    Maxpd,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,6 +144,54 @@ impl SseOpcode {
                 store_opcode: 0x0F3A0A,
                 opcode_len: 3,
             },
+            Self::Andps => SseEncoding {
+                prefix: None,
+                load_opcode: 0x0F54,
+                store_opcode: 0x0F54,
+                opcode_len: 2,
+            },
+            Self::Andpd => SseEncoding {
+                prefix: Some(0x66),
+                load_opcode: 0x0F54,
+                store_opcode: 0x0F54,
+                opcode_len: 2,
+            },
+            Self::Orps => SseEncoding {
+                prefix: None,
+                load_opcode: 0x0F56,
+                store_opcode: 0x0F56,
+                opcode_len: 2,
+            },
+            Self::Orpd => SseEncoding {
+                prefix: Some(0x66),
+                load_opcode: 0x0F56,
+                store_opcode: 0x0F56,
+                opcode_len: 2,
+            },
+            Self::Minps => SseEncoding {
+                prefix: None,
+                load_opcode: 0x0F5D,
+                store_opcode: 0x0F5D,
+                opcode_len: 2,
+            },
+            Self::Minpd => SseEncoding {
+                prefix: Some(0x66),
+                load_opcode: 0x0F5D,
+                store_opcode: 0x0F5D,
+                opcode_len: 2,
+            },
+            Self::Maxps => SseEncoding {
+                prefix: None,
+                load_opcode: 0x0F5F,
+                store_opcode: 0x0F5F,
+                opcode_len: 2,
+            },
+            Self::Maxpd => SseEncoding {
+                prefix: Some(0x66),
+                load_opcode: 0x0F5F,
+                store_opcode: 0x0F5F,
+                opcode_len: 2,
+            },
         }
     }
 
@@ -157,7 +213,15 @@ impl SseOpcode {
             13 => Self::Sqrtss,
             14 => Self::Sqrtsd,
             15 => Self::Roundss,
-            _ => Self::Roundsd,
+            16 => Self::Roundsd,
+            17 => Self::Andps,
+            18 => Self::Andpd,
+            19 => Self::Orps,
+            20 => Self::Orpd,
+            21 => Self::Minps,
+            22 => Self::Minpd,
+            23 => Self::Maxps,
+            _ => Self::Maxpd,
         }
     }
 
@@ -186,6 +250,14 @@ impl fmt::Display for SseOpcode {
             Self::Sqrtsd => "sqrtsd",
             Self::Roundss => "roundss",
             Self::Roundsd => "roundsd",
+            Self::Andps => "andps",
+            Self::Andpd => "andpd",
+            Self::Orps => "orps",
+            Self::Orpd => "orpd",
+            Self::Minps => "minps",
+            Self::Minpd => "minpd",
+            Self::Maxps => "maxps",
+            Self::Maxpd => "maxpd",
         })
     }
 }
@@ -201,6 +273,7 @@ mod tests {
         let ucomisd = SseOpcode::Ucomisd.encoding();
         let sqrtsd = SseOpcode::Sqrtsd.encoding();
         let roundss = SseOpcode::Roundss.encoding();
+        let minpd = SseOpcode::Minpd.encoding();
         assert_eq!(movsd.prefix, Some(0xF2));
         assert_eq!(movsd.load_opcode, 0x0F10);
         assert_eq!(addss.prefix, Some(0xF3));
@@ -208,10 +281,13 @@ mod tests {
         assert_eq!(ucomisd.load_opcode, 0x0F2E);
         assert_eq!(sqrtsd.load_opcode, 0x0F51);
         assert_eq!(roundss.load_opcode, 0x0F3A0A);
+        assert_eq!(minpd.prefix, Some(0x66));
+        assert_eq!(minpd.load_opcode, 0x0F5D);
         assert_eq!(SseOpcode::Movdqu.to_string(), "movdqu");
         assert_eq!(SseOpcode::Divsd.to_string(), "divsd");
         assert_eq!(SseOpcode::Ucomiss.to_string(), "ucomiss");
         assert_eq!(SseOpcode::Sqrtss.to_string(), "sqrtss");
         assert_eq!(SseOpcode::Roundsd.to_string(), "roundsd");
+        assert_eq!(SseOpcode::Maxps.to_string(), "maxps");
     }
 }
