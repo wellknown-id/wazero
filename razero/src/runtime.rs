@@ -1928,6 +1928,10 @@ mod tests {
         request.function.as_ref().map(FunctionDefinition::name) != Some("hook_impl")
     }
 
+    fn deny_start_host_call(_ctx: &Context, request: &HostCallPolicyRequest) -> bool {
+        request.function.as_ref().map(FunctionDefinition::name) != Some("start")
+    }
+
     fn deny_high_arity_host_calls(_ctx: &Context, request: &HostCallPolicyRequest) -> bool {
         request.param_count() <= 2
     }
@@ -4047,6 +4051,163 @@ mod tests {
             assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
             assert_eq!(0, called.load(Ordering::SeqCst));
         }
+    }
+
+    #[test]
+    fn import_acl_resolution_can_succeed_before_host_call_policy_denies_callback() {
+        let runtime = Runtime::new();
+        let called = Arc::new(AtomicU32::new(0));
+        runtime
+            .new_host_module_builder("env")
+            .new_function_builder()
+            .with_func(
+                {
+                    let called = called.clone();
+                    move |_ctx, _module, _params| {
+                        called.fetch_add(1, Ordering::SeqCst);
+                        Ok(Vec::new())
+                    }
+                },
+                &[],
+                &[],
+            )
+            .with_name("start")
+            .export("start")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let import_events = Arc::new(Mutex::new(Vec::new()));
+        let trap_events = Arc::new(Mutex::new(Vec::new()));
+        let ctx = with_trap_observer(
+            &with_host_call_policy(
+                &crate::with_import_resolver_observer(
+                    &crate::experimental::with_import_resolver_acl(
+                        &Context::default(),
+                        crate::experimental::ImportACL::new().allow_modules(["env"]),
+                    ),
+                    RecordingImportResolverObserver {
+                        events: import_events.clone(),
+                    },
+                ),
+                deny_env_host_calls,
+            ),
+            {
+                let trap_events = trap_events.clone();
+                move |_ctx: &Context, observation: TrapObservation| {
+                    trap_events
+                        .lock()
+                        .expect("trap observations poisoned")
+                        .push((observation.cause, observation.err.to_string()));
+                }
+            },
+        );
+        let compiled_guest = compile_guest_with_start_import(&runtime, "env");
+
+        let guest = runtime
+            .instantiate_with_context(&ctx, &compiled_guest, ModuleConfig::new())
+            .unwrap();
+        let err = guest
+            .exported_function("run")
+            .unwrap()
+            .call_with_context(&ctx, &[])
+            .unwrap_err();
+
+        assert_eq!("policy denied: host call", err.to_string());
+        assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+        assert_eq!(0, called.load(Ordering::SeqCst));
+        assert_eq!(
+            vec![
+                ImportObserverRecord {
+                    import_module: "env".to_string(),
+                    event: crate::ImportResolverEvent::AclAllowed,
+                    resolved: false,
+                },
+                ImportObserverRecord {
+                    import_module: "env".to_string(),
+                    event: crate::ImportResolverEvent::StoreFallback,
+                    resolved: false,
+                },
+            ],
+            *import_events
+                .lock()
+                .expect("import observer events poisoned")
+        );
+        assert_eq!(
+            vec![(
+                TrapCause::PolicyDenied,
+                "policy denied: host call".to_string()
+            )],
+            *trap_events.lock().expect("trap observations poisoned")
+        );
+    }
+
+    #[test]
+    fn import_acl_prefix_resolution_can_succeed_before_host_call_policy_denies_callback() {
+        let runtime = Runtime::new();
+        let called = Arc::new(AtomicU32::new(0));
+        runtime
+            .new_host_module_builder("wasi_snapshot_preview1")
+            .new_function_builder()
+            .with_func(
+                {
+                    let called = called.clone();
+                    move |_ctx, _module, _params| {
+                        called.fetch_add(1, Ordering::SeqCst);
+                        Ok(Vec::new())
+                    }
+                },
+                &[],
+                &[],
+            )
+            .with_name("start")
+            .export("start")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let import_events = Arc::new(Mutex::new(Vec::new()));
+        let ctx = with_host_call_policy(
+            &crate::with_import_resolver_observer(
+                &crate::experimental::with_import_resolver_acl(
+                    &Context::default(),
+                    crate::experimental::ImportACL::new().allow_module_prefixes(["wasi_"]),
+                ),
+                RecordingImportResolverObserver {
+                    events: import_events.clone(),
+                },
+            ),
+            deny_start_host_call,
+        );
+        let compiled_guest = compile_guest_with_start_import(&runtime, "wasi_snapshot_preview1");
+
+        let guest = runtime
+            .instantiate_with_context(&ctx, &compiled_guest, ModuleConfig::new())
+            .unwrap();
+        let err = guest
+            .exported_function("run")
+            .unwrap()
+            .call_with_context(&ctx, &[])
+            .unwrap_err();
+
+        assert_eq!("policy denied: host call", err.to_string());
+        assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+        assert_eq!(0, called.load(Ordering::SeqCst));
+        assert_eq!(
+            vec![
+                ImportObserverRecord {
+                    import_module: "wasi_snapshot_preview1".to_string(),
+                    event: crate::ImportResolverEvent::AclAllowed,
+                    resolved: false,
+                },
+                ImportObserverRecord {
+                    import_module: "wasi_snapshot_preview1".to_string(),
+                    event: crate::ImportResolverEvent::StoreFallback,
+                    resolved: false,
+                },
+            ],
+            *import_events
+                .lock()
+                .expect("import observer events poisoned")
+        );
     }
 
     #[test]
