@@ -60,6 +60,13 @@ mod tests {
         assert!(ASM_SOURCE.contains("razero_fault_return_trampoline"));
     }
 
+    #[test]
+    fn assembly_source_defines_execution_context_offsets() {
+        assert!(ASM_SOURCE.contains(".equ EXECCTX_EXITCODE_OFF, 0"));
+        assert!(ASM_SOURCE.contains(".equ EXECCTX_ORIGFP_OFF, 16"));
+        assert!(ASM_SOURCE.contains(".equ EXECCTX_ORIGSP_OFF, 24"));
+    }
+
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
     fn install_signal_handler_replaces_sigsegv_handler() {

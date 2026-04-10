@@ -65,9 +65,59 @@ pub fn after_go_function_call_entrypoint(
 #[cfg(test)]
 mod tests {
     use super::ENTRY_ASM_SOURCE;
+    #[cfg(not(target_arch = "x86_64"))]
+    use super::{after_go_function_call_entrypoint, entrypoint};
+    #[cfg(not(target_arch = "x86_64"))]
+    use std::panic::{catch_unwind, AssertUnwindSafe};
 
     #[test]
     fn assembly_source_is_present() {
         assert!(ENTRY_ASM_SOURCE.contains("razero_amd64_entrypoint"));
+        assert!(ENTRY_ASM_SOURCE.contains("razero_amd64_after_go_function_call_entrypoint"));
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    #[test]
+    fn entrypoint_rejects_non_x86_64_targets() {
+        let err = catch_unwind(AssertUnwindSafe(|| {
+            entrypoint(
+                core::ptr::null(),
+                core::ptr::null(),
+                0,
+                core::ptr::null(),
+                core::ptr::null_mut(),
+                0,
+            )
+        }))
+        .expect_err("non-x86_64 entrypoint should panic");
+
+        let message = err
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| err.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("<non-string panic>");
+        assert_eq!(
+            "amd64 entrypoint is only available on x86_64 targets",
+            message
+        );
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    #[test]
+    fn after_go_function_call_entrypoint_rejects_non_x86_64_targets() {
+        let err = catch_unwind(AssertUnwindSafe(|| {
+            after_go_function_call_entrypoint(core::ptr::null(), 0, 0, 0)
+        }))
+        .expect_err("non-x86_64 after-go entrypoint should panic");
+
+        let message = err
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| err.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("<non-string panic>");
+        assert_eq!(
+            "amd64 after-go-function entrypoint is only available on x86_64 targets",
+            message
+        );
     }
 }
