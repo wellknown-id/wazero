@@ -497,18 +497,55 @@ impl BackendMachine for Amd64Machine {
                     .instructions
                     .push(Amd64Instr::mov_rr(tmp, dst, is_64));
             }
-            Opcode::Load => {
+            Opcode::Load
+            | Opcode::Uload8
+            | Opcode::Sload8
+            | Opcode::Uload16
+            | Opcode::Sload16
+            | Opcode::Uload32
+            | Opcode::Sload32 => {
                 let (ptr, offset, typ) = instruction.load_data();
                 let dst = self.compiler().v_reg_of(instruction.return_());
                 let ptr = self.compiler().v_reg_of(ptr);
                 let mem = mem_operand_from_base(ptr, offset);
-                let inst = match typ {
-                    Type::I32 => Amd64Instr::movzx_rm_r(ExtMode::LQ, mem, dst),
-                    Type::I64 => Amd64Instr::mov64_mr(mem, dst),
-                    Type::F32 => Amd64Instr::xmm_unary_rm_r(SseOpcode::Movss, mem, dst),
-                    Type::F64 => Amd64Instr::xmm_unary_rm_r(SseOpcode::Movsd, mem, dst),
-                    Type::V128 => Amd64Instr::xmm_unary_rm_r(SseOpcode::Movdqu, mem, dst),
-                    Type::Invalid => panic!("invalid load type"),
+                let inst = match instruction.opcode {
+                    Opcode::Load => match typ {
+                        Type::I32 => Amd64Instr::movzx_rm_r(ExtMode::LQ, mem, dst),
+                        Type::I64 => Amd64Instr::mov64_mr(mem, dst),
+                        Type::F32 => Amd64Instr::xmm_unary_rm_r(SseOpcode::Movss, mem, dst),
+                        Type::F64 => Amd64Instr::xmm_unary_rm_r(SseOpcode::Movsd, mem, dst),
+                        Type::V128 => Amd64Instr::xmm_unary_rm_r(SseOpcode::Movdqu, mem, dst),
+                        Type::Invalid => panic!("invalid load type"),
+                    },
+                    Opcode::Uload8 => match typ {
+                        Type::I32 => Amd64Instr::movzx_rm_r(ExtMode::BL, mem, dst),
+                        Type::I64 => Amd64Instr::movzx_rm_r(ExtMode::BQ, mem, dst),
+                        _ => panic!("unsupported amd64 uload8 type: {:?}", typ),
+                    },
+                    Opcode::Sload8 => match typ {
+                        Type::I32 => Amd64Instr::movsx_rm_r(ExtMode::BL, mem, dst),
+                        Type::I64 => Amd64Instr::movsx_rm_r(ExtMode::BQ, mem, dst),
+                        _ => panic!("unsupported amd64 sload8 type: {:?}", typ),
+                    },
+                    Opcode::Uload16 => match typ {
+                        Type::I32 => Amd64Instr::movzx_rm_r(ExtMode::WL, mem, dst),
+                        Type::I64 => Amd64Instr::movzx_rm_r(ExtMode::WQ, mem, dst),
+                        _ => panic!("unsupported amd64 uload16 type: {:?}", typ),
+                    },
+                    Opcode::Sload16 => match typ {
+                        Type::I32 => Amd64Instr::movsx_rm_r(ExtMode::WL, mem, dst),
+                        Type::I64 => Amd64Instr::movsx_rm_r(ExtMode::WQ, mem, dst),
+                        _ => panic!("unsupported amd64 sload16 type: {:?}", typ),
+                    },
+                    Opcode::Uload32 => match typ {
+                        Type::I64 => Amd64Instr::movzx_rm_r(ExtMode::LQ, mem, dst),
+                        _ => panic!("unsupported amd64 uload32 type: {:?}", typ),
+                    },
+                    Opcode::Sload32 => match typ {
+                        Type::I64 => Amd64Instr::movsx_rm_r(ExtMode::LQ, mem, dst),
+                        _ => panic!("unsupported amd64 sload32 type: {:?}", typ),
+                    },
+                    _ => unreachable!(),
                 };
                 self.current_block_mut().instructions.push(inst);
             }
@@ -1008,6 +1045,28 @@ mod tests {
         m.format()
     }
 
+    fn lower_partial_load_opcode(opcode: Opcode, typ: Type) -> String {
+        let mut m = Amd64Machine::new();
+        m.start_lowering_function(BasicBlockId(0));
+        m.start_block(BasicBlockId(0));
+
+        let mut compiler = Box::new(TestCompilerContext::default());
+        compiler.regs = vec![
+            VReg::from_real_reg(1, RegType::Int),
+            VReg::from_real_reg(4, RegType::Int),
+        ];
+        let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
+        m.set_compiler(ptr);
+
+        let mut instruction = crate::ssa::Instruction::new().with_opcode(opcode);
+        instruction.v = Value(0).with_type(Type::I64);
+        instruction.r_value = Value(1).with_type(typ);
+        instruction.typ = typ;
+
+        m.lower_instr(&instruction);
+        m.format()
+    }
+
     #[test]
     fn lowers_ishl_to_amd64_shift_sequence() {
         let formatted = lower_shift_opcode(Opcode::Ishl);
@@ -1027,5 +1086,41 @@ mod tests {
     fn lowers_rotr_to_amd64_rotate_sequence() {
         let formatted = lower_shift_opcode(Opcode::Rotr);
         assert!(formatted.contains("rorq %cl, %r11"));
+    }
+
+    #[test]
+    fn lowers_i32_uload8_to_amd64_movzx_bl() {
+        let formatted = lower_partial_load_opcode(Opcode::Uload8, Type::I32);
+        assert!(formatted.contains("movzx.bl"));
+    }
+
+    #[test]
+    fn lowers_i64_sload8_to_amd64_movsx_bq() {
+        let formatted = lower_partial_load_opcode(Opcode::Sload8, Type::I64);
+        assert!(formatted.contains("movsx.bq"));
+    }
+
+    #[test]
+    fn lowers_i64_uload16_to_amd64_movzx_wq() {
+        let formatted = lower_partial_load_opcode(Opcode::Uload16, Type::I64);
+        assert!(formatted.contains("movzx.wq"));
+    }
+
+    #[test]
+    fn lowers_i32_sload16_to_amd64_movsx_wl() {
+        let formatted = lower_partial_load_opcode(Opcode::Sload16, Type::I32);
+        assert!(formatted.contains("movsx.wl"));
+    }
+
+    #[test]
+    fn lowers_i64_uload32_to_amd64_movzx_lq() {
+        let formatted = lower_partial_load_opcode(Opcode::Uload32, Type::I64);
+        assert!(formatted.contains("movzx.lq"));
+    }
+
+    #[test]
+    fn lowers_i64_sload32_to_amd64_movsx_lq() {
+        let formatted = lower_partial_load_opcode(Opcode::Sload32, Type::I64);
+        assert!(formatted.contains("movsx.lq"));
     }
 }
