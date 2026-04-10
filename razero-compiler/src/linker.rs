@@ -2677,6 +2677,87 @@ int main(void) {
     }
 
     #[test]
+    fn package_metadata_bundle_round_trips_with_runtime_state_aot_sidecar() {
+        let module = Module {
+            type_section: vec![
+                function_type(&[], &[]),
+                function_type(&[], &[ValueType::I32]),
+            ],
+            function_section: vec![1, 0, 1],
+            table_section: vec![Table {
+                min: 1,
+                max: Some(1),
+                ty: RefType::FUNCREF,
+            }],
+            memory_section: Some(razero_wasm::module::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                ..razero_wasm::module::Memory::default()
+            }),
+            global_section: vec![Global {
+                ty: GlobalType {
+                    val_type: ValueType::I32,
+                    mutable: false,
+                },
+                init: ConstExpr::from_i32(0),
+            }],
+            code_section: vec![
+                Code {
+                    body: vec![0x41, 0x07, 0x0b],
+                    ..Code::default()
+                },
+                Code {
+                    body: vec![0x0b],
+                    ..Code::default()
+                },
+                Code {
+                    body: vec![0x41, 0x05, 0x0b],
+                    ..Code::default()
+                },
+            ],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 2,
+            }],
+            start_section: Some(1),
+            data_section: vec![DataSegment {
+                offset_expression: ConstExpr::from_opcode(0x23, &[0]),
+                init: vec![5],
+                passive: false,
+            }],
+            element_section: vec![ElementSegment {
+                offset_expr: ConstExpr::from_opcode(0x23, &[0]),
+                table_index: 0,
+                init: vec![ConstExpr::from_opcode(0xd2, &[0])],
+                ty: RefType::FUNCREF,
+                mode: ElementMode::Active,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let metadata = compile_module_metadata(&module);
+        let sidecar = serialize_aot_metadata(&metadata);
+        let bundle = NativePackageMetadataBundle {
+            modules: vec![NativePackageMetadataEntry {
+                module_name: "guest".to_string(),
+                metadata_sidecar_bytes: sidecar,
+            }],
+            host_imports: Vec::new(),
+        };
+
+        let encoded = serialize_native_package_metadata_bundle(&bundle);
+        let decoded = deserialize_native_package_metadata_bundle(&encoded).unwrap();
+        assert_eq!(decoded, bundle);
+        let decoded_metadata =
+            crate::aot::deserialize_aot_metadata(&decoded.modules[0].metadata_sidecar_bytes)
+                .unwrap();
+        assert_eq!(decoded_metadata, metadata);
+    }
+
+    #[test]
     fn package_metadata_bundle_rejects_invalid_magic_number() {
         let bundle = sample_package_metadata_bundle();
         let mut encoded = serialize_native_package_metadata_bundle(&bundle);
