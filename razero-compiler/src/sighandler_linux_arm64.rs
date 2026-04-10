@@ -72,6 +72,14 @@ mod tests {
         assert!(ASM_SOURCE.contains(".equ EXECCTX_GORET_OFF, 32"));
     }
 
+    #[test]
+    fn assembly_source_defines_sigcontext_offsets() {
+        assert!(ASM_SOURCE.contains(".equ UCONTEXT_MCONTEXT_OFF, 176"));
+        assert!(ASM_SOURCE.contains(".equ SIGCONTEXT_REGS_OFF, 8"));
+        assert!(ASM_SOURCE.contains(".equ SIGCONTEXT_SP_OFF, 256"));
+        assert!(ASM_SOURCE.contains(".equ SIGCONTEXT_PC_OFF, 264"));
+    }
+
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     #[test]
     fn install_signal_handler_replaces_sigsegv_handler() {

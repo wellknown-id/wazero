@@ -67,6 +67,20 @@ mod tests {
         assert!(ASM_SOURCE.contains(".equ EXECCTX_ORIGSP_OFF, 24"));
     }
 
+    #[test]
+    fn assembly_source_defines_platform_register_offsets() {
+        assert!(ASM_SOURCE.contains(".equ REG_R15, 7"));
+        assert!(ASM_SOURCE.contains(".equ REG_RBP, 10"));
+        assert!(ASM_SOURCE.contains(".equ REG_RSP, 15"));
+        assert!(ASM_SOURCE.contains(".equ REG_RIP, 16"));
+    }
+
+    #[test]
+    fn assembly_source_defines_ucontext_offsets() {
+        assert!(ASM_SOURCE.contains(".equ UCONTEXT_MCONTEXT_OFF, 40"));
+        assert!(ASM_SOURCE.contains(".equ MCONTEXT_GREGS_OFF, 0"));
+    }
+
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
     fn install_signal_handler_replaces_sigsegv_handler() {
