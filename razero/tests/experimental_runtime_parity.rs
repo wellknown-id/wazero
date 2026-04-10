@@ -588,17 +588,27 @@ fn interpreter_guest_host_callbacks_can_observe_runtime_fuel() {
 #[test]
 fn interpreter_guest_loops_trap_when_fuel_exhausts() {
     let runtime = Runtime::with_config(RuntimeConfig::new_interpreter().with_fuel(1));
+    let observations = Arc::new(Mutex::new(Vec::new()));
     let guest = runtime
         .instantiate_binary(LOOP_EXPORT_WASM, ModuleConfig::new())
         .unwrap();
+    let ctx = with_trap_observer(
+        &Context::default(),
+        record_trap_observations(observations.clone()),
+    );
 
     let err = guest
         .exported_function("run")
         .unwrap()
-        .call(&[])
+        .call_with_context(&ctx, &[])
         .unwrap_err();
 
     assert_eq!("fuel exhausted", err.to_string());
+    assert_eq!(Some(TrapCause::FuelExhausted), trap_cause_of(&err));
+    assert_eq!(
+        vec![(TrapCause::FuelExhausted, "fuel exhausted".to_string())],
+        *observations.lock().expect("trap observations poisoned")
+    );
 }
 
 #[test]
