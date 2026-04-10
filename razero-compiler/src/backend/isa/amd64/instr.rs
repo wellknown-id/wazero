@@ -109,6 +109,7 @@ pub enum InstructionKind {
     Call,
     CallIndirect,
     Xchg,
+    GprToXmm,
     XmmUnaryRmR,
     XmmUnaryRmRImm,
     XmmCmpRmR,
@@ -419,6 +420,18 @@ impl Amd64Instr {
         inst
     }
 
+    pub fn gpr_to_xmm(op: SseOpcode, src: Operand, dst: VReg, src_64: bool) -> Self {
+        let inst = Self::new(InstructionKind::GprToXmm);
+        {
+            let mut d = inst.0.borrow_mut();
+            d.op1 = Some(src);
+            d.op2 = Some(Operand::reg(dst));
+            d.u1 = op as u64;
+            d.b1 = src_64;
+        }
+        inst
+    }
+
     pub fn xmm_unary_rm_r(op: SseOpcode, src: Operand, dst: VReg) -> Self {
         let inst = Self::new(InstructionKind::XmmUnaryRmR);
         {
@@ -522,6 +535,11 @@ impl Amd64Instr {
                     out.push(reg);
                 }
             }
+            InstructionKind::GprToXmm => {
+                if let Some(Operand::Reg(reg)) = d.op2 {
+                    out.push(reg);
+                }
+            }
             _ => {
                 if let Some(Operand::Reg(reg)) = d.op2 {
                     out.push(reg);
@@ -573,6 +591,7 @@ impl Amd64Instr {
             InstructionKind::AluRmiR
             | InstructionKind::CmpRmiR
             | InstructionKind::Cmove
+            | InstructionKind::GprToXmm
             | InstructionKind::Xchg
             | InstructionKind::XmmCmpRmR => {
                 if let Some(op1) = &d.op1 {
@@ -871,6 +890,13 @@ impl fmt::Display for Amd64Instr {
                 },
                 op1.expect("xchg lhs").format(true),
                 op2.expect("xchg rhs").format(true)
+            ),
+            InstructionKind::GprToXmm => write!(
+                f,
+                "{} {}, {}",
+                SseOpcode::from_u64(d.u1),
+                op1.expect("gpr src").format(d.b1),
+                op2.expect("xmm dst").format(false)
             ),
             InstructionKind::XmmUnaryRmR => write!(
                 f,

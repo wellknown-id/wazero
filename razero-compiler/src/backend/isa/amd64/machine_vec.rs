@@ -31,6 +31,8 @@ pub enum SseOpcode {
     Maxpd,
     Cvtss2sd,
     Cvtsd2ss,
+    Cvtsi2ss,
+    Cvtsi2sd,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -206,6 +208,18 @@ impl SseOpcode {
                 store_opcode: 0x0F5A,
                 opcode_len: 2,
             },
+            Self::Cvtsi2ss => SseEncoding {
+                prefix: Some(0xF3),
+                load_opcode: 0x0F2A,
+                store_opcode: 0x0F2A,
+                opcode_len: 2,
+            },
+            Self::Cvtsi2sd => SseEncoding {
+                prefix: Some(0xF2),
+                load_opcode: 0x0F2A,
+                store_opcode: 0x0F2A,
+                opcode_len: 2,
+            },
         }
     }
 
@@ -237,7 +251,9 @@ impl SseOpcode {
             23 => Self::Maxps,
             24 => Self::Maxpd,
             25 => Self::Cvtss2sd,
-            _ => Self::Cvtsd2ss,
+            26 => Self::Cvtsd2ss,
+            27 => Self::Cvtsi2ss,
+            _ => Self::Cvtsi2sd,
         }
     }
 
@@ -276,6 +292,8 @@ impl fmt::Display for SseOpcode {
             Self::Maxpd => "maxpd",
             Self::Cvtss2sd => "cvtss2sd",
             Self::Cvtsd2ss => "cvtsd2ss",
+            Self::Cvtsi2ss => "cvtsi2ss",
+            Self::Cvtsi2sd => "cvtsi2sd",
         })
     }
 }
@@ -293,6 +311,7 @@ mod tests {
         let roundss = SseOpcode::Roundss.encoding();
         let minpd = SseOpcode::Minpd.encoding();
         let cvtss2sd = SseOpcode::Cvtss2sd.encoding();
+        let cvtsi2sd = SseOpcode::Cvtsi2sd.encoding();
         assert_eq!(movsd.prefix, Some(0xF2));
         assert_eq!(movsd.load_opcode, 0x0F10);
         assert_eq!(addss.prefix, Some(0xF3));
@@ -303,6 +322,7 @@ mod tests {
         assert_eq!(minpd.prefix, Some(0x66));
         assert_eq!(minpd.load_opcode, 0x0F5D);
         assert_eq!(cvtss2sd.load_opcode, 0x0F5A);
+        assert_eq!(cvtsi2sd.load_opcode, 0x0F2A);
         assert_eq!(SseOpcode::Movdqu.to_string(), "movdqu");
         assert_eq!(SseOpcode::Divsd.to_string(), "divsd");
         assert_eq!(SseOpcode::Ucomiss.to_string(), "ucomiss");
@@ -310,5 +330,6 @@ mod tests {
         assert_eq!(SseOpcode::Roundsd.to_string(), "roundsd");
         assert_eq!(SseOpcode::Maxps.to_string(), "maxps");
         assert_eq!(SseOpcode::Cvtsd2ss.to_string(), "cvtsd2ss");
+        assert_eq!(SseOpcode::Cvtsi2ss.to_string(), "cvtsi2ss");
     }
 }
