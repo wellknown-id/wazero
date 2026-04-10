@@ -1647,10 +1647,17 @@ fn read_value_types(
 fn read_global_type_metadata(
     cursor: &mut Cursor<&[u8]>,
 ) -> Result<AotGlobalTypeMetadata, AotMetadataError> {
-    Ok(AotGlobalTypeMetadata {
-        val_type: ValueType(read_u8(cursor)?),
-        mutable: read_u8(cursor)? != 0,
-    })
+    let val_type = ValueType(read_u8(cursor)?);
+    let mutable = match read_u8(cursor)? {
+        0 => false,
+        1 => true,
+        _ => {
+            return Err(AotMetadataError::InvalidHeader(
+                "aot metadata: invalid global mutable flag".to_string(),
+            ));
+        }
+    };
+    Ok(AotGlobalTypeMetadata { val_type, mutable })
 }
 
 fn read_memory_metadata(cursor: &mut Cursor<&[u8]>) -> Result<AotMemoryMetadata, AotMetadataError> {
