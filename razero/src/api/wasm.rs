@@ -824,7 +824,10 @@ impl Function {
             listener_stack: listener_stack.clone(),
         });
 
-        let request = HostCallPolicyRequest::new().with_function(self.inner.definition.clone());
+        let mut request = HostCallPolicyRequest::new().with_function(self.inner.definition.clone());
+        if let Some(module_name) = module.name() {
+            request = request.with_caller_module_name(module_name);
+        }
         let policy = ctx
             .host_call_policy
             .clone()

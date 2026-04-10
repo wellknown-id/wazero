@@ -4141,6 +4141,93 @@ mod tests {
     }
 
     #[test]
+    fn host_call_policy_tracks_caller_module_name_on_direct_host_export() {
+        let runtime = Runtime::new();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let module = runtime
+            .new_host_module_builder("example")
+            .new_function_builder()
+            .with_func(
+                |_ctx, _module, params| Ok(vec![params[0]]),
+                &[ValueType::I32],
+                &[ValueType::I32],
+            )
+            .with_name("hook_impl")
+            .export("hook")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let ctx = with_host_call_policy(&Context::default(), {
+            let observed = observed.clone();
+            move |_ctx: &Context, request: &HostCallPolicyRequest| {
+                observed
+                    .lock()
+                    .expect("observed host-call metadata poisoned")
+                    .push((
+                        request.caller_module_name().map(str::to_string),
+                        request
+                            .function
+                            .clone()
+                            .expect("host call policy should receive metadata"),
+                    ));
+                false
+            }
+        });
+        let err = module
+            .exported_function("hook")
+            .unwrap()
+            .call_with_context(&ctx, &[1])
+            .unwrap_err();
+        assert_eq!("policy denied: host call", err.to_string());
+        assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+
+        let observed = observed
+            .lock()
+            .expect("observed host-call metadata poisoned");
+        assert_eq!(1, observed.len());
+        let (caller_module, definition) = &observed[0];
+        assert_eq!(Some("example".to_string()), *caller_module);
+        assert_eq!("hook_impl", definition.name());
+        assert_eq!(Some("example"), definition.module_name());
+        assert_eq!(&["hook".to_string()], definition.export_names());
+    }
+
+    #[test]
+    fn host_call_policy_can_filter_direct_host_exports_by_caller_module_name() {
+        let runtime = Runtime::with_config(
+            RuntimeConfig::new().with_host_call_policy(deny_untrusted_caller_module),
+        );
+        let called = Arc::new(AtomicU32::new(0));
+        let module = runtime
+            .new_host_module_builder("untrusted")
+            .new_function_builder()
+            .with_func(
+                {
+                    let called = called.clone();
+                    move |_ctx, _module, params| {
+                        called.fetch_add(1, Ordering::SeqCst);
+                        Ok(vec![params[0]])
+                    }
+                },
+                &[ValueType::I32],
+                &[ValueType::I32],
+            )
+            .with_name("hook_impl")
+            .export("hook")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let err = module
+            .exported_function("hook")
+            .unwrap()
+            .call_with_context(&Context::default(), &[7])
+            .unwrap_err();
+        assert_eq!("policy denied: host call", err.to_string());
+        assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+        assert_eq!(0, called.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn host_call_policy_context_overrides_runtime_config_policy() {
         let runtime =
             Runtime::with_config(RuntimeConfig::new().with_host_call_policy(deny_env_host_calls));
