@@ -534,6 +534,18 @@ impl BackendMachine for Amd64Machine {
                     .instructions
                     .push(Amd64Instr::unary_rm_r(op, Operand::reg(src), dst, is_64));
             }
+            Opcode::Icmp => {
+                let dst = self.compiler().v_reg_of(instruction.return_());
+                let cond = Self::integer_cmp_cond_from_u8(instruction.u1 as u8);
+                let cc = self.lower_icmp_to_flags(instruction.v, instruction.v2, cond);
+                let tmp = self.compiler_mut().allocate_vreg(Type::I32);
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::setcc(cc, tmp));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::movzx_rm_r(ExtMode::BQ, Operand::reg(tmp), dst));
+            }
             Opcode::Select => {
                 let dst = self.compiler().v_reg_of(instruction.return_());
                 let cond = self.compiler().v_reg_of(instruction.v);
@@ -1001,8 +1013,11 @@ mod tests {
             String::new()
         }
 
-        fn allocate_vreg(&mut self, _ty: Type) -> VReg {
-            VReg::INVALID
+        fn allocate_vreg(&mut self, ty: Type) -> VReg {
+            let id = crate::backend::VREG_ID_NON_RESERVED_BEGIN + self.regs.len() as u32;
+            let vreg = VReg(id as u64).set_reg_type(RegType::of(ty));
+            self.regs.push(vreg);
+            vreg
         }
 
         fn value_definition(&self, value: Value) -> SSAValueDefinition {
@@ -1272,6 +1287,31 @@ mod tests {
         m.format()
     }
 
+    fn lower_icmp_opcode(ty: Type, cond: IntegerCmpCond) -> String {
+        let mut m = Amd64Machine::new();
+        m.start_lowering_function(BasicBlockId(0));
+        m.start_block(BasicBlockId(0));
+
+        let mut compiler = Box::new(TestCompilerContext::default());
+        compiler.regs = vec![
+            VReg::from_real_reg(1, RegType::Int),
+            VReg::from_real_reg(3, RegType::Int),
+            VReg::from_real_reg(4, RegType::Int),
+        ];
+        let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
+        m.set_compiler(ptr);
+
+        let mut instruction = crate::ssa::Instruction::new().with_opcode(Opcode::Icmp);
+        instruction.v = Value(0).with_type(ty);
+        instruction.v2 = Value(1).with_type(ty);
+        instruction.r_value = Value(2).with_type(Type::I32);
+        instruction.typ = Type::I32;
+        instruction.u1 = cond as u64;
+
+        m.lower_instr(&instruction);
+        m.format()
+    }
+
     fn lower_exit_if_true_with_code_generic(exit_code: ExitCode) -> String {
         let mut m = Amd64Machine::new();
         m.start_lowering_function(BasicBlockId(0));
@@ -1394,6 +1434,22 @@ mod tests {
         assert!(formatted.contains("testl %eax, %eax"));
         assert!(formatted.contains("movq %rcx, %rsi"));
         assert!(formatted.contains("cmovnzq %rbx, %rsi"));
+    }
+
+    #[test]
+    fn lowers_i32_icmp_with_setcc_and_zero_extend() {
+        let formatted = lower_icmp_opcode(Type::I32, IntegerCmpCond::Equal);
+        assert!(formatted.contains("cmpl "));
+        assert!(formatted.contains("setz"));
+        assert!(formatted.contains("movzx.bq"));
+    }
+
+    #[test]
+    fn lowers_i64_icmp_with_64bit_compare() {
+        let formatted = lower_icmp_opcode(Type::I64, IntegerCmpCond::UnsignedLessThan);
+        assert!(formatted.contains("cmpq "));
+        assert!(formatted.contains("setb"));
+        assert!(formatted.contains("movzx.bq"));
     }
 
     #[test]
