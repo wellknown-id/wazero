@@ -5,7 +5,7 @@ use std::{
     fmt::{self, Display, Formatter},
     panic::{self, AssertUnwindSafe},
     sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc, Mutex, Weak,
     },
     thread,
@@ -54,6 +54,8 @@ thread_local! {
     static ACTIVE_INVOCATIONS: RefCell<Vec<(Context, Module)>> = const { RefCell::new(Vec::new()) };
 }
 
+static NEXT_RESUMER_ID: AtomicU64 = AtomicU64::new(1);
+
 pub(crate) fn with_active_invocation<T>(
     ctx: &Context,
     module: &Module,
@@ -69,6 +71,10 @@ pub(crate) fn with_active_invocation<T>(
 
 pub(crate) fn active_invocation() -> Option<(Context, Module)> {
     ACTIVE_INVOCATIONS.with(|active| active.borrow().last().cloned())
+}
+
+fn next_resumer_id() -> u64 {
+    NEXT_RESUMER_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 fn context_done_exit_code(reason: ContextDoneError) -> u32 {
@@ -737,6 +743,7 @@ impl Function {
         if module.is_closed() {
             return Err(ExitError::new(module.exit_code()).into());
         }
+        module.ensure_no_suspended_execution()?;
 
         let callback = self.inner.callback.clone().ok_or_else(|| {
             RuntimeError::new("guest function execution is not yet wired through the public API")
@@ -777,7 +784,9 @@ impl Function {
             params,
             self.source_offset_for_pc(0),
         );
+        let resumer_id = next_resumer_id();
         let resumer = Arc::new(PendingResumer::new(
+            resumer_id,
             module.clone(),
             self.inner.definition.clone(),
             listener.clone(),
@@ -879,6 +888,7 @@ impl Function {
                     if let Some(suspended) = take_suspended_invocation() {
                         resumer.install_suspended_invocation(suspended);
                     }
+                    module.mark_suspended(resumer_id);
                     snapshot_active.store(false, std::sync::atomic::Ordering::SeqCst);
                     let resumer: Arc<dyn Resumer> = resumer;
                     return Err(RuntimeError::from(YieldError::new(Some(resumer))));
@@ -918,6 +928,14 @@ pub(crate) struct ModuleInner {
     lower_module: Option<WasmModule>,
     store_module_id: Option<ModuleInstanceId>,
     import_aliases: Mutex<Vec<String>>,
+    suspension: Mutex<ModuleSuspensionState>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ModuleSuspensionState {
+    Ready,
+    Suspended { resumer_id: u64 },
+    Resuming { resumer_id: u64 },
 }
 
 pub type Instance = Module;
@@ -980,6 +998,7 @@ impl Module {
                     lower_module,
                     store_module_id,
                     import_aliases: Mutex::new(Vec::new()),
+                    suspension: Mutex::new(ModuleSuspensionState::Ready),
                 }
             }),
         }
@@ -1007,6 +1026,96 @@ impl Module {
 
     pub fn exported_function(&self, name: &str) -> Option<Function> {
         self.inner.functions.get(name).cloned()
+    }
+
+    fn ensure_no_suspended_execution(&self) -> Result<()> {
+        match *self
+            .inner
+            .suspension
+            .lock()
+            .expect("module suspension state poisoned")
+        {
+            ModuleSuspensionState::Ready => Ok(()),
+            ModuleSuspensionState::Suspended { .. } | ModuleSuspensionState::Resuming { .. } => {
+                Err(RuntimeError::new(
+                    "cannot call: module has suspended execution; resume or cancel the outstanding Resumer first",
+                ))
+            }
+        }
+    }
+
+    fn mark_suspended(&self, resumer_id: u64) {
+        *self
+            .inner
+            .suspension
+            .lock()
+            .expect("module suspension state poisoned") =
+            ModuleSuspensionState::Suspended { resumer_id };
+    }
+
+    fn begin_resume(&self, resumer_id: u64) -> Result<()> {
+        let mut state = self
+            .inner
+            .suspension
+            .lock()
+            .expect("module suspension state poisoned");
+        match *state {
+            ModuleSuspensionState::Ready => Err(RuntimeError::new(
+                "cannot resume: resumer has already been used",
+            )),
+            ModuleSuspensionState::Suspended {
+                resumer_id: active_id,
+            } if active_id == resumer_id => {
+                *state = ModuleSuspensionState::Resuming { resumer_id };
+                Ok(())
+            }
+            ModuleSuspensionState::Suspended { .. } => Err(RuntimeError::new(
+                "cannot resume: resumer has already been used",
+            )),
+            ModuleSuspensionState::Resuming {
+                resumer_id: active_id,
+            } if active_id == resumer_id => Err(RuntimeError::new(
+                "cannot resume: resumer is already being resumed",
+            )),
+            ModuleSuspensionState::Resuming { .. } => Err(RuntimeError::new(
+                "cannot resume: resumer has already been used",
+            )),
+        }
+    }
+
+    fn finish_resume(&self, resumer_id: u64) {
+        let mut state = self
+            .inner
+            .suspension
+            .lock()
+            .expect("module suspension state poisoned");
+        if matches!(
+            *state,
+            ModuleSuspensionState::Resuming {
+                resumer_id: active_id,
+            } if active_id == resumer_id
+        ) {
+            *state = ModuleSuspensionState::Ready;
+        }
+    }
+
+    fn cancel_resumer(&self, resumer_id: u64) -> bool {
+        let mut state = self
+            .inner
+            .suspension
+            .lock()
+            .expect("module suspension state poisoned");
+        if matches!(
+            *state,
+            ModuleSuspensionState::Suspended {
+                resumer_id: active_id,
+            } if active_id == resumer_id
+        ) {
+            *state = ModuleSuspensionState::Ready;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn exported_function_definitions(&self) -> BTreeMap<String, FunctionDefinition> {
@@ -1289,6 +1398,7 @@ impl Yielder for ActiveYielder {
 }
 
 struct PendingResumer {
+    id: u64,
     module: Module,
     definition: FunctionDefinition,
     listener: Option<Arc<dyn FunctionListener>>,
@@ -1301,6 +1411,7 @@ struct PendingResumer {
 
 impl PendingResumer {
     fn new(
+        id: u64,
         module: Module,
         definition: FunctionDefinition,
         listener: Option<Arc<dyn FunctionListener>>,
@@ -1313,6 +1424,7 @@ impl PendingResumer {
             .map(|remaining| remaining.load(std::sync::atomic::Ordering::SeqCst))
             .unwrap_or_default();
         Self {
+            id,
             module,
             definition,
             listener,
@@ -1329,12 +1441,10 @@ impl PendingResumer {
 
     fn install_suspended_invocation(&self, suspended: Arc<dyn SuspendedInvocation>) {
         let mut state = self.state.lock().expect("resumer state poisoned");
-        if let PendingResumerState::Pending {
+        let PendingResumerState::Pending {
             suspended: slot, ..
-        } = &mut *state
-        {
-            *slot = Some(suspended);
-        }
+        } = &mut *state;
+        *slot = Some(suspended);
     }
 
     fn note_fuel_checkpoint(&self) {
@@ -1355,17 +1465,29 @@ impl PendingResumer {
             controller.consumed((previous - current).max(0));
         }
     }
+
+    fn expected_host_result_count(
+        &self,
+        suspended: Option<&Arc<dyn SuspendedInvocation>>,
+    ) -> usize {
+        suspended
+            .and_then(|suspended| suspended.expected_host_result_count())
+            .unwrap_or_else(|| self.definition.result_types().len())
+    }
 }
 
 impl Resumer for PendingResumer {
     fn resume(&self, ctx: &Context, host_results: &[u64]) -> Result<Vec<u64>> {
+        if self.module.is_closed() {
+            return Err(ExitError::new(self.module.exit_code()).into());
+        }
         let suspended = {
-            let mut state = self.state.lock().expect("resumer state poisoned");
-            match std::mem::replace(&mut *state, PendingResumerState::Completed) {
+            let state = self.state.lock().expect("resumer state poisoned");
+            match &*state {
                 PendingResumerState::Pending {
                     suspended,
                     cancelled: false,
-                } => suspended,
+                } => suspended.clone(),
                 PendingResumerState::Pending {
                     cancelled: true, ..
                 } => {
@@ -1373,11 +1495,17 @@ impl Resumer for PendingResumer {
                         "cannot resume: resumer has been cancelled",
                     ));
                 }
-                PendingResumerState::Completed => {
-                    return Err(RuntimeError::new("resumer already completed"));
-                }
             }
         };
+        let expected_results = self.expected_host_result_count(suspended.as_ref());
+        if host_results.len() != expected_results {
+            return Err(RuntimeError::new(format!(
+                "cannot resume: expected {} host results, but got {}",
+                expected_results,
+                host_results.len()
+            )));
+        }
+        self.module.begin_resume(self.id)?;
 
         if let Some(suspended) = suspended {
             let yielder = ctx
@@ -1400,6 +1528,7 @@ impl Resumer for PendingResumer {
             }));
             match outcome {
                 Ok(Ok(results)) => {
+                    self.module.finish_resume(self.id);
                     if let Some(listener) = &self.listener {
                         listener.after(&invocation_ctx, &self.module, &self.definition, &results);
                     }
@@ -1407,6 +1536,7 @@ impl Resumer for PendingResumer {
                     Ok(results)
                 }
                 Ok(Err(error)) => {
+                    self.module.finish_resume(self.id);
                     let error = RuntimeError::new(error.to_string());
                     if let Some(listener) = &self.listener {
                         listener.abort(&invocation_ctx, &self.module, &self.definition, &error);
@@ -1418,6 +1548,7 @@ impl Resumer for PendingResumer {
                     if is_yield_suspend_payload(payload.as_ref()) {
                         self.consume_incremental_fuel();
                         let next = Arc::new(PendingResumer::new(
+                            next_resumer_id(),
                             self.module.clone(),
                             self.definition.clone(),
                             self.listener.clone(),
@@ -1429,17 +1560,21 @@ impl Resumer for PendingResumer {
                         if let Some(suspended) = take_suspended_invocation() {
                             next.install_suspended_invocation(suspended);
                         }
+                        self.module.mark_suspended(next.id);
                         let next: Arc<dyn Resumer> = next;
                         return Err(RuntimeError::from(YieldError::new(Some(next))));
                     }
                     if let Some(reason) = policy_denied_reason(payload.as_ref()) {
+                        self.module.finish_resume(self.id);
                         self.consume_incremental_fuel();
                         return Err(policy_denied_error(reason));
                     }
+                    self.module.finish_resume(self.id);
                     panic::resume_unwind(payload);
                 }
             }
         } else {
+            self.module.finish_resume(self.id);
             if let Some(listener) = &self.listener {
                 listener.after(ctx, &self.module, &self.definition, host_results);
             }
@@ -1449,6 +1584,9 @@ impl Resumer for PendingResumer {
     }
 
     fn cancel(&self) {
+        if !self.module.cancel_resumer(self.id) {
+            return;
+        }
         let suspended = {
             let mut state = self.state.lock().expect("resumer state poisoned");
             match std::mem::replace(
@@ -1479,7 +1617,6 @@ enum PendingResumerState {
         suspended: Option<Arc<dyn SuspendedInvocation>>,
         cancelled: bool,
     },
-    Completed,
 }
 
 #[cfg(test)]

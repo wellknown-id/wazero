@@ -117,6 +117,148 @@ fn yield_can_resume_from_another_thread() {
 }
 
 #[test]
+fn yield_call_while_suspended_is_rejected() {
+    let (_runtime, guest) = setup_yield_runtime();
+    let run = guest.exported_function("run").unwrap();
+
+    let err = run
+        .call_with_context(&with_yielder(&Context::default()), &[])
+        .unwrap_err();
+    let resumer = yielded(err).resumer().expect("resumer should be present");
+
+    let err = run
+        .call_with_context(&with_yielder(&Context::default()), &[])
+        .unwrap_err();
+    assert_eq!(
+        "cannot call: module has suspended execution; resume or cancel the outstanding Resumer first",
+        err.to_string()
+    );
+
+    assert_eq!(
+        vec![142],
+        resumer
+            .resume(&with_yielder(&Context::default()), &[42])
+            .unwrap()
+    );
+}
+
+#[test]
+fn yield_other_export_while_suspended_is_rejected() {
+    let (_runtime, guest) = setup_yield_runtime();
+
+    let err = guest
+        .exported_function("run")
+        .unwrap()
+        .call_with_context(&with_yielder(&Context::default()), &[])
+        .unwrap_err();
+    let resumer = yielded(err).resumer().expect("resumer should be present");
+
+    let err = guest
+        .exported_function("run_twice")
+        .unwrap()
+        .call_with_context(&with_yielder(&Context::default()), &[])
+        .unwrap_err();
+    assert_eq!(
+        "cannot call: module has suspended execution; resume or cancel the outstanding Resumer first",
+        err.to_string()
+    );
+
+    assert_eq!(
+        vec![142],
+        resumer
+            .resume(&with_yielder(&Context::default()), &[42])
+            .unwrap()
+    );
+}
+
+#[test]
+fn yield_resume_rejects_wrong_host_result_count_and_can_retry() {
+    let (_runtime, guest) = setup_yield_runtime();
+
+    let err = guest
+        .exported_function("run")
+        .unwrap()
+        .call_with_context(&with_yielder(&Context::default()), &[])
+        .unwrap_err();
+    let resumer = yielded(err).resumer().expect("resumer should be present");
+
+    let err = resumer
+        .resume(&with_yielder(&Context::default()), &[])
+        .unwrap_err();
+    assert_eq!(
+        "cannot resume: expected 1 host results, but got 0",
+        err.to_string()
+    );
+
+    assert_eq!(
+        vec![142],
+        resumer
+            .resume(&with_yielder(&Context::default()), &[42])
+            .unwrap()
+    );
+}
+
+#[test]
+fn yield_spent_resumer_cannot_be_reused() {
+    let (_runtime, guest) = setup_yield_runtime();
+
+    let err = guest
+        .exported_function("run")
+        .unwrap()
+        .call_with_context(&with_yielder(&Context::default()), &[])
+        .unwrap_err();
+    let resumer = yielded(err).resumer().expect("resumer should be present");
+
+    assert_eq!(
+        vec![142],
+        resumer
+            .resume(&with_yielder(&Context::default()), &[42])
+            .unwrap()
+    );
+
+    let err = resumer
+        .resume(&with_yielder(&Context::default()), &[42])
+        .unwrap_err();
+    assert_eq!(
+        "cannot resume: resumer has already been used",
+        err.to_string()
+    );
+}
+
+#[test]
+fn yield_reyield_uses_fresh_resumer() {
+    let (_runtime, guest) = setup_yield_runtime();
+
+    let err = guest
+        .exported_function("run_twice")
+        .unwrap()
+        .call_with_context(&with_yielder(&Context::default()), &[])
+        .unwrap_err();
+    let first_resumer = yielded(err).resumer().expect("resumer should be present");
+
+    let err = first_resumer
+        .resume(&with_yielder(&Context::default()), &[40])
+        .unwrap_err();
+    let second_resumer = yielded(err).resumer().expect("resumer should be present");
+
+    first_resumer.cancel();
+    let err = first_resumer
+        .resume(&with_yielder(&Context::default()), &[1])
+        .unwrap_err();
+    assert_eq!(
+        "cannot resume: resumer has already been used",
+        err.to_string()
+    );
+
+    assert_eq!(
+        vec![42],
+        second_resumer
+            .resume(&with_yielder(&Context::default()), &[2])
+            .unwrap()
+    );
+}
+
+#[test]
 fn yield_cancel_is_idempotent_and_blocks_resume() {
     let (_runtime, guest) = setup_yield_runtime();
 

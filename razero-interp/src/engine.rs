@@ -87,6 +87,7 @@ fn with_caller_module<T>(
 pub trait SuspendedInvocation: Send + Sync {
     fn resume(&self, host_results: &[u64]) -> RuntimeResult<Vec<u64>>;
     fn cancel(&self);
+    fn expected_host_result_count(&self) -> Option<usize>;
 }
 
 pub fn take_suspended_invocation() -> Option<Arc<dyn SuspendedInvocation>> {
@@ -187,6 +188,10 @@ impl SuspendedInvocation for RuntimeSuspendedInvocation {
     fn cancel(&self) {
         self.runtime.cancel(self.suspend_id);
     }
+
+    fn expected_host_result_count(&self) -> Option<usize> {
+        self.runtime.expected_host_result_count(self.suspend_id)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -222,6 +227,17 @@ impl ModuleRuntime {
         let mut state = lock_or_poison(&self.state);
         if state.suspend_id() == Some(suspend_id) {
             *state = ModuleRuntimeState::Ready(state.take_module());
+        }
+    }
+
+    fn expected_host_result_count(&self, suspend_id: u64) -> Option<usize> {
+        let state = lock_or_poison(&self.state);
+        match &*state {
+            ModuleRuntimeState::Suspended(suspended) if suspended.id == suspend_id => suspended
+                .interpreter
+                .expected_host_result_count(&suspended.call)
+                .ok(),
+            _ => None,
         }
     }
 

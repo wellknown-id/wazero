@@ -556,6 +556,24 @@ impl Interpreter {
         self.execute(suspended_call.root_function_index, engine)
     }
 
+    pub fn expected_host_result_count(
+        &self,
+        suspended_call: &SuspendedCall,
+    ) -> RuntimeResult<usize> {
+        let frame = suspended_call
+            .engine
+            .frames
+            .last()
+            .ok_or_else(|| Trap::new("host function resume is missing a suspended frame"))?;
+        let function = self.function(frame.function_index)?;
+        if function.host.is_none() {
+            return Err(Trap::new(
+                "host function resume expected a suspended host frame",
+            ));
+        }
+        Ok(function.signature.result_slots)
+    }
+
     fn execute(
         &mut self,
         root_function_index: usize,
