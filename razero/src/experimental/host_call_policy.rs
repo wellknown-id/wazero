@@ -58,6 +58,22 @@ impl HostCallPolicyRequest {
     pub fn import(&self) -> Option<(&str, &str)> {
         self.function.as_ref().and_then(FunctionDefinition::import)
     }
+
+    pub fn module_name(&self) -> Option<&str> {
+        self.function
+            .as_ref()
+            .and_then(FunctionDefinition::module_name)
+    }
+
+    pub fn export_names(&self) -> &[String] {
+        self.function
+            .as_ref()
+            .map_or(&[], FunctionDefinition::export_names)
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        self.function.as_ref().map(FunctionDefinition::name)
+    }
 }
 
 pub trait HostCallPolicy: Send + Sync {
@@ -174,6 +190,39 @@ mod tests {
         assert_eq!(0, request.param_count());
         assert_eq!(0, request.result_count());
         assert_eq!(None, request.import());
+        assert_eq!(None, request.module_name());
+        assert_eq!(None, request.name());
+        assert!(request.export_names().is_empty());
+    }
+
+    #[test]
+    fn host_call_policy_request_exposes_function_name() {
+        let function = FunctionDefinition::new("host.call");
+        let request = HostCallPolicyRequest::new().with_function(function);
+
+        assert_eq!(Some("host.call"), request.name());
+    }
+
+    #[test]
+    fn host_call_policy_request_exposes_module_name() {
+        let function =
+            FunctionDefinition::new("host.call").with_module_name(Some("env".to_string()));
+        let request = HostCallPolicyRequest::new().with_function(function);
+
+        assert_eq!(Some("env"), request.module_name());
+    }
+
+    #[test]
+    fn host_call_policy_request_exposes_export_names() {
+        let function = FunctionDefinition::new("host.call")
+            .with_export_name("call_v1")
+            .with_export_name("call_v2");
+        let request = HostCallPolicyRequest::new().with_function(function);
+
+        assert_eq!(
+            &["call_v1".to_string(), "call_v2".to_string()],
+            request.export_names()
+        );
     }
 
     #[test]

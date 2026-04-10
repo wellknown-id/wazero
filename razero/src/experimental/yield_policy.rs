@@ -58,6 +58,22 @@ impl YieldPolicyRequest {
     pub fn import(&self) -> Option<(&str, &str)> {
         self.function.as_ref().and_then(FunctionDefinition::import)
     }
+
+    pub fn module_name(&self) -> Option<&str> {
+        self.function
+            .as_ref()
+            .and_then(FunctionDefinition::module_name)
+    }
+
+    pub fn export_names(&self) -> &[String] {
+        self.function
+            .as_ref()
+            .map_or(&[], FunctionDefinition::export_names)
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        self.function.as_ref().map(FunctionDefinition::name)
+    }
 }
 
 pub trait YieldPolicy: Send + Sync {
@@ -199,6 +215,39 @@ mod tests {
         assert_eq!(0, request.param_count());
         assert_eq!(0, request.result_count());
         assert_eq!(None, request.import());
+        assert_eq!(None, request.module_name());
+        assert_eq!(None, request.name());
+        assert!(request.export_names().is_empty());
+    }
+
+    #[test]
+    fn yield_policy_request_exposes_function_name() {
+        let function = FunctionDefinition::new("host.yield");
+        let request = YieldPolicyRequest::new().with_function(function);
+
+        assert_eq!(Some("host.yield"), request.name());
+    }
+
+    #[test]
+    fn yield_policy_request_exposes_module_name() {
+        let function =
+            FunctionDefinition::new("host.yield").with_module_name(Some("env".to_string()));
+        let request = YieldPolicyRequest::new().with_function(function);
+
+        assert_eq!(Some("env"), request.module_name());
+    }
+
+    #[test]
+    fn yield_policy_request_exposes_export_names() {
+        let function = FunctionDefinition::new("host.yield")
+            .with_export_name("yield_v1")
+            .with_export_name("yield_v2");
+        let request = YieldPolicyRequest::new().with_function(function);
+
+        assert_eq!(
+            &["yield_v1".to_string(), "yield_v2".to_string()],
+            request.export_names()
+        );
     }
 
     #[test]
