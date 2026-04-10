@@ -29,6 +29,14 @@ impl HostCallPolicyRequest {
         self.function.as_ref().map(FunctionDefinition::result_types)
     }
 
+    pub fn param_names(&self) -> Option<&[String]> {
+        self.function.as_ref().map(FunctionDefinition::param_names)
+    }
+
+    pub fn result_names(&self) -> Option<&[String]> {
+        self.function.as_ref().map(FunctionDefinition::result_names)
+    }
+
     pub fn param_count(&self) -> usize {
         self.param_types().map_or(0, <[ValueType]>::len)
     }
@@ -114,7 +122,9 @@ mod tests {
     #[test]
     fn host_call_policy_request_exposes_signature_metadata() {
         let function = FunctionDefinition::new("host.call")
-            .with_signature(vec![ValueType::I32, ValueType::I64], vec![ValueType::F32]);
+            .with_signature(vec![ValueType::I32, ValueType::I64], vec![ValueType::F32])
+            .with_parameter_names(vec!["ptr".to_string(), "len".to_string()])
+            .with_result_names(vec!["ok".to_string()]);
         let request = HostCallPolicyRequest::new().with_function(function);
 
         assert_eq!(
@@ -122,6 +132,11 @@ mod tests {
             request.param_types()
         );
         assert_eq!(Some(&[ValueType::F32][..]), request.result_types());
+        assert_eq!(
+            Some(&["ptr".to_string(), "len".to_string()][..]),
+            request.param_names()
+        );
+        assert_eq!(Some(&["ok".to_string()][..]), request.result_names());
         assert_eq!(2, request.param_count());
         assert_eq!(1, request.result_count());
     }
@@ -140,6 +155,8 @@ mod tests {
 
         assert_eq!(None, request.param_types());
         assert_eq!(None, request.result_types());
+        assert_eq!(None, request.param_names());
+        assert_eq!(None, request.result_names());
         assert_eq!(0, request.param_count());
         assert_eq!(0, request.result_count());
         assert_eq!(None, request.import());
