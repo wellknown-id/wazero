@@ -2413,6 +2413,21 @@ int main(void) {
     }
 
     #[test]
+    fn package_metadata_bundle_round_trips_with_empty_module_name() {
+        let bundle = NativePackageMetadataBundle {
+            modules: vec![NativePackageMetadataEntry {
+                module_name: String::new(),
+                metadata_sidecar_bytes: vec![1, 2, 3],
+            }],
+            host_imports: Vec::new(),
+        };
+
+        let encoded = serialize_native_package_metadata_bundle(&bundle);
+        let decoded = deserialize_native_package_metadata_bundle(&encoded).unwrap();
+        assert_eq!(decoded, bundle);
+    }
+
+    #[test]
     fn package_metadata_bundle_rejects_invalid_magic_number() {
         let bundle = sample_package_metadata_bundle();
         let mut encoded = serialize_native_package_metadata_bundle(&bundle);
