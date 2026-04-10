@@ -232,7 +232,7 @@ native packaging for embedders that want a fully linked executable.
      - [100%:04af62a8] one Wasm module + one host static library
      - [80%:04af62a8] multiple Wasm modules
      - [85%:04af62a8] packaged explicit host imports beyond `hello-host`
-   - [95%:5d795e67] negative tests for ABI mismatches, malformed metadata, and unsupported
+   - [100%:6a7b8288] negative tests for ABI mismatches, malformed metadata, and unsupported
      target/runtime shapes
 
 ## Suggested implementation order
