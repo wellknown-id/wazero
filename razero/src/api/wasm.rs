@@ -22,6 +22,7 @@ use crate::{
         memory::LinearMemory,
         r#yield::{Resumer, YieldError, Yielder},
         snapshotter::{Snapshot, Snapshotter},
+        trap::{get_trap_observer, trap_cause_of, TrapObservation},
         yield_policy::YieldPolicyRequest,
     },
     runtime::RuntimeStore,
@@ -48,6 +49,23 @@ fn policy_denied_reason(payload: &(dyn Any + Send)) -> Option<&'static str> {
     payload
         .downcast_ref::<PolicyDeniedPayload>()
         .map(|payload| payload.0)
+}
+
+fn notify_trap_observer(ctx: &Context, module: &Module, err: &RuntimeError) {
+    let Some(observer) = get_trap_observer(ctx) else {
+        return;
+    };
+    let Some(cause) = trap_cause_of(err) else {
+        return;
+    };
+    observer.observe_trap(
+        ctx,
+        TrapObservation {
+            module: module.clone(),
+            cause,
+            err: err.clone(),
+        },
+    );
 }
 
 thread_local! {
@@ -820,7 +838,9 @@ impl Function {
                 stop.store(true, Ordering::SeqCst);
             }
             snapshot_active.store(false, std::sync::atomic::Ordering::SeqCst);
-            return Err(policy_denied_error("host call"));
+            let err = policy_denied_error("host call");
+            notify_trap_observer(&invocation_ctx, &module, &err);
+            return Err(err);
         }
 
         if let Some(listener) = &listener {
@@ -895,7 +915,9 @@ impl Function {
                 }
                 if let Some(reason) = policy_denied_reason(payload.as_ref()) {
                     snapshot_active.store(false, std::sync::atomic::Ordering::SeqCst);
-                    return Err(policy_denied_error(reason));
+                    let err = policy_denied_error(reason);
+                    notify_trap_observer(&invocation_ctx, &module, &err);
+                    return Err(err);
                 }
                 snapshot_active.store(false, std::sync::atomic::Ordering::SeqCst);
                 panic::resume_unwind(payload);
@@ -1567,7 +1589,9 @@ impl Resumer for PendingResumer {
                     if let Some(reason) = policy_denied_reason(payload.as_ref()) {
                         self.module.finish_resume(self.id);
                         self.consume_incremental_fuel();
-                        return Err(policy_denied_error(reason));
+                        let err = policy_denied_error(reason);
+                        notify_trap_observer(&invocation_ctx, &self.module, &err);
+                        return Err(err);
                     }
                     self.module.finish_resume(self.id);
                     panic::resume_unwind(payload);
