@@ -57,6 +57,7 @@ mod tests {
     #[test]
     fn assembly_source_contains_expected_labels() {
         assert!(ASM_SOURCE.contains("razero_jit_sig_handler"));
+        assert!(ASM_SOURCE.contains("razero_fault_return_trampoline"));
     }
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
