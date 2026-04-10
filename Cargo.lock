@@ -486,6 +486,7 @@ name = "razero-wasm"
 version = "0.0.0"
 dependencies = [
  "razero-features",
+ "razero-platform",
  "razero-secmem",
 ]
 
