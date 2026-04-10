@@ -50,6 +50,9 @@ use crate::{
         get_compilation_workers,
         listener::StackFrame,
         memory::{DefaultMemoryAllocator, MemoryAllocator},
+        trap::{
+            get_trap_observer, trap_cause_of, trap_cause_of_call_engine_error, TrapObservation,
+        },
     },
 };
 
@@ -902,7 +905,11 @@ fn resolve_imports_with_context(
                 crate::ImportResolverEvent::AclAllowed,
             );
         }
-        if let Some(module) = cfg.resolver.as_ref().and_then(|resolver| resolver(import_name)) {
+        if let Some(module) = cfg
+            .resolver
+            .as_ref()
+            .and_then(|resolver| resolver(import_name))
+        {
             notify_import_resolver_observer(
                 &observer,
                 ctx,
@@ -1273,7 +1280,9 @@ pub(crate) fn guest_callback_for_function_index(
                     if module.is_closed() {
                         ExitError::new(module.exit_code()).into()
                     } else {
-                        RuntimeError::new(err.to_string())
+                        let err = RuntimeError::new(err.to_string());
+                        notify_trap_observer(&ctx, &module, &err);
+                        err
                     }
                 });
             }
@@ -1287,6 +1296,7 @@ pub(crate) fn guest_callback_for_function_index(
                         if module.is_closed() {
                             ExitError::new(module.exit_code()).into()
                         } else {
+                            notify_compiler_trap_observer(&ctx, &module, &err);
                             compiler_call_error(err)
                         }
                     });
@@ -1632,6 +1642,40 @@ fn compiler_call_error(err: CallEngineError) -> RuntimeError {
     }
 }
 
+fn notify_trap_observer(ctx: &Context, module: &Module, err: &RuntimeError) {
+    let Some(observer) = get_trap_observer(ctx) else {
+        return;
+    };
+    let Some(cause) = trap_cause_of(err) else {
+        return;
+    };
+    observer.observe_trap(
+        ctx,
+        TrapObservation {
+            module: module.clone(),
+            cause,
+            err: err.clone(),
+        },
+    );
+}
+
+fn notify_compiler_trap_observer(ctx: &Context, module: &Module, err: &CallEngineError) {
+    let Some(observer) = get_trap_observer(ctx) else {
+        return;
+    };
+    let Some(cause) = trap_cause_of_call_engine_error(err) else {
+        return;
+    };
+    observer.observe_trap(
+        ctx,
+        TrapObservation {
+            module: module.clone(),
+            cause,
+            err: compiler_call_error(err.clone()),
+        },
+    );
+}
+
 fn encode_global_value(value: GlobalValue) -> (u64, u64) {
     match value {
         GlobalValue::I32(value) => (value as u32 as u64, 0),
@@ -1766,8 +1810,9 @@ mod tests {
         experimental::{
             add_fuel, get_snapshotter, get_yielder, remaining_fuel, with_close_notifier,
             with_compilation_workers, with_fuel_controller, with_function_listener_factory,
-            with_snapshotter, with_yielder, CloseNotifier, FuelController, FunctionListener,
-            FunctionListenerFactory, Snapshot, StackIterator,
+            with_snapshotter, with_trap_observer, with_yielder, CloseNotifier, FuelController,
+            FunctionListener, FunctionListenerFactory, Snapshot, StackIterator, TrapCause,
+            TrapObservation,
         },
         RuntimeConfig,
     };
@@ -2165,7 +2210,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn runtime_defaults_to_interpreter_until_auto_is_safe() {
         let runtime = Runtime::new();
@@ -2324,6 +2368,101 @@ mod tests {
         assert_eq!(
             expected_memory_isolation,
             engine.parent().memory_isolation_enabled
+        );
+    }
+
+    #[test]
+    fn compiler_trap_observer_reports_secure_mode_oob_traps() {
+        if !compiler_supported()
+            || !cfg!(target_os = "linux")
+            || !cfg!(any(target_arch = "x86_64", target_arch = "aarch64"))
+        {
+            return;
+        }
+
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::with_config(RuntimeConfig::new_compiler().with_secure_mode(true));
+        let compiled = runtime
+            .compile(include_bytes!("../../testdata/oob_load.wasm"))
+            .unwrap();
+        let module = runtime
+            .instantiate(&compiled, ModuleConfig::new().with_name("secure-guest"))
+            .unwrap();
+        let ctx = with_trap_observer(&Context::default(), {
+            let observations = observations.clone();
+            move |_ctx: &Context, observation: TrapObservation| {
+                observations
+                    .lock()
+                    .expect("trap observations poisoned")
+                    .push((
+                        observation.module.name().unwrap_or_default().to_string(),
+                        observation.cause,
+                        observation.err.exit_code(),
+                    ));
+            }
+        });
+
+        let err = module
+            .exported_function("oob")
+            .unwrap()
+            .call_with_context(&ctx, &[])
+            .expect_err("oob should trap");
+
+        assert!(!err.to_string().is_empty());
+        assert_eq!(
+            vec![(
+                "secure-guest".to_string(),
+                TrapCause::OutOfBoundsMemoryAccess,
+                None,
+            )],
+            *observations.lock().expect("trap observations poisoned")
+        );
+    }
+
+    #[test]
+    fn compiler_trap_observer_reports_start_function_traps() {
+        if !compiler_supported() {
+            return;
+        }
+
+        let module = [
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x08, 0x01, 0x00, 0x0a, 0x05, 0x01, 0x03, 0x00, 0x00, 0x0b,
+        ];
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::with_config(RuntimeConfig::new_compiler());
+        let compiled = runtime.compile(&module).unwrap();
+        let ctx = with_trap_observer(&Context::default(), {
+            let observations = observations.clone();
+            move |_ctx: &Context, observation: TrapObservation| {
+                observations
+                    .lock()
+                    .expect("trap observations poisoned")
+                    .push((
+                        observation.module.name().unwrap_or_default().to_string(),
+                        observation.cause,
+                        observation.err.exit_code(),
+                    ));
+            }
+        });
+
+        let err = match runtime.instantiate_with_context(
+            &ctx,
+            &compiled,
+            ModuleConfig::new().with_name("start-guest"),
+        ) {
+            Ok(_) => panic!("start should trap"),
+            Err(err) => err,
+        };
+
+        assert!(!err.to_string().is_empty());
+        assert_eq!(
+            vec![(
+                "start-guest".to_string(),
+                TrapCause::OutOfBoundsMemoryAccess,
+                None,
+            )],
+            *observations.lock().expect("trap observations poisoned")
         );
     }
 
@@ -2617,10 +2756,10 @@ mod tests {
         );
         let compiled_guest = runtime
             .compile(&[
-                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
-                0x00, 0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r',
-                b't', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u',
-                b'n', 0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+                0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r', b't', 0x00,
+                0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x01,
+                0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
             ])
             .unwrap();
 
@@ -2655,10 +2794,10 @@ mod tests {
         );
         let compiled_guest = runtime
             .compile(&[
-                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
-                0x00, 0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r',
-                b't', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u',
-                b'n', 0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+                0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r', b't', 0x00,
+                0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x01,
+                0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
             ])
             .unwrap();
 
@@ -2701,10 +2840,10 @@ mod tests {
         );
         let compiled_guest = runtime
             .compile(&[
-                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
-                0x00, 0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r',
-                b't', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u',
-                b'n', 0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+                0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r', b't', 0x00,
+                0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x01,
+                0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
             ])
             .unwrap();
 
@@ -2738,10 +2877,10 @@ mod tests {
         );
         let compiled_guest = runtime
             .compile(&[
-                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
-                0x00, 0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r',
-                b't', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u',
-                b'n', 0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+                0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r', b't', 0x00,
+                0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x01,
+                0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
             ])
             .unwrap();
 
@@ -2777,10 +2916,10 @@ mod tests {
         );
         let compiled_guest = runtime
             .compile(&[
-                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
-                0x00, 0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r',
-                b't', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u',
-                b'n', 0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+                0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r', b't', 0x00,
+                0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x01,
+                0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
             ])
             .unwrap();
 
@@ -2814,10 +2953,10 @@ mod tests {
         );
         let compiled_guest = runtime
             .compile(&[
-                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
-                0x00, 0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r',
-                b't', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u',
-                b'n', 0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+                0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r', b't', 0x00,
+                0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x01,
+                0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
             ])
             .unwrap();
 
@@ -2857,10 +2996,10 @@ mod tests {
         );
         let compiled_guest = runtime
             .compile(&[
-                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
-                0x00, 0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r',
-                b't', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u',
-                b'n', 0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+                0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r', b't', 0x00,
+                0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x01,
+                0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
             ])
             .unwrap();
 
@@ -2929,10 +3068,10 @@ mod tests {
         );
         let compiled_guest = runtime
             .compile(&[
-                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
-                0x00, 0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r',
-                b't', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u',
-                b'n', 0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+                0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r', b't', 0x00,
+                0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x01,
+                0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
             ])
             .unwrap();
 
@@ -2991,10 +3130,10 @@ mod tests {
         );
         let compiled_guest = runtime
             .compile(&[
-                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
-                0x00, 0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r',
-                b't', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u',
-                b'n', 0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+                0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r', b't', 0x00,
+                0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x01,
+                0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
             ])
             .unwrap();
 

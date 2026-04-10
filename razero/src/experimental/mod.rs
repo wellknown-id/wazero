@@ -10,6 +10,7 @@ pub mod listener;
 pub mod memory;
 pub mod snapshotter;
 pub mod table;
+pub mod trap;
 pub mod r#yield;
 
 pub use checkpoint::{get_snapshotter, with_snapshotter, Snapshot, Snapshotter};
@@ -45,3 +46,6 @@ pub use r#yield::{
     get_yielder, with_yielder, ErrYielded, Resumer, YieldError, Yielder, ERR_YIELDED,
 };
 pub use table::Table;
+pub use trap::{
+    get_trap_observer, trap_cause_of, with_trap_observer, TrapCause, TrapObservation, TrapObserver,
+};

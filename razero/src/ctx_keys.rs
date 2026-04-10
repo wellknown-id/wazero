@@ -54,10 +54,10 @@ pub struct Context {
     pub(crate) yielder_enabled: bool,
     pub(crate) memory_allocator: Option<Arc<dyn MemoryAllocator>>,
     pub(crate) close_notifier: Option<Arc<dyn CloseNotifier>>,
-    pub(crate) import_resolver:
-        Option<crate::experimental::import_resolver::ImportResolverConfig>,
+    pub(crate) import_resolver: Option<crate::experimental::import_resolver::ImportResolverConfig>,
     pub(crate) import_resolver_observer:
         Option<Arc<dyn crate::experimental::import_resolver_observer::ImportResolverObserver>>,
+    pub(crate) trap_observer: Option<Arc<dyn crate::experimental::trap::TrapObserver>>,
     pub(crate) invocation: Option<InvocationContext>,
 }
 

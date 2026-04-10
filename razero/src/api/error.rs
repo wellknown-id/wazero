@@ -11,7 +11,7 @@ pub type Result<T> = std::result::Result<T, RuntimeError>;
 pub const EXIT_CODE_CONTEXT_CANCELED: u32 = 0xffff_ffff;
 pub const EXIT_CODE_DEADLINE_EXCEEDED: u32 = 0xefff_ffff;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum RuntimeError {
     Message(Cow<'static, str>),
     Exit(ExitError),
