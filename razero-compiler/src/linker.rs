@@ -3280,6 +3280,84 @@ int main(void) {
     }
 
     #[test]
+    fn packaged_module_sidecar_rejects_corrupted_data_segment_passive_flag() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            function_section: vec![0],
+            memory_section: Some(razero_wasm::module::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                ..razero_wasm::module::Memory::default()
+            }),
+            code_section: vec![Code {
+                body: vec![0x41, 0x05, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![
+                Export {
+                    ty: ExternType::FUNC,
+                    name: "run".to_string(),
+                    index: 0,
+                },
+                Export {
+                    ty: ExternType::MEMORY,
+                    name: "memory".to_string(),
+                    index: 0,
+                },
+            ],
+            data_section: vec![DataSegment {
+                offset_expression: ConstExpr::from_i32(0),
+                init: vec![0xaa, 0xbb],
+                passive: true,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let metadata = compile_module_metadata(&module);
+        assert_eq!(metadata.data_segments.len(), 1);
+        assert!(metadata.data_segments[0].passive);
+
+        let mut sidecar = serialize_aot_metadata(&metadata);
+        let mut data_pattern = Vec::new();
+        data_pattern.extend_from_slice(&(metadata.data_segments.len() as u32).to_le_bytes());
+        data_pattern.push(1);
+        data_pattern.extend_from_slice(
+            &(metadata.data_segments[0].offset_expression.len() as u32).to_le_bytes(),
+        );
+        data_pattern.extend_from_slice(&metadata.data_segments[0].offset_expression);
+        data_pattern
+            .extend_from_slice(&(metadata.data_segments[0].init.len() as u32).to_le_bytes());
+        data_pattern.extend_from_slice(&metadata.data_segments[0].init);
+
+        let matches = sidecar
+            .windows(data_pattern.len())
+            .enumerate()
+            .filter_map(|(offset, window)| (window == data_pattern.as_slice()).then_some(offset))
+            .collect::<Vec<_>>();
+        assert_eq!(1, matches.len());
+        let passive_flag_offset = matches[0] + 4;
+        sidecar[passive_flag_offset] = 0xff;
+
+        let encoded = serialize_native_package_metadata_bundle(&NativePackageMetadataBundle {
+            modules: vec![NativePackageMetadataEntry {
+                module_name: "guest".to_string(),
+                metadata_sidecar_bytes: sidecar,
+            }],
+            host_imports: Vec::new(),
+        });
+
+        let decoded = deserialize_native_package_metadata_bundle(&encoded).unwrap();
+        let err = crate::aot::deserialize_aot_metadata(&decoded.modules[0].metadata_sidecar_bytes)
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "aot metadata: invalid data segment passive flag"
+        );
+    }
+
+    #[test]
     fn package_metadata_bundle_round_trips_with_memory_config_variants() {
         let modules = [
             (

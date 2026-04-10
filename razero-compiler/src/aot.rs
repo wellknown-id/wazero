@@ -1361,8 +1361,18 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
                         )?;
                         let mut data_segments = Vec::with_capacity(len);
                         for _ in 0..len {
+                            let passive = match read_u8(&mut cursor)? {
+                                0 => false,
+                                1 => true,
+                                _ => {
+                                    return Err(AotMetadataError::InvalidHeader(
+                                        "aot metadata: invalid data segment passive flag"
+                                            .to_string(),
+                                    ));
+                                }
+                            };
                             data_segments.push(AotDataSegmentMetadata {
-                                passive: read_u8(&mut cursor)? != 0,
+                                passive,
                                 offset_expression: read_bytes(
                                     &mut cursor,
                                     "data offset expression",
