@@ -860,6 +860,17 @@ impl BackendMachine for Amd64Machine {
                     ),
                 }
             }
+            Opcode::Ireduce => {
+                let dst = self.compiler().v_reg_of(instruction.return_());
+                let src = self.compiler().v_reg_of(instruction.v);
+                match instruction.typ {
+                    Type::I32 => self
+                        .current_block_mut()
+                        .instructions
+                        .push(Amd64Instr::movzx_rm_r(ExtMode::LQ, Operand::reg(src), dst)),
+                    _ => panic!("unsupported amd64 ireduce type: {:?}", instruction.typ),
+                }
+            }
             Opcode::FcvtFromSint => {
                 let dst = self.compiler().v_reg_of(instruction.return_());
                 let src = self.compiler().v_reg_of(instruction.v);
@@ -1986,6 +1997,28 @@ mod tests {
         m.format()
     }
 
+    fn lower_ireduce_opcode(src_ty: Type, dst_ty: Type) -> String {
+        let mut m = Amd64Machine::new();
+        m.start_lowering_function(BasicBlockId(0));
+        m.start_block(BasicBlockId(0));
+
+        let mut compiler = Box::new(TestCompilerContext::default());
+        compiler.regs = vec![
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::RAX, RegType::of(src_ty)),
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::RDX, RegType::of(dst_ty)),
+        ];
+        let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
+        m.set_compiler(ptr);
+
+        let mut instruction = crate::ssa::Instruction::new().with_opcode(Opcode::Ireduce);
+        instruction.v = Value(0).with_type(src_ty);
+        instruction.r_value = Value(1).with_type(dst_ty);
+        instruction.typ = dst_ty;
+
+        m.lower_instr(&instruction);
+        m.format()
+    }
+
     fn lower_fcvt_from_uint_opcode(src_ty: Type, dst_ty: Type) -> String {
         let mut m = Amd64Machine::new();
         m.start_lowering_function(BasicBlockId(0));
@@ -2323,6 +2356,12 @@ mod tests {
     fn lowers_f32_to_i32_bitcast_with_movd_sequence() {
         let formatted = lower_bitcast_opcode(Type::F32, Type::I32);
         assert!(formatted.contains("movd %xmm0, %eax"));
+    }
+
+    #[test]
+    fn lowers_i64_to_i32_with_movzx_lq_sequence() {
+        let formatted = lower_ireduce_opcode(Type::I64, Type::I32);
+        assert!(formatted.contains("movzx.lq %rax, %rdx"));
     }
 
     #[test]
