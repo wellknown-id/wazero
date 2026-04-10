@@ -885,19 +885,89 @@ impl BackendMachine for Amd64Machine {
                 let op = match (instruction.v.ty(), instruction.typ) {
                     (Type::I32, Type::F32) => SseOpcode::Cvtsi2ss,
                     (Type::I32, Type::F64) => SseOpcode::Cvtsi2sd,
+                    (Type::I64, Type::F32) => SseOpcode::Cvtsi2ss,
+                    (Type::I64, Type::F64) => SseOpcode::Cvtsi2sd,
                     _ => panic!(
                         "unsupported amd64 unsigned int-to-float conversion: {:?} -> {:?}",
                         instruction.v.ty(),
                         instruction.typ
                     ),
                 };
-                let tmp = self.compiler_mut().allocate_vreg(Type::I32);
-                self.current_block_mut()
-                    .instructions
-                    .push(Amd64Instr::movzx_rm_r(ExtMode::LQ, Operand::reg(src), tmp));
-                self.current_block_mut()
-                    .instructions
-                    .push(Amd64Instr::gpr_to_xmm(op, Operand::reg(tmp), dst, true));
+                if instruction.v.ty() == Type::I32 {
+                    let tmp = self.compiler_mut().allocate_vreg(Type::I32);
+                    self.current_block_mut()
+                        .instructions
+                        .push(Amd64Instr::movzx_rm_r(ExtMode::LQ, Operand::reg(src), tmp));
+                    self.current_block_mut()
+                        .instructions
+                        .push(Amd64Instr::gpr_to_xmm(op, Operand::reg(tmp), dst, true));
+                } else {
+                    let sign_block = self.next_synthetic_block_id();
+                    let done_block = sign_block + 1;
+                    let add_op = match instruction.typ {
+                        Type::F32 => SseOpcode::Addss,
+                        Type::F64 => SseOpcode::Addsd,
+                        _ => unreachable!(),
+                    };
+                    let tmp = self.compiler_mut().allocate_vreg(Type::I64);
+                    let tmp2 = self.compiler_mut().allocate_vreg(Type::I64);
+                    let rcx =
+                        crate::backend::VReg::from_real_reg(super::reg::RCX, crate::backend::RegType::Int);
+
+                    self.current_block_mut()
+                        .instructions
+                        .push(Amd64Instr::cmp_rmi_r(Operand::reg(src), src, false, true));
+                    self.current_block_mut()
+                        .instructions
+                        .push(Amd64Instr::jmp_if(Cond::S, Operand::label(Label(sign_block))));
+                    self.link_branch_edge(BasicBlockId(sign_block));
+
+                    self.current_block_mut()
+                        .instructions
+                        .push(Amd64Instr::gpr_to_xmm(op, Operand::reg(src), dst, true));
+                    self.current_block_mut()
+                        .instructions
+                        .push(Amd64Instr::jmp(Operand::label(Label(done_block))));
+                    self.link_branch_edge(BasicBlockId(done_block));
+
+                    self.start_synthetic_block(sign_block);
+                    self.current_block_mut()
+                        .instructions
+                        .push(Amd64Instr::mov_rr(src, tmp, true));
+                    self.current_block_mut()
+                        .instructions
+                        .push(Amd64Instr::imm(rcx, 1, false));
+                    self.current_block_mut()
+                        .instructions
+                        .push(Amd64Instr::shift_r(super::instr::ShiftROpcode::Shr, tmp, true));
+                    self.current_block_mut()
+                        .instructions
+                        .push(Amd64Instr::mov_rr(src, tmp2, true));
+                    self.current_block_mut().instructions.push(Amd64Instr::alu_rmi_r(
+                        super::instr::AluRmiROpcode::And,
+                        Operand::imm32(1),
+                        tmp2,
+                        true,
+                    ));
+                    self.current_block_mut().instructions.push(Amd64Instr::alu_rmi_r(
+                        super::instr::AluRmiROpcode::Or,
+                        Operand::reg(tmp2),
+                        tmp,
+                        true,
+                    ));
+                    self.current_block_mut()
+                        .instructions
+                        .push(Amd64Instr::gpr_to_xmm(op, Operand::reg(tmp), dst, true));
+                    self.current_block_mut()
+                        .instructions
+                        .push(Amd64Instr::xmm_unary_rm_r(add_op, Operand::reg(dst), dst));
+                    self.current_block_mut()
+                        .instructions
+                        .push(Amd64Instr::jmp(Operand::label(Label(done_block))));
+                    self.link_branch_edge(BasicBlockId(done_block));
+
+                    self.start_synthetic_block(done_block);
+                }
             }
             Opcode::Ceil | Opcode::Floor | Opcode::Trunc | Opcode::Nearest => {
                 let dst = self.compiler().v_reg_of(instruction.return_());
@@ -2279,6 +2349,24 @@ mod tests {
         let formatted = lower_fcvt_from_uint_opcode(Type::I32, Type::F64);
         assert!(formatted.contains("movzx.lq %rax, %r130?"));
         assert!(formatted.contains("cvtsi2sd %r130?, %xmm2"));
+    }
+
+    #[test]
+    fn lowers_u64_to_f32_with_msb_adjust_sequence() {
+        let formatted = lower_fcvt_from_uint_opcode(Type::I64, Type::F32);
+        assert!(formatted.contains("testq %rax, %rax"));
+        assert!(formatted.contains("cvtsi2ss %rax, %xmm2"));
+        assert!(formatted.contains("cvtsi2ss %r130?, %xmm2"));
+        assert!(formatted.contains("addss %xmm2, %xmm2"));
+    }
+
+    #[test]
+    fn lowers_u64_to_f64_with_msb_adjust_sequence() {
+        let formatted = lower_fcvt_from_uint_opcode(Type::I64, Type::F64);
+        assert!(formatted.contains("testq %rax, %rax"));
+        assert!(formatted.contains("cvtsi2sd %rax, %xmm2"));
+        assert!(formatted.contains("cvtsi2sd %r130?, %xmm2"));
+        assert!(formatted.contains("addsd %xmm2, %xmm2"));
     }
 
     #[test]
