@@ -30,6 +30,11 @@ const DIV_OVERFLOW_WASM: &[u8] = &[
     0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x00, 0x0a, 0x0d, 0x01, 0x0b,
     0x00, 0x41, 0x80, 0x80, 0x80, 0x80, 0x78, 0x41, 0x7f, 0x6d, 0x0b,
 ];
+const INVALID_CONVERSION_WASM: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, 0x03,
+    0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x00, 0x0a, 0x0a, 0x01, 0x08,
+    0x00, 0x43, 0x00, 0x00, 0xc0, 0x7f, 0xa8, 0x0b,
+];
 const GUEST_IMPORT_INC_WASM: &[u8] = &[
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f,
     0x02, 0x0b, 0x01, 0x03, b'e', b'n', b'v', 0x03, b'i', b'n', b'c', 0x00, 0x00, 0x03, 0x02, 0x01,
@@ -702,6 +707,34 @@ fn interpreter_divide_overflow_trap_notifies_observer() {
     assert_eq!(Some(TrapCause::IntegerOverflow), trap_cause_of(&err));
     assert_eq!(
         vec![(TrapCause::IntegerOverflow, "integer overflow".to_string())],
+        *observations.lock().expect("trap observations poisoned")
+    );
+}
+
+#[test]
+fn interpreter_invalid_conversion_trap_notifies_observer() {
+    let runtime = Runtime::with_config(RuntimeConfig::new_interpreter());
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let guest = runtime
+        .instantiate_binary(INVALID_CONVERSION_WASM, ModuleConfig::new())
+        .unwrap();
+    let ctx = with_trap_observer(
+        &Context::default(),
+        record_trap_observations(observations.clone()),
+    );
+
+    let err = guest
+        .exported_function("run")
+        .unwrap()
+        .call_with_context(&ctx, &[])
+        .unwrap_err();
+
+    assert_eq!(Some(TrapCause::InvalidConversionToInteger), trap_cause_of(&err));
+    assert_eq!(
+        vec![(
+            TrapCause::InvalidConversionToInteger,
+            "invalid conversion to integer".to_string()
+        )],
         *observations.lock().expect("trap observations poisoned")
     );
 }
