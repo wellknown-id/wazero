@@ -7,7 +7,10 @@ use std::error::Error;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::ops::{Deref, DerefMut};
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::{Arc, RwLock};
+use std::sync::{
+    atomic::{AtomicI64, Ordering},
+    Arc, RwLock,
+};
 
 use crate::operations::{
     AtomicArithmeticOp, FloatKind, InclusiveRange, Instruction, Label, OperationKind, Shape,
@@ -38,6 +41,33 @@ pub fn is_yield_suspend_payload(payload: &(dyn Any + Send)) -> bool {
 
 thread_local! {
     static ACTIVE_HOST_CALL_STACKS: RefCell<Vec<Vec<ActiveCallFrame>>> = const { RefCell::new(Vec::new()) };
+    static ACTIVE_FUEL_REMAINING: RefCell<Vec<Arc<AtomicI64>>> = const { RefCell::new(Vec::new()) };
+}
+
+struct ActiveFuelRemainingGuard;
+
+impl Drop for ActiveFuelRemainingGuard {
+    fn drop(&mut self) {
+        ACTIVE_FUEL_REMAINING.with(|active| {
+            active.borrow_mut().pop();
+        });
+    }
+}
+
+pub fn with_active_fuel_remaining<T>(
+    fuel_remaining: Option<Arc<AtomicI64>>,
+    f: impl FnOnce() -> T,
+) -> T {
+    let Some(fuel_remaining) = fuel_remaining else {
+        return f();
+    };
+    ACTIVE_FUEL_REMAINING.with(|active| active.borrow_mut().push(fuel_remaining));
+    let _guard = ActiveFuelRemainingGuard;
+    f()
+}
+
+fn active_fuel_remaining() -> Option<Arc<AtomicI64>> {
+    ACTIVE_FUEL_REMAINING.with(|active| active.borrow().last().cloned())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -510,6 +540,7 @@ impl Interpreter {
         self.module.fail_if_closed()?;
 
         let mut engine = CallEngine::default();
+        engine.fuel_remaining = active_fuel_remaining();
         engine.push_values(params);
         self.execute(function_index, engine)
     }
@@ -571,10 +602,11 @@ struct CallFrame {
     base: usize,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 struct CallEngine {
     stack: Vec<u64>,
     frames: Vec<CallFrame>,
+    fuel_remaining: Option<Arc<AtomicI64>>,
 }
 
 impl CallEngine {
@@ -655,8 +687,30 @@ impl CallEngine {
         if function.host.is_some() {
             self.call_host_function(interpreter, function_index, &function)
         } else {
+            self.consume_fuel(1)?;
             self.call_native_function(interpreter, function_index, &function)
         }
+    }
+
+    fn consume_fuel(&self, amount: i64) -> RuntimeResult<()> {
+        if amount <= 0 {
+            return Ok(());
+        }
+        let Some(remaining) = &self.fuel_remaining else {
+            return Ok(());
+        };
+        let previous = remaining.fetch_sub(amount, Ordering::SeqCst);
+        if previous - amount < 0 {
+            return Err(Trap::new("fuel exhausted"));
+        }
+        Ok(())
+    }
+
+    fn consume_fuel_for_branch(&self, pc: usize, target: usize) -> RuntimeResult<()> {
+        if target < pc {
+            self.consume_fuel(1)?;
+        }
+        Ok(())
     }
 
     fn call_host_function(
@@ -814,11 +868,17 @@ impl CallEngine {
                 }
                 OperationKind::Unreachable => return Err(Trap::new("unreachable")),
                 OperationKind::Label => self.frames.last_mut().expect("frame").pc += 1,
-                OperationKind::Br => self.frames.last_mut().expect("frame").pc = op.u1 as usize,
+                OperationKind::Br => {
+                    let target = op.u1 as usize;
+                    self.consume_fuel_for_branch(frame.pc, target)?;
+                    self.frames.last_mut().expect("frame").pc = target;
+                }
                 OperationKind::BrIf => {
                     if self.pop_value() > 0 {
                         self.drop_range(op.u3);
-                        self.frames.last_mut().expect("frame").pc = op.u1 as usize;
+                        let target = op.u1 as usize;
+                        self.consume_fuel_for_branch(frame.pc, target)?;
+                        self.frames.last_mut().expect("frame").pc = target;
                     } else {
                         self.frames.last_mut().expect("frame").pc = op.u2 as usize;
                     }
@@ -832,7 +892,9 @@ impl CallEngine {
                         .unwrap_or(default_index)
                         * 2;
                     self.drop_range(op.us[target_index + 1]);
-                    self.frames.last_mut().expect("frame").pc = op.us[target_index] as usize;
+                    let target = op.us[target_index] as usize;
+                    self.consume_fuel_for_branch(frame.pc, target)?;
+                    self.frames.last_mut().expect("frame").pc = target;
                 }
                 OperationKind::Call => {
                     self.frames.last_mut().expect("frame").pc += 1;
@@ -6245,9 +6307,14 @@ fn f64_lt(lhs: f64, rhs: f64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        atomic::{AtomicI64, Ordering},
+        Arc,
+    };
+
     use super::{
-        host_function, CallEngine, CallFrame, Function, GlobalValue, Interpreter, Memory, Module,
-        Table, Trap, WASM_PAGE_SIZE,
+        host_function, with_active_fuel_remaining, CallEngine, CallFrame, Function, GlobalValue,
+        Interpreter, Memory, Module, Table, Trap, WASM_PAGE_SIZE,
     };
     use crate::compiler::{CompileConfig, Compiler, FunctionType, ValueType};
     use crate::operations::{
@@ -6448,6 +6515,60 @@ mod tests {
         });
 
         assert_eq!(vec![42], interpreter.call(0, &[19, 23]).unwrap());
+    }
+
+    #[test]
+    fn host_calls_do_not_consume_extra_fuel() {
+        let entry = Function::new_native(
+            Signature::new(vec![ValueType::I32], vec![ValueType::I32]),
+            vec![
+                Instruction::call(1),
+                Instruction::br(Label::new(LabelKind::Return, 0)),
+            ],
+        )
+        .unwrap();
+        let host = Function::new_host(
+            Signature::new(vec![ValueType::I32], vec![ValueType::I32]),
+            host_function(|_, stack| {
+                stack[0] = stack[0].wrapping_add(1);
+                Ok(())
+            }),
+        );
+        let mut interpreter = Interpreter::new(Module {
+            functions: vec![entry, host],
+            ..Module::default()
+        });
+        let fuel = Arc::new(AtomicI64::new(1));
+
+        let results =
+            with_active_fuel_remaining(Some(fuel.clone()), || interpreter.call(0, &[41])).unwrap();
+
+        assert_eq!(vec![42], results);
+        assert_eq!(0, fuel.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn backward_branch_exhausts_fuel() {
+        let lowered = Compiler
+            .lower_with_config(CompileConfig {
+                body: &[0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b],
+                signature: FunctionType::default(),
+                ..CompileConfig::new(&[])
+            })
+            .expect("loop body should lower");
+        let mut interpreter = Interpreter::new(Module {
+            functions: vec![
+                Function::new_native(Signature::default(), lowered.operations).unwrap(),
+            ],
+            ..Module::default()
+        });
+        let fuel = Arc::new(AtomicI64::new(1));
+
+        let err = with_active_fuel_remaining(Some(fuel.clone()), || interpreter.call(0, &[]))
+            .unwrap_err();
+
+        assert_eq!("fuel exhausted", err.message());
+        assert!(fuel.load(Ordering::SeqCst) < 0);
     }
 
     #[test]

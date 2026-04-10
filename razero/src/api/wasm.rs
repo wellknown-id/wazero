@@ -28,7 +28,7 @@ use crate::{
 };
 use razero_interp::{
     engine::{take_suspended_invocation, SuspendedInvocation},
-    interpreter::{is_yield_suspend_payload, YieldSuspend},
+    interpreter::{is_yield_suspend_payload, with_active_fuel_remaining, YieldSuspend},
 };
 use razero_wasm::{
     module::{FunctionType as WasmFunctionType, Module as WasmModule},
@@ -756,8 +756,10 @@ impl Function {
             .max(0);
         let fuel_remaining =
             (budget > 0).then(|| Arc::new(std::sync::atomic::AtomicI64::new(budget)));
-        if let Some(remaining) = &fuel_remaining {
-            remaining.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        if self.inner.is_host {
+            if let Some(remaining) = &fuel_remaining {
+                remaining.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            }
         }
 
         let restored_results = Arc::new(Mutex::new(None));
@@ -825,7 +827,9 @@ impl Function {
 
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
             with_active_invocation(&invocation_ctx, &module, || {
-                callback(invocation_ctx.clone(), module.clone(), params)
+                with_active_fuel_remaining(fuel_remaining.clone(), || {
+                    callback(invocation_ctx.clone(), module.clone(), params)
+                })
             })
         }));
         if let Some(stop) = close_on_context_done {
@@ -1389,7 +1393,9 @@ impl Resumer for PendingResumer {
             });
             let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
                 with_active_invocation(&invocation_ctx, &self.module, || {
-                    suspended.resume(host_results)
+                    with_active_fuel_remaining(self.fuel_remaining.clone(), || {
+                        suspended.resume(host_results)
+                    })
                 })
             }));
             match outcome {

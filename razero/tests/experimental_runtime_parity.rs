@@ -12,12 +12,23 @@ use razero::{
     add_fuel, get_fuel_controller, get_import_resolver, get_snapshotter, get_yielder,
     remaining_fuel, with_fuel_controller, with_function_listener_factory, with_import_resolver,
     with_snapshotter, with_yielder, Context, FunctionDefinition, FunctionListener,
-    FunctionListenerFactory, Module, ModuleConfig, Runtime, RuntimeError, Snapshot, ValueType,
-    YieldError, ERR_YIELDED,
+    FunctionListenerFactory, Module, ModuleConfig, Runtime, RuntimeConfig, RuntimeError, Snapshot,
+    ValueType, YieldError, ERR_YIELDED,
 };
 
 const YIELD_WASM: &[u8] = include_bytes!("../../experimental/testdata/yield.wasm");
 const SNAPSHOT_WASM: &[u8] = include_bytes!("../../experimental/testdata/snapshot.wasm");
+const GUEST_IMPORT_INC_WASM: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f,
+    0x02, 0x0b, 0x01, 0x03, b'e', b'n', b'v', 0x03, b'i', b'n', b'c', 0x00, 0x00, 0x03, 0x02, 0x01,
+    0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x01, 0x0a, 0x08, 0x01, 0x06, 0x00, 0x20,
+    0x00, 0x10, 0x00, 0x0b,
+];
+const LOOP_EXPORT_WASM: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02,
+    0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x00, 0x0a, 0x09, 0x01, 0x07, 0x00,
+    0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b,
+];
 
 struct TrackingFuelController {
     budget: i64,
@@ -257,6 +268,50 @@ fn fuel_exhaustion_after_host_debit_traps_call() {
             ),
             &[],
         )
+        .unwrap_err();
+
+    assert_eq!("fuel exhausted", err.to_string());
+}
+
+#[test]
+fn interpreter_guest_host_callbacks_can_observe_runtime_fuel() {
+    let runtime = Runtime::with_config(RuntimeConfig::new_interpreter().with_fuel(2));
+    runtime
+        .new_host_module_builder("env")
+        .new_function_builder()
+        .with_func(
+            |ctx, _module, params| {
+                assert_eq!(1, remaining_fuel(&ctx).unwrap());
+                Ok(vec![params[0] + 1])
+            },
+            &[ValueType::I32],
+            &[ValueType::I32],
+        )
+        .export("inc")
+        .instantiate(&Context::default())
+        .unwrap();
+
+    let guest = runtime
+        .instantiate_binary(GUEST_IMPORT_INC_WASM, ModuleConfig::new())
+        .unwrap();
+
+    assert_eq!(
+        vec![42],
+        guest.exported_function("run").unwrap().call(&[41]).unwrap()
+    );
+}
+
+#[test]
+fn interpreter_guest_loops_trap_when_fuel_exhausts() {
+    let runtime = Runtime::with_config(RuntimeConfig::new_interpreter().with_fuel(1));
+    let guest = runtime
+        .instantiate_binary(LOOP_EXPORT_WASM, ModuleConfig::new())
+        .unwrap();
+
+    let err = guest
+        .exported_function("run")
+        .unwrap()
+        .call(&[])
         .unwrap_err();
 
     assert_eq!("fuel exhausted", err.to_string());
