@@ -251,6 +251,13 @@ mod tests {
     }
 
     #[test]
+    fn yield_policy_request_exposes_caller_module_name() {
+        let request = YieldPolicyRequest::new().with_caller_module_name("guest_wrapper");
+
+        assert_eq!(Some("guest_wrapper"), request.caller_module_name());
+    }
+
+    #[test]
     fn with_yield_policy_none_is_noop() {
         let mut ctx = Context::default();
         ctx.insert(ContextKey::custom("marker"), "ok");

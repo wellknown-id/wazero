@@ -226,6 +226,13 @@ mod tests {
     }
 
     #[test]
+    fn host_call_policy_request_exposes_caller_module_name() {
+        let request = HostCallPolicyRequest::new().with_caller_module_name("guest");
+
+        assert_eq!(Some("guest"), request.caller_module_name());
+    }
+
+    #[test]
     fn host_call_policy_round_trips_through_context() {
         let ctx = with_host_call_policy(&Context::default(), allow_all);
         let policy = get_host_call_policy(&ctx).expect("policy should be present");
