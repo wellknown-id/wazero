@@ -3,7 +3,7 @@ use crate::backend::{RealReg, RegType, VReg};
 
 use super::cond::Cond;
 use super::ext::ExtMode;
-use super::instr::{AluRmiROpcode, Amd64Instr, InstructionKind, UnaryRmROpcode};
+use super::instr::{AluRmiROpcode, Amd64Instr, InstructionKind, ShiftROpcode, UnaryRmROpcode};
 use super::machine_vec::SseOpcode;
 use super::operands::{AddressMode, Operand};
 use super::reg::{R12, R13, RBP, RSP, XMM0};
@@ -31,6 +31,7 @@ pub fn encode_instruction(inst: &Amd64Instr, buf: &mut Vec<u8>) -> Result<(), Ba
             buf.push(0x99);
         }
         InstructionKind::UnaryRmR => encode_unary_rm_r(buf, &d)?,
+        InstructionKind::ShiftR => encode_shift_r(buf, &d)?,
         InstructionKind::Lea => {
             encode_reg_mem_opcode(buf, 0x8D, op2_reg(&d)?, op1_mem(&d)?, true, None)
         }
@@ -150,6 +151,18 @@ fn encode_unary_rm_r(
         Operand::Mem(amode) => encode_reg_mem_opcode(buf, opcode, op2_reg(d)?, amode, d.b1, prefix),
         _ => return Err(BackendError::new("invalid unary operand")),
     }
+    Ok(())
+}
+
+fn encode_shift_r(buf: &mut Vec<u8>, d: &super::instr::Amd64InstrData) -> Result<(), BackendError> {
+    let subopcode = match shift_opcode_from_u64(d.u1) {
+        ShiftROpcode::Rol => 0,
+        ShiftROpcode::Ror => 1,
+        ShiftROpcode::Shl => 4,
+        ShiftROpcode::Shr => 5,
+        ShiftROpcode::Sar => 7,
+    };
+    encode_unary_subopcode(buf, op1(d)?, subopcode, d.b1, Some(0xD3));
     Ok(())
 }
 
@@ -427,6 +440,16 @@ fn encode_unary_subopcode(
             encode_mem(buf, subopcode, amode);
         }
         _ => panic!("invalid rm operand"),
+    }
+}
+
+fn shift_opcode_from_u64(raw: u64) -> ShiftROpcode {
+    match raw {
+        0 => ShiftROpcode::Shl,
+        1 => ShiftROpcode::Shr,
+        2 => ShiftROpcode::Sar,
+        3 => ShiftROpcode::Rol,
+        _ => ShiftROpcode::Ror,
     }
 }
 

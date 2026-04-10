@@ -463,6 +463,40 @@ impl BackendMachine for Amd64Machine {
                     .instructions
                     .push(Amd64Instr::unary_rm_r(op, Operand::reg(src), dst, is_64));
             }
+            Opcode::Ishl | Opcode::Ushr | Opcode::Sshr | Opcode::Rotl | Opcode::Rotr => {
+                let dst = self.compiler().v_reg_of(instruction.return_());
+                let lhs = self.compiler().v_reg_of(instruction.v);
+                let rhs = self.compiler().v_reg_of(instruction.v2);
+                let is_64 = instruction.typ.bits() == 64;
+                let tmp = crate::backend::VReg::from_real_reg(
+                    super::reg::R11,
+                    crate::backend::RegType::Int,
+                );
+                let rcx = crate::backend::VReg::from_real_reg(
+                    super::reg::RCX,
+                    crate::backend::RegType::Int,
+                );
+                let op = match instruction.opcode {
+                    Opcode::Ishl => super::instr::ShiftROpcode::Shl,
+                    Opcode::Ushr => super::instr::ShiftROpcode::Shr,
+                    Opcode::Sshr => super::instr::ShiftROpcode::Sar,
+                    Opcode::Rotl => super::instr::ShiftROpcode::Rol,
+                    Opcode::Rotr => super::instr::ShiftROpcode::Ror,
+                    _ => unreachable!(),
+                };
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::mov_rr(lhs, tmp, is_64));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::mov_rr(rhs, rcx, false));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::shift_r(op, tmp, is_64));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::mov_rr(tmp, dst, is_64));
+            }
             Opcode::Load => {
                 let (ptr, offset, typ) = instruction.load_data();
                 let dst = self.compiler().v_reg_of(instruction.return_());
@@ -948,5 +982,50 @@ mod tests {
     fn lowers_bxor_to_amd64_xor() {
         let formatted = lower_int_binary_opcode(Opcode::Bxor);
         assert!(formatted.contains("xor "));
+    }
+
+    fn lower_shift_opcode(opcode: Opcode) -> String {
+        let mut m = Amd64Machine::new();
+        m.start_lowering_function(BasicBlockId(0));
+        m.start_block(BasicBlockId(0));
+
+        let mut compiler = Box::new(TestCompilerContext::default());
+        compiler.regs = vec![
+            VReg::from_real_reg(1, RegType::Int),
+            VReg::from_real_reg(4, RegType::Int),
+            VReg::from_real_reg(8, RegType::Int),
+        ];
+        let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
+        m.set_compiler(ptr);
+
+        let mut instruction = crate::ssa::Instruction::new().with_opcode(opcode);
+        instruction.v = Value(0).with_type(Type::I64);
+        instruction.v2 = Value(1).with_type(Type::I64);
+        instruction.r_value = Value(2).with_type(Type::I64);
+        instruction.typ = Type::I64;
+
+        m.lower_instr(&instruction);
+        m.format()
+    }
+
+    #[test]
+    fn lowers_ishl_to_amd64_shift_sequence() {
+        let formatted = lower_shift_opcode(Opcode::Ishl);
+        assert!(formatted.contains("movq %rax, %r11"));
+        assert!(formatted.contains("movl %ebx, %ecx"));
+        assert!(formatted.contains("shlq %cl, %r11"));
+        assert!(formatted.contains("movq %r11, %rdi"));
+    }
+
+    #[test]
+    fn lowers_sshr_to_amd64_shift_sequence() {
+        let formatted = lower_shift_opcode(Opcode::Sshr);
+        assert!(formatted.contains("sarq %cl, %r11"));
+    }
+
+    #[test]
+    fn lowers_rotr_to_amd64_rotate_sequence() {
+        let formatted = lower_shift_opcode(Opcode::Rotr);
+        assert!(formatted.contains("rorq %cl, %r11"));
     }
 }

@@ -12,7 +12,7 @@ use super::instr_encoding::encode_instruction;
 use super::machine_vec::SseOpcode;
 use super::operands::Operand;
 use super::reg::{
-    format_vreg_sized, vreg_for_real_reg, FLOAT_ARG_RESULT_REGS, INT_ARG_RESULT_REGS, RAX, RDX,
+    format_vreg_sized, vreg_for_real_reg, FLOAT_ARG_RESULT_REGS, INT_ARG_RESULT_REGS, RAX, RCX, RDX,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -60,6 +60,27 @@ impl fmt::Display for UnaryRmROpcode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ShiftROpcode {
+    Shl,
+    Shr,
+    Sar,
+    Rol,
+    Ror,
+}
+
+impl fmt::Display for ShiftROpcode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Shl => "shl",
+            Self::Shr => "shr",
+            Self::Sar => "sar",
+            Self::Rol => "rol",
+            Self::Ror => "ror",
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum InstructionKind {
     Nop0,
     Ret,
@@ -67,6 +88,7 @@ pub enum InstructionKind {
     AluRmiR,
     MovRR,
     UnaryRmR,
+    ShiftR,
     Not,
     Neg,
     Div,
@@ -194,6 +216,17 @@ impl Amd64Instr {
         {
             let mut d = inst.0.borrow_mut();
             d.op1 = Some(src_dst);
+            d.b1 = is_64;
+        }
+        inst
+    }
+
+    pub fn shift_r(opcode: ShiftROpcode, src_dst: VReg, is_64: bool) -> Self {
+        let inst = Self::new(InstructionKind::ShiftR);
+        {
+            let mut d = inst.0.borrow_mut();
+            d.op1 = Some(Operand::reg(src_dst));
+            d.u1 = opcode as u64;
             d.b1 = is_64;
         }
         inst
@@ -452,7 +485,7 @@ impl Amd64Instr {
                     out.push(reg);
                 }
             }
-            InstructionKind::Not | InstructionKind::Neg => {
+            InstructionKind::Not | InstructionKind::Neg | InstructionKind::ShiftR => {
                 if let Some(Operand::Reg(reg)) = d.op1 {
                     out.push(reg);
                 }
@@ -521,6 +554,12 @@ impl Amd64Instr {
                 if let Some(op2) = &d.op2 {
                     op2.uses(out);
                 }
+            }
+            InstructionKind::ShiftR => {
+                if let Some(op1) = &d.op1 {
+                    op1.uses(out);
+                }
+                out.push(vreg_for_real_reg(RCX));
             }
             _ => {
                 if let Some(op1) = &d.op1 {
@@ -658,6 +697,19 @@ impl fmt::Display for Amd64Instr {
                 if d.b1 { "q" } else { "l" },
                 op1.expect("unary src").format(d.b1),
                 op2.expect("unary dst").format(d.b1)
+            ),
+            InstructionKind::ShiftR => write!(
+                f,
+                "{}{} %cl, {}",
+                match d.u1 {
+                    0 => ShiftROpcode::Shl,
+                    1 => ShiftROpcode::Shr,
+                    2 => ShiftROpcode::Sar,
+                    3 => ShiftROpcode::Rol,
+                    _ => ShiftROpcode::Ror,
+                },
+                if d.b1 { "q" } else { "l" },
+                op1.expect("shift").format(d.b1)
             ),
             InstructionKind::Not => write!(
                 f,
