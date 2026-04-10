@@ -3473,6 +3473,66 @@ int main(void) {
     }
 
     #[test]
+    fn packaged_module_sidecar_rejects_corrupted_helper_exit_code_flag() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![0x41, 0x05, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let metadata = compile_module_metadata(&module);
+        let helper = metadata.helpers[0].clone();
+        assert!(helper.exit_code.is_some());
+
+        let mut sidecar = serialize_aot_metadata(&metadata);
+        let mut helper_pattern = Vec::new();
+        helper_pattern.push(1);
+        helper_pattern.extend_from_slice(&helper.execution_context_offset.to_le_bytes());
+        helper_pattern.push(1);
+        helper_pattern.extend_from_slice(
+            &helper
+                .exit_code
+                .expect("helper exit code")
+                .raw()
+                .to_le_bytes(),
+        );
+
+        let matches = sidecar
+            .windows(helper_pattern.len())
+            .enumerate()
+            .filter_map(|(offset, window)| (window == helper_pattern.as_slice()).then_some(offset))
+            .collect::<Vec<_>>();
+        assert_eq!(1, matches.len());
+        let exit_code_flag_offset = matches[0] + 1 + 4;
+        sidecar[exit_code_flag_offset] = 0xff;
+
+        let encoded = serialize_native_package_metadata_bundle(&NativePackageMetadataBundle {
+            modules: vec![NativePackageMetadataEntry {
+                module_name: "guest".to_string(),
+                metadata_sidecar_bytes: sidecar,
+            }],
+            host_imports: Vec::new(),
+        });
+
+        let decoded = deserialize_native_package_metadata_bundle(&encoded).unwrap();
+        let err = crate::aot::deserialize_aot_metadata(&decoded.modules[0].metadata_sidecar_bytes)
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "aot metadata: invalid helper exit-code flag"
+        );
+    }
+
+    #[test]
     fn package_metadata_bundle_round_trips_with_memory_config_variants() {
         let modules = [
             (

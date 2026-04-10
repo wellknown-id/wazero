@@ -1337,11 +1337,17 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
                                 )
                             })?;
                         let execution_context_offset = read_i32(&mut cursor)?;
-                        let exit_code = if read_u8(&mut cursor)? != 0 {
-                            Some(ExitCode::new(read_u32(&mut cursor)?))
-                        } else {
-                            let _ = read_u32(&mut cursor)?;
-                            None
+                        let exit_code = match read_u8(&mut cursor)? {
+                            0 => {
+                                let _ = read_u32(&mut cursor)?;
+                                None
+                            }
+                            1 => Some(ExitCode::new(read_u32(&mut cursor)?)),
+                            _ => {
+                                return Err(AotMetadataError::InvalidHeader(
+                                    "aot metadata: invalid helper exit-code flag".to_string(),
+                                ))
+                            }
                         };
                         helpers.push(AotHelperMetadata {
                             id,
