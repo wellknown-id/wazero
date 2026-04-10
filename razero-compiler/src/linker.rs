@@ -1662,7 +1662,7 @@ mod tests {
         engine::Engine as WasmEngine,
         module::{
             Code, ConstExpr, DataSegment, ElementMode, ElementSegment, Export, ExternType, Global,
-            GlobalType, Import, Module, RefType, Table, ValueType,
+            GlobalType, Import, ImportDesc, Module, RefType, Table, ValueType,
         },
     };
 
@@ -1848,6 +1848,40 @@ mod tests {
             err.to_string(),
             "packaged host-import linker expected a descriptor for every imported function"
         );
+    }
+
+    #[test]
+    fn validate_hello_host_metadata_rejects_wrong_host_import_signature() {
+        let mut module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
+        module
+            .type_section
+            .push(function_type(&[ValueType::I32], &[]));
+        let wrong_type_index = (module.type_section.len() - 1) as u32;
+        let host_import = module
+            .import_section
+            .iter_mut()
+            .find(|import| matches!(import.ty, ExternType::FUNC))
+            .expect("hello-host should have one function import");
+        host_import.desc = ImportDesc::Func(wrong_type_index);
+        let metadata = compile_module_metadata(&module);
+
+        let err = validate_hello_host_metadata(&metadata).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "hello-host linker expects its host import to use the (i32, i32) -> () signature"
+        );
+    }
+
+    #[test]
+    fn validate_hello_host_metadata_rejects_missing_run_export() {
+        let mut module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
+        module
+            .export_section
+            .retain(|export| !(export.ty == ExternType::FUNC && export.name == "run"));
+        let metadata = compile_module_metadata(&module);
+
+        let err = validate_hello_host_metadata(&metadata).unwrap_err();
+        assert_eq!(err.to_string(), "hello-host guest must export func run");
     }
 
     #[cfg(all(
