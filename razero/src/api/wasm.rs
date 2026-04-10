@@ -694,8 +694,17 @@ impl Memory {
         Some(u32::from_le_bytes(bytes.try_into().ok()?))
     }
 
+    pub fn read_u64_le(&self, offset: u32) -> Option<u64> {
+        let bytes = self.read(offset as usize, 8)?;
+        Some(u64::from_le_bytes(bytes.try_into().ok()?))
+    }
+
     pub fn write_u32_le(&self, offset: u32, value: u32) -> bool {
         self.access.write_u32_le(offset, value)
+    }
+
+    pub fn write_u64_le(&self, offset: u32, value: u64) -> bool {
+        self.write(offset as usize, &value.to_le_bytes())
     }
 
     pub fn grow(&self, delta_pages: u32) -> Option<u32> {

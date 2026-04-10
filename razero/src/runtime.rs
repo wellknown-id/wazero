@@ -5094,6 +5094,30 @@ mod tests {
     }
 
     #[test]
+    fn public_memory_read_write_u64_le_returns_none_oob_in_secure_mode() {
+        if !compiler_supported() {
+            return;
+        }
+
+        let runtime = Runtime::with_config(RuntimeConfig::new_compiler().with_secure_mode(true));
+        let compiled = runtime
+            .compile(&[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07,
+                0x0a, 0x01, 0x06, b'm', b'e', b'm', b'o', b'r', b'y', 0x02, 0x00,
+            ])
+            .unwrap();
+        let module = runtime.instantiate(&compiled, ModuleConfig::new()).unwrap();
+        let memory = module.exported_memory("memory").unwrap();
+
+        let size = memory.size();
+        assert!(memory.write_u64_le(size - 8, 0x1122_3344_5566_7788));
+        assert_eq!(Some(0x1122_3344_5566_7788), memory.read_u64_le(size - 8));
+
+        assert_eq!(None, memory.read_u64_le(size - 7));
+        assert!(!memory.write_u64_le(size - 7, 0xffff_ffff_ffff_ffff));
+    }
+
+    #[test]
     fn public_memory_pages_returns_size_divided_by_page_size() {
         if !compiler_supported() {
             return;
