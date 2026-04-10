@@ -49,9 +49,9 @@ Current building blocks:
 - `razero_compiler::linker::link_native_executable(...)` links modules whose
   exported functions fit the current scalar C ABI wrapper surface.
 - `razero_compiler::linker::link_hello_host_executable(...)` packages this
-  specific `hello-host` guest by emitting a packaged host descriptor for
-  `env.print(ptr, len)` and wiring it to an explicit generated host stub that
-  prints from guest memory.
+  specific `hello-host` guest by emitting a packaged host descriptor for its
+  single explicit `(i32, i32) -> ()` host import and wiring it to an explicit
+  generated host stub that prints from guest memory.
 
 This path is intentionally narrow today:
 
@@ -62,8 +62,8 @@ This path is intentionally narrow today:
 - host ownership stays explicit: the linker/runtime support dispatches through
   declared packaged host descriptors instead of hidden runtime behavior
 - runtime-state packaging is still specialized to the current example shape:
-  one local memory, active data loading, one `env.print(i32, i32)` import, and
-  an exported `run()`
+  one local memory, active data loading, one explicit `(i32, i32) -> ()` host
+  import, and an exported `run()`
 
 The frozen contract for the current Rust AOT packaging slice lives in
 `razero-compiler/AOT_PACKAGING_ABI.md`. That document defines what is treated as

@@ -467,8 +467,8 @@ pub fn link_native_executable(
 
 /// Specialized native-link flow for the `examples/hello-host` guest.
 ///
-/// The example-specific `env.print(ptr, len)` behavior stays explicit, but it now rides on top of
-/// reusable packaged host-import descriptors and generic host trampolines.
+/// The example-specific `(i32, i32) -> ()` print-style behavior stays explicit, but it now rides
+/// on top of reusable packaged host-import descriptors and generic host trampolines.
 pub fn link_hello_host_executable(
     output_path: impl AsRef<Path>,
     guest: &NativeLinkModule,
@@ -609,12 +609,14 @@ impl HelloHostSpec {
         metadata: &AotCompiledMetadata,
     ) -> Result<Self, NativeLinkError> {
         validate_hello_host_metadata(metadata)?;
-        let print_import = metadata
+        let host_import = metadata
             .imports
             .iter()
             .find(|import| matches!(&import.desc, AotImportDescMetadata::Func(_)))
-            .ok_or_else(|| NativeLinkError::new("hello-host guest must import env.print"))?;
-        let AotImportDescMetadata::Func(import_type_index) = &print_import.desc else {
+            .ok_or_else(|| {
+                NativeLinkError::new("hello-host guest must import one host function")
+            })?;
+        let AotImportDescMetadata::Func(import_type_index) = &host_import.desc else {
             unreachable!()
         };
         let import_type = metadata
@@ -673,14 +675,14 @@ impl HelloHostSpec {
             host_imports: vec![PackagedHostImportSpec {
                 descriptor: PackagedHostImportDescriptor::from_import_metadata(
                     guest_module_name,
-                    print_import,
-                    "razero_hello_host_env_print_handler",
+                    host_import,
+                    &hello_host_handler_symbol_name(&host_import.module, &host_import.name),
                 )?,
                 import_type,
                 trampoline_symbol: packaged_host_import_symbol_name(
-                    print_import.index_per_type,
-                    &print_import.module,
-                    &print_import.name,
+                    host_import.index_per_type,
+                    &host_import.module,
+                    &host_import.name,
                 ),
             }],
         })
@@ -756,26 +758,23 @@ fn validate_host_import_metadata(
 
 fn validate_hello_host_metadata(metadata: &AotCompiledMetadata) -> Result<(), NativeLinkError> {
     validate_host_import_metadata(metadata, 1, current_native_packaging_target()?)?;
-    let print_import = metadata
+    let host_import = metadata
         .imports
         .iter()
         .find(|import| matches!(&import.desc, AotImportDescMetadata::Func(_)))
-        .ok_or_else(|| NativeLinkError::new("hello-host linker could not find env.print"))?;
-    if print_import.module != "env" || print_import.name != "print" {
-        return Err(NativeLinkError::new(
-            "hello-host linker expects the imported function to be env.print",
-        ));
-    }
-    let AotImportDescMetadata::Func(type_index) = &print_import.desc else {
+        .ok_or_else(|| NativeLinkError::new("hello-host linker could not find the host import"))?;
+    let AotImportDescMetadata::Func(type_index) = &host_import.desc else {
         unreachable!()
     };
-    let print_type = metadata
+    let host_import_type = metadata
         .types
         .get(*type_index as usize)
         .ok_or_else(|| NativeLinkError::new("hello-host import type metadata is missing"))?;
-    if print_type.params != [ValueType::I32, ValueType::I32] || !print_type.results.is_empty() {
+    if host_import_type.params != [ValueType::I32, ValueType::I32]
+        || !host_import_type.results.is_empty()
+    {
         return Err(NativeLinkError::new(
-            "hello-host linker expects env.print to use the (i32, i32) -> () signature",
+            "hello-host linker expects its host import to use the (i32, i32) -> () signature",
         ));
     }
     if metadata
@@ -1105,6 +1104,14 @@ fn host_dispatch_case_source(host_import: &PackagedHostImportSpec, memory_len: u
 fn build_hello_host_handler_source(symbol_name: &str) -> String {
     format!(
         "#include <stdint.h>\n#include <stddef.h>\n#include <stdio.h>\n\nint {symbol_name}(unsigned char* module_context, unsigned char* guest_memory, size_t guest_memory_len, uint64_t* stack_words, size_t stack_word_count) {{\n    (void)module_context;\n    if (stack_word_count < 2u) {{ return 1; }}\n    uint32_t ptr = (uint32_t)stack_words[0];\n    uint32_t len = (uint32_t)stack_words[1];\n    if ((uint64_t)ptr + (uint64_t)len > (uint64_t)guest_memory_len) {{ return 2; }}\n    fwrite(guest_memory + ptr, 1u, len, stdout);\n    fflush(stdout);\n    return 0;\n}}\n"
+    )
+}
+
+fn hello_host_handler_symbol_name(import_module: &str, import_name: &str) -> String {
+    format!(
+        "razero_hello_host_{}_{}_handler",
+        sanitize_identifier(import_module),
+        sanitize_identifier(import_name)
     )
 }
 
@@ -1637,9 +1644,10 @@ fn cursor_remaining(cursor: &Cursor<&[u8]>) -> usize {
 mod tests {
     use super::{
         append_path_suffix, build_wrapper_source, deserialize_native_package_metadata_bundle,
-        link_native_executable, serialize_native_package_metadata_bundle, ModuleSpec,
-        NativeLinkModule, NativePackageMetadataBundle, NativePackageMetadataEntry,
-        NativePackagingTarget, PackagedHostImportDescriptor, NATIVE_PACKAGE_MAGIC,
+        link_native_executable, serialize_native_package_metadata_bundle,
+        validate_hello_host_metadata, ModuleSpec, NativeLinkModule, NativePackageMetadataBundle,
+        NativePackageMetadataEntry, NativePackagingTarget, PackagedHostImportDescriptor,
+        NATIVE_PACKAGE_MAGIC,
     };
     use std::{
         fs,
@@ -1654,7 +1662,7 @@ mod tests {
         engine::Engine as WasmEngine,
         module::{
             Code, ConstExpr, DataSegment, ElementMode, ElementSegment, Export, ExternType, Global,
-            GlobalType, Module, RefType, Table, ValueType,
+            GlobalType, Import, Module, RefType, Table, ValueType,
         },
     };
 
@@ -1680,6 +1688,17 @@ mod tests {
 
     fn command_exists(name: &str) -> bool {
         Command::new(name).arg("--version").output().is_ok()
+    }
+
+    fn compile_module_metadata(module: &Module) -> AotCompiledMetadata {
+        let mut engine = CompilerEngine::new();
+        engine.compile_module(module).unwrap();
+        let artifact = engine
+            .compiled_module(module)
+            .unwrap()
+            .emit_relocatable_object()
+            .unwrap();
+        crate::aot::deserialize_aot_metadata(&artifact.metadata_sidecar_bytes).unwrap()
     }
 
     fn test_workspace(name: &str) -> PathBuf {
@@ -1748,6 +1767,86 @@ mod tests {
         assert_eq!(
             String::from_utf8(run.stdout).unwrap(),
             "hello world from guest"
+        );
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn link_hello_host_executable_accepts_any_single_function_import_name() {
+        if !command_exists("cc") {
+            return;
+        }
+
+        let workspace = test_workspace("package-link-driver-hello-host-generic-import");
+        fs::create_dir_all(&workspace).unwrap();
+
+        let mut module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
+        module.build_memory_definitions();
+        let import = module
+            .import_section
+            .iter_mut()
+            .find(|import| matches!(import.ty, ExternType::FUNC))
+            .expect("hello-host should have one function import");
+        import.module = "host".to_string();
+        import.name = "emit".to_string();
+
+        let mut engine = CompilerEngine::new();
+        engine.compile_module(&module).unwrap();
+        let artifact = engine
+            .compiled_module(&module)
+            .unwrap()
+            .emit_relocatable_object()
+            .unwrap();
+
+        let output = super::link_hello_host_executable(
+            workspace.join("hello-host-generic-native"),
+            &NativeLinkModule::from_artifact("hello-host", artifact),
+            &[],
+        )
+        .unwrap();
+        let metadata_bundle = fs::read(append_path_suffix(&output, ".razero-package")).unwrap();
+        let decoded_bundle = deserialize_native_package_metadata_bundle(&metadata_bundle).unwrap();
+        assert_eq!(
+            decoded_bundle.host_imports,
+            vec![PackagedHostImportDescriptor {
+                guest_module_name: "hello-host".to_string(),
+                import_module: "host".to_string(),
+                import_name: "emit".to_string(),
+                function_import_index: 0,
+                type_index: 0,
+                host_symbol_name: "razero_hello_host_host_emit_handler".to_string(),
+            }]
+        );
+        let run = Command::new(&output).output().unwrap();
+
+        assert!(
+            run.status.success(),
+            "status: {:?}\nstdout:\n{}\nstderr:\n{}",
+            run.status,
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(run.stdout).unwrap(),
+            "hello world from guest"
+        );
+    }
+
+    #[test]
+    fn validate_hello_host_metadata_rejects_multiple_function_imports() {
+        let mut module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
+        module
+            .import_section
+            .push(Import::function("env", "log", 0));
+        let metadata = compile_module_metadata(&module);
+
+        let err = validate_hello_host_metadata(&metadata).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "packaged host-import linker expected a descriptor for every imported function"
         );
     }
 

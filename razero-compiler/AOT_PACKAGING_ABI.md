@@ -184,9 +184,9 @@ The following are **not** part of the frozen generic packaging ABI:
   not yet documented here
 
 The `hello-host` path remains intentionally narrow in its host-import support:
-one `env.print(i32, i32)` import with example-specific behavior. Generic
-runtime-state packaging should instead rely on metadata-driven initialization
-from the serialized AOT sidecar.
+one explicit `(i32, i32) -> ()` function import with example-specific
+print-style behavior. Generic runtime-state packaging should instead rely on
+metadata-driven initialization from the serialized AOT sidecar.
 
 ## Current supported surface vs. future expansion
 
