@@ -4168,6 +4168,40 @@ mod tests {
     }
 
     #[test]
+    fn module_imported_global_definitions_expose_import_metadata() {
+        let runtime = Runtime::new();
+        runtime
+            .instantiate_binary(
+                &[
+                    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x06, 0x06, 0x01, 0x7e, 0x01,
+                    0x42, 0x2a, 0x0b, 0x07, 0x0b, 0x01, 0x07, b'c', b'o', b'u', b'n', b't', b'e',
+                    b'r', 0x03, 0x00,
+                ],
+                ModuleConfig::new().with_name("env"),
+            )
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                &[
+                    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x02, 0x10, 0x01, 0x03, b'e',
+                    b'n', b'v', 0x07, b'c', b'o', b'u', b'n', b't', b'e', b'r', 0x03, 0x7e, 0x01,
+                ],
+                ModuleConfig::new().with_name("guest"),
+            )
+            .unwrap();
+
+        let imported = guest.imported_global_definitions();
+        assert_eq!(1, imported.len());
+        let definition = &imported[0];
+        assert_eq!(ValueType::I64, definition.value_type());
+        assert!(definition.is_mutable());
+        assert_eq!(None, definition.module_name());
+        assert_eq!(Some(("env", "counter")), definition.import());
+        assert!(definition.export_names().is_empty());
+    }
+
+    #[test]
     fn module_exported_global_definitions_expose_export_metadata() {
         let runtime = Runtime::new();
         let guest = runtime

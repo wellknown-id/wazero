@@ -1295,6 +1295,27 @@ impl Module {
             .collect()
     }
 
+    pub fn imported_global_definitions(&self) -> Vec<GlobalDefinition> {
+        let Some(lower_module) = self.inner.lower_module.as_ref() else {
+            return Vec::new();
+        };
+        lower_module
+            .import_section
+            .iter()
+            .filter_map(|import| match &import.desc {
+                razero_wasm::module::ImportDesc::Global(global) => Some((import, global)),
+                _ => None,
+            })
+            .map(|(import, global)| {
+                GlobalDefinition::new(
+                    crate::runtime::convert_value_type(global.val_type),
+                    global.mutable,
+                )
+                .with_import(import.module.clone(), import.name.clone())
+            })
+            .collect()
+    }
+
     pub fn exported_global(&self, name: &str) -> Option<Global> {
         self.inner.globals.get(name).cloned()
     }
