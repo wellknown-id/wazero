@@ -2161,6 +2161,26 @@ mod tests {
         }
     }
 
+    struct RecordingYieldPolicyWithCaller {
+        observed: Arc<Mutex<Vec<(Option<String>, FunctionDefinition)>>>,
+    }
+
+    impl crate::experimental::YieldPolicy for RecordingYieldPolicyWithCaller {
+        fn allow_yield(&self, _ctx: &Context, request: &YieldPolicyRequest) -> bool {
+            self.observed
+                .lock()
+                .expect("observed yield metadata poisoned")
+                .push((
+                    request.caller_module_name().map(str::to_string),
+                    request
+                        .function
+                        .clone()
+                        .expect("yield policy should receive metadata"),
+                ));
+            false
+        }
+    }
+
     struct RecordingCloseNotifier {
         exit_code: Arc<AtomicU32>,
     }
@@ -5405,6 +5425,106 @@ mod tests {
             .resumer()
             .expect("resumer should be present")
             .cancel();
+    }
+
+    #[test]
+    fn yield_policy_tracks_caller_module_name_on_direct_host_yield() {
+        let runtime = Runtime::new();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let module = runtime
+            .new_host_module_builder("guest_wrapper")
+            .new_function_builder()
+            .with_callback(
+                |ctx, _module, _params| {
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .with_name("async_work_impl")
+            .export("async_work")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let ctx = with_yield_policy(
+            &with_yielder(&Context::default()),
+            RecordingYieldPolicyWithCaller {
+                observed: observed.clone(),
+            },
+        );
+        let err = module
+            .exported_function("async_work")
+            .unwrap()
+            .call_with_context(&ctx, &[])
+            .unwrap_err();
+        assert_eq!("policy denied: cooperative yield", err.to_string());
+        assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+
+        let observed = observed.lock().expect("observed yield metadata poisoned");
+        assert_eq!(1, observed.len());
+        let (caller_module, definition) = &observed[0];
+        assert_eq!(Some("guest_wrapper".to_string()), *caller_module);
+        assert_eq!("async_work_impl", definition.name());
+        assert_eq!(Some("guest_wrapper"), definition.module_name());
+    }
+
+    #[test]
+    fn yield_policy_allows_missing_caller_module_name_for_unnamed_guest() {
+        let runtime = Runtime::new();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .new_host_module_builder("env")
+            .new_function_builder()
+            .with_callback(
+                |ctx, _module, _params| {
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(Vec::new())
+                },
+                &[],
+                &[],
+            )
+            .with_name("yield_impl")
+            .export("yield")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                &[
+                    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
+                    0x00, 0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b'y', b'i', b'e', b'l',
+                    b'd', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u',
+                    b'n', 0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+                ],
+                ModuleConfig::new(),
+            )
+            .unwrap();
+
+        let ctx = with_yield_policy(
+            &with_yielder(&Context::default()),
+            RecordingYieldPolicyWithCaller {
+                observed: observed.clone(),
+            },
+        );
+        let err = guest
+            .exported_function("run")
+            .unwrap()
+            .call_with_context(&ctx, &[])
+            .unwrap_err();
+        assert_eq!("policy denied: cooperative yield", err.to_string());
+        assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+
+        let observed = observed.lock().expect("observed yield metadata poisoned");
+        assert_eq!(1, observed.len());
+        let (caller_module, definition) = &observed[0];
+        assert_eq!(None, *caller_module);
+        assert_eq!("run", definition.name());
+        assert_eq!(None, definition.module_name());
     }
 
     #[test]

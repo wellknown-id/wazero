@@ -1400,13 +1400,16 @@ impl ActiveYielder {
 impl Yielder for ActiveYielder {
     fn r#yield(&self) {
         if let Some((ctx, module)) = active_invocation() {
-            let request = ctx
+            let mut request = ctx
                 .invocation
                 .as_ref()
                 .and_then(|invocation| invocation.function_definition.clone())
                 .map_or_else(YieldPolicyRequest::new, |function| {
                     YieldPolicyRequest::new().with_function(function)
                 });
+            if let Some(module_name) = module.name() {
+                request = request.with_caller_module_name(module_name);
+            }
             let policy = ctx.yield_policy.clone().or_else(|| module.yield_policy());
             if policy
                 .as_ref()

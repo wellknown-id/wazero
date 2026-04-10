@@ -6,6 +6,7 @@ use crate::{api::wasm::FunctionDefinition, ctx_keys::Context};
 #[non_exhaustive]
 pub struct YieldPolicyRequest {
     pub function: Option<FunctionDefinition>,
+    pub caller_module_name: Option<String>,
 }
 
 impl YieldPolicyRequest {
@@ -16,6 +17,15 @@ impl YieldPolicyRequest {
     pub fn with_function(mut self, function: FunctionDefinition) -> Self {
         self.function = Some(function);
         self
+    }
+
+    pub fn with_caller_module_name(mut self, caller_module_name: impl Into<String>) -> Self {
+        self.caller_module_name = Some(caller_module_name.into());
+        self
+    }
+
+    pub fn caller_module_name(&self) -> Option<&str> {
+        self.caller_module_name.as_deref()
     }
 }
 
@@ -81,9 +91,12 @@ mod tests {
         let function = FunctionDefinition::new("host.yield")
             .with_module_name(Some("env".to_string()))
             .with_export_name("yield_now");
-        let request = YieldPolicyRequest::new().with_function(function.clone());
+        let request = YieldPolicyRequest::new()
+            .with_function(function.clone())
+            .with_caller_module_name("guest_wrapper");
 
         assert_eq!(Some(function), request.function);
+        assert_eq!(Some("guest_wrapper"), request.caller_module_name());
     }
 
     #[test]
