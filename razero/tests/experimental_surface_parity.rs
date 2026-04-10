@@ -4,7 +4,8 @@ use std::sync::{
 };
 
 use razero::{
-    get_compilation_workers, get_import_resolver, with_compilation_workers, with_import_resolver,
+    get_compilation_workers, get_host_call_policy, get_import_resolver, get_yield_policy,
+    with_compilation_workers, with_host_call_policy, with_import_resolver, with_yield_policy,
     Context, ModuleConfig, Runtime, RuntimeConfig,
 };
 
@@ -13,6 +14,14 @@ const SIMPLE_EXPORT_WASM: &[u8] = &[
     0x02, 0x01, 0x00, 0x07, 0x05, 0x01, 0x01, b'f', 0x00, 0x00, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x41,
     0x2a, 0x0b,
 ];
+
+fn allow_host_calls(_ctx: &Context, _request: &razero::HostCallPolicyRequest) -> bool {
+    true
+}
+
+fn allow_yields(_ctx: &Context, _request: &razero::YieldPolicyRequest) -> bool {
+    true
+}
 
 #[test]
 fn compilation_workers_getter_clamps_zero_to_one() {
@@ -51,6 +60,30 @@ fn compilation_workers_drive_context_aware_compile_paths() {
 fn close_on_context_done_round_trips_in_runtime_config() {
     let config = RuntimeConfig::new().with_close_on_context_done(true);
     assert!(config.close_on_context_done());
+}
+
+#[test]
+fn host_call_policy_round_trips_through_public_surface() {
+    let ctx = with_host_call_policy(&Context::default(), allow_host_calls);
+    let policy = get_host_call_policy(&ctx).expect("policy should be present");
+
+    assert!(policy.allow_host_call(&ctx, &razero::HostCallPolicyRequest::new()));
+    assert!(RuntimeConfig::new()
+        .with_host_call_policy(allow_host_calls)
+        .host_call_policy()
+        .is_some());
+}
+
+#[test]
+fn yield_policy_round_trips_through_public_surface() {
+    let ctx = with_yield_policy(&Context::default(), allow_yields);
+    let policy = get_yield_policy(&ctx).expect("policy should be present");
+
+    assert!(policy.allow_yield(&ctx, &razero::YieldPolicyRequest::new()));
+    assert!(RuntimeConfig::new()
+        .with_yield_policy(allow_yields)
+        .yield_policy()
+        .is_some());
 }
 
 #[test]

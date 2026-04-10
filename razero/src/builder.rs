@@ -115,6 +115,7 @@ impl HostModuleBuilder {
                         body_kind: razero_wasm::module::CodeBody::Host,
                         host_func: Some(lower_host_function_callback(
                             host_function.callback.clone(),
+                            host_function.definition.clone(),
                             host_function.definition.param_types().len(),
                             host_function.definition.result_types().len(),
                         )),

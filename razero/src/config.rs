@@ -12,6 +12,10 @@ use crate::{
         wasm::{CustomSection, FunctionDefinition, Global, HostCallback, MemoryDefinition},
     },
     cache::CompilationCache,
+    experimental::{
+        host_call_policy::{HostCallPolicy, IntoHostCallPolicy},
+        yield_policy::{IntoYieldPolicy, YieldPolicy},
+    },
 };
 use razero_wasm::module::Module as WasmModule;
 
@@ -34,9 +38,11 @@ pub struct RuntimeConfig {
     compilation_cache: Option<Arc<dyn CompilationCache>>,
     custom_sections: bool,
     close_on_context_done: bool,
+    host_call_policy: Option<Arc<dyn HostCallPolicy>>,
     secure_mode: bool,
     fuel: i64,
     engine_kind: RuntimeEngineKind,
+    yield_policy: Option<Arc<dyn YieldPolicy>>,
 }
 
 impl RuntimeConfig {
@@ -114,8 +120,22 @@ impl RuntimeConfig {
         self
     }
 
+    pub fn with_host_call_policy(mut self, policy: impl IntoHostCallPolicy) -> Self {
+        if let Some(policy) = policy.into_host_call_policy() {
+            self.host_call_policy = Some(policy);
+        }
+        self
+    }
+
     pub fn with_fuel(mut self, fuel: i64) -> Self {
         self.fuel = fuel.max(0);
+        self
+    }
+
+    pub fn with_yield_policy(mut self, policy: impl IntoYieldPolicy) -> Self {
+        if let Some(policy) = policy.into_yield_policy() {
+            self.yield_policy = Some(policy);
+        }
         self
     }
 
@@ -151,12 +171,20 @@ impl RuntimeConfig {
         self.secure_mode
     }
 
+    pub fn host_call_policy(&self) -> Option<Arc<dyn HostCallPolicy>> {
+        self.host_call_policy.clone()
+    }
+
     pub fn fuel(&self) -> i64 {
         self.fuel
     }
 
     pub fn engine_kind(&self) -> RuntimeEngineKind {
         self.engine_kind
+    }
+
+    pub fn yield_policy(&self) -> Option<Arc<dyn YieldPolicy>> {
+        self.yield_policy.clone()
     }
 }
 
@@ -257,6 +285,18 @@ impl CompiledModule {
 #[cfg(test)]
 mod tests {
     use super::{RuntimeConfig, RuntimeEngineKind};
+    use crate::{
+        experimental::{HostCallPolicyRequest, YieldPolicyRequest},
+        Context,
+    };
+
+    fn allow_host_calls(_ctx: &Context, _request: &HostCallPolicyRequest) -> bool {
+        true
+    }
+
+    fn allow_yields(_ctx: &Context, _request: &YieldPolicyRequest) -> bool {
+        true
+    }
 
     #[test]
     fn runtime_config_engine_constructors_select_expected_kind() {
@@ -276,5 +316,25 @@ mod tests {
             RuntimeEngineKind::Interpreter,
             RuntimeConfig::new_interpreter().engine_kind()
         );
+    }
+
+    #[test]
+    fn runtime_config_host_call_policy_round_trips() {
+        let config = RuntimeConfig::new().with_host_call_policy(allow_host_calls);
+        let policy = config
+            .host_call_policy()
+            .expect("host call policy should be present");
+
+        assert!(policy.allow_host_call(&Context::default(), &HostCallPolicyRequest::new()));
+    }
+
+    #[test]
+    fn runtime_config_yield_policy_round_trips() {
+        let config = RuntimeConfig::new().with_yield_policy(allow_yields);
+        let policy = config
+            .yield_policy()
+            .expect("yield policy should be present");
+
+        assert!(policy.allow_yield(&Context::default(), &YieldPolicyRequest::new()));
     }
 }

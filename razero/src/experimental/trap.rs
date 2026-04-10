@@ -66,10 +66,11 @@ pub(crate) fn trap_cause_of_call_engine_error(err: &CallEngineError) -> Option<T
             trap_cause_from_exit_code(err.exit_code & EXIT_CODE_MASK)
         }
         CallEngineError::Runtime(err) => trap_cause_from_wasmruntime(*err),
+        CallEngineError::Host(err) => trap_cause_from_message(&err.to_string()),
         CallEngineError::UnsupportedExit { exit_code, .. } => {
             trap_cause_from_exit_code(exit_code.raw() & EXIT_CODE_MASK)
         }
-        CallEngineError::InvalidParamCount { .. } | CallEngineError::Host(_) => None,
+        CallEngineError::InvalidParamCount { .. } => None,
     }
 }
 

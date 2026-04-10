@@ -71,6 +71,10 @@ impl From<YieldError> for RuntimeError {
     }
 }
 
+pub(crate) fn policy_denied_error(action: &str) -> RuntimeError {
+    RuntimeError::new(format!("policy denied: {action}"))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExitError {
     exit_code: u32,

@@ -4,6 +4,7 @@ pub mod compilation_workers;
 pub mod experimental;
 pub mod features;
 pub mod fuel;
+pub mod host_call_policy;
 pub mod import_resolver;
 pub mod import_resolver_observer;
 pub mod listener;
@@ -12,6 +13,7 @@ pub mod snapshotter;
 pub mod table;
 pub mod trap;
 pub mod r#yield;
+pub mod yield_policy;
 
 pub use checkpoint::{get_snapshotter, with_snapshotter, Snapshot, Snapshotter};
 pub use close_notifier::{
@@ -23,6 +25,10 @@ pub use features::{CORE_FEATURES_EXTENDED_CONST, CORE_FEATURES_TAIL_CALL, CORE_F
 pub use fuel::{
     add_fuel, get_fuel_controller, remaining_fuel, with_fuel_controller, AggregatingFuelController,
     FuelController, IntoFuelController, SimpleFuelController,
+};
+pub use host_call_policy::{
+    get_host_call_policy, with_host_call_policy, HostCallPolicy, HostCallPolicyRequest,
+    IntoHostCallPolicy,
 };
 pub use import_resolver::{
     get_import_resolver, get_import_resolver_config, with_import_resolver,
@@ -48,4 +54,7 @@ pub use r#yield::{
 pub use table::Table;
 pub use trap::{
     get_trap_observer, trap_cause_of, with_trap_observer, TrapCause, TrapObservation, TrapObserver,
+};
+pub use yield_policy::{
+    get_yield_policy, with_yield_policy, IntoYieldPolicy, YieldPolicy, YieldPolicyRequest,
 };

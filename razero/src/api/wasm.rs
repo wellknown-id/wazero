@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     cell::RefCell,
     collections::BTreeMap,
     fmt::{self, Display, Formatter},
@@ -11,15 +12,17 @@ use std::{
 };
 
 use crate::{
-    api::error::{ExitError, Result, RuntimeError},
+    api::error::{policy_denied_error, ExitError, Result, RuntimeError},
     ctx_keys::{Context, ContextDoneError, InvocationContext},
     experimental::{
         close_notifier::CloseNotifier,
         fuel::FuelController,
+        host_call_policy::HostCallPolicyRequest,
         listener::{new_stack_iterator, FunctionListener, StackFrame},
         memory::LinearMemory,
         r#yield::{Resumer, YieldError, Yielder},
         snapshotter::{Snapshot, Snapshotter},
+        yield_policy::YieldPolicyRequest,
     },
     runtime::RuntimeStore,
 };
@@ -37,6 +40,15 @@ pub type HostCallback =
     Arc<dyn Fn(Context, Module, &[u64]) -> Result<Vec<u64>> + Send + Sync + 'static>;
 
 pub type RuntimeModuleRegistry = Arc<Mutex<BTreeMap<String, Module>>>;
+
+#[derive(Clone, Copy, Debug)]
+struct PolicyDeniedPayload(&'static str);
+
+fn policy_denied_reason(payload: &(dyn Any + Send)) -> Option<&'static str> {
+    payload
+        .downcast_ref::<PolicyDeniedPayload>()
+        .map(|payload| payload.0)
+}
 
 thread_local! {
     static ACTIVE_INVOCATIONS: RefCell<Vec<(Context, Module)>> = const { RefCell::new(Vec::new()) };
@@ -667,6 +679,7 @@ struct FunctionInner {
     module: Weak<ModuleInner>,
     definition: FunctionDefinition,
     callback: Option<HostCallback>,
+    is_host: bool,
     default_fuel: i64,
     source_offset: u64,
 }
@@ -676,6 +689,7 @@ impl Function {
         module: Weak<ModuleInner>,
         definition: FunctionDefinition,
         callback: Option<HostCallback>,
+        is_host: bool,
         default_fuel: i64,
         source_offset: u64,
     ) -> Self {
@@ -684,6 +698,7 @@ impl Function {
                 module,
                 definition,
                 callback,
+                is_host,
                 default_fuel,
                 source_offset,
             }),
@@ -780,6 +795,23 @@ impl Function {
             listener_stack: listener_stack.clone(),
         });
 
+        let request = HostCallPolicyRequest::new().with_function(self.inner.definition.clone());
+        let policy = ctx
+            .host_call_policy
+            .clone()
+            .or_else(|| module.host_call_policy());
+        if self.inner.is_host
+            && policy
+                .as_ref()
+                .is_some_and(|policy| !policy.allow_host_call(&invocation_ctx, &request))
+        {
+            if let Some(stop) = &close_on_context_done {
+                stop.store(true, Ordering::SeqCst);
+            }
+            snapshot_active.store(false, std::sync::atomic::Ordering::SeqCst);
+            return Err(policy_denied_error("host call"));
+        }
+
         if let Some(listener) = &listener {
             let mut stack_iterator = new_stack_iterator(&listener_stack);
             listener.before(
@@ -792,7 +824,9 @@ impl Function {
         }
 
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
-            callback(invocation_ctx.clone(), module.clone(), params)
+            with_active_invocation(&invocation_ctx, &module, || {
+                callback(invocation_ctx.clone(), module.clone(), params)
+            })
         }));
         if let Some(stop) = close_on_context_done {
             stop.store(true, Ordering::SeqCst);
@@ -845,6 +879,10 @@ impl Function {
                     let resumer: Arc<dyn Resumer> = resumer;
                     return Err(RuntimeError::from(YieldError::new(Some(resumer))));
                 }
+                if let Some(reason) = policy_denied_reason(payload.as_ref()) {
+                    snapshot_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                    return Err(policy_denied_error(reason));
+                }
                 snapshot_active.store(false, std::sync::atomic::Ordering::SeqCst);
                 panic::resume_unwind(payload);
             }
@@ -865,10 +903,12 @@ pub(crate) struct ModuleInner {
     all_globals: Vec<Global>,
     close_notifier: Option<Arc<dyn CloseNotifier>>,
     close_hook: Option<Arc<dyn Fn(u32) + Send + Sync>>,
+    host_call_policy: Option<Arc<dyn crate::experimental::host_call_policy::HostCallPolicy>>,
     close_on_context_done: bool,
     closed: AtomicBool,
     exit_code: AtomicU32,
     default_fuel: i64,
+    yield_policy: Option<Arc<dyn crate::experimental::yield_policy::YieldPolicy>>,
     runtime_registry: Option<Weak<Mutex<BTreeMap<String, Module>>>>,
     runtime_store: Option<Weak<Mutex<RuntimeStore>>>,
     lower_module: Option<WasmModule>,
@@ -883,13 +923,16 @@ impl Module {
         name: Option<String>,
         exported_functions: BTreeMap<String, FunctionDefinition>,
         host_callbacks: BTreeMap<String, HostCallback>,
+        exported_functions_are_host: bool,
         default_fuel: i64,
         memory: Option<Memory>,
         globals: BTreeMap<String, Global>,
         all_globals: Vec<Global>,
         close_notifier: Option<Arc<dyn CloseNotifier>>,
         close_hook: Option<Arc<dyn Fn(u32) + Send + Sync>>,
+        host_call_policy: Option<Arc<dyn crate::experimental::host_call_policy::HostCallPolicy>>,
         close_on_context_done: bool,
+        yield_policy: Option<Arc<dyn crate::experimental::yield_policy::YieldPolicy>>,
         runtime_registry: Option<Weak<Mutex<BTreeMap<String, Module>>>>,
         runtime_store: Option<Weak<Mutex<RuntimeStore>>>,
         lower_module: Option<WasmModule>,
@@ -907,6 +950,7 @@ impl Module {
                                 weak.clone(),
                                 definition.clone(),
                                 host_callbacks.get(export_name).cloned(),
+                                exported_functions_are_host,
                                 default_fuel,
                                 *function_source_offsets.get(export_name).unwrap_or(&0),
                             ),
@@ -921,10 +965,12 @@ impl Module {
                     all_globals,
                     close_notifier,
                     close_hook,
+                    host_call_policy,
                     close_on_context_done,
                     closed: AtomicBool::new(false),
                     exit_code: AtomicU32::new(0),
                     default_fuel,
+                    yield_policy,
                     runtime_registry,
                     runtime_store,
                     lower_module,
@@ -1102,6 +1148,7 @@ impl Module {
             Arc::downgrade(&self.inner),
             definition,
             Some(callback),
+            false,
             self.default_fuel(),
             crate::runtime::function_source_offset(&instance.source, function_index),
         ))
@@ -1164,6 +1211,18 @@ impl Module {
     pub(crate) fn close_on_context_done(&self) -> bool {
         self.inner.close_on_context_done
     }
+
+    pub(crate) fn host_call_policy(
+        &self,
+    ) -> Option<Arc<dyn crate::experimental::host_call_policy::HostCallPolicy>> {
+        self.inner.host_call_policy.clone()
+    }
+
+    pub(crate) fn yield_policy(
+        &self,
+    ) -> Option<Arc<dyn crate::experimental::yield_policy::YieldPolicy>> {
+        self.inner.yield_policy.clone()
+    }
 }
 
 impl Display for Module {
@@ -1205,6 +1264,22 @@ impl ActiveYielder {
 
 impl Yielder for ActiveYielder {
     fn r#yield(&self) {
+        if let Some((ctx, module)) = active_invocation() {
+            let request = ctx
+                .invocation
+                .as_ref()
+                .and_then(|invocation| invocation.function_definition.clone())
+                .map_or_else(YieldPolicyRequest::new, |function| {
+                    YieldPolicyRequest::new().with_function(function)
+                });
+            let policy = ctx.yield_policy.clone().or_else(|| module.yield_policy());
+            if policy
+                .as_ref()
+                .is_some_and(|policy| !policy.allow_yield(&ctx, &request))
+            {
+                panic::panic_any(PolicyDeniedPayload("cooperative yield"));
+            }
+        }
         panic::panic_any(YieldSuspend);
     }
 }
@@ -1350,6 +1425,10 @@ impl Resumer for PendingResumer {
                         }
                         let next: Arc<dyn Resumer> = next;
                         return Err(RuntimeError::from(YieldError::new(Some(next))));
+                    }
+                    if let Some(reason) = policy_denied_reason(payload.as_ref()) {
+                        self.consume_incremental_fuel();
+                        return Err(policy_denied_error(reason));
                     }
                     panic::resume_unwind(payload);
                 }

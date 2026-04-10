@@ -35,7 +35,7 @@ use razero_wasm::{
 
 use crate::{
     api::{
-        error::{ExitError, Result, RuntimeError},
+        error::{policy_denied_error, ExitError, Result, RuntimeError},
         wasm::{
             active_invocation, install_close_on_context_done, with_active_invocation,
             CustomSection, FunctionDefinition, Global, GlobalValue, HostCallback, Memory,
@@ -48,6 +48,7 @@ use crate::{
     ctx_keys::Context,
     experimental::{
         get_compilation_workers,
+        host_call_policy::{get_host_call_policy, HostCallPolicyRequest},
         listener::StackFrame,
         memory::{DefaultMemoryAllocator, MemoryAllocator},
         trap::{
@@ -330,6 +331,47 @@ fn merged_listener_stack(ctx: &Context, module: &Module) -> Option<Vec<StackFram
     let mut merged = parent_stack.to_vec();
     merged.extend(active_stack);
     Some(merged)
+}
+
+fn host_callback_context(
+    ctx: &Context,
+    module: &Module,
+    definition: &FunctionDefinition,
+    params: &[u64],
+) -> Context {
+    let listener_stack = merged_listener_stack(ctx, module).unwrap_or_else(|| {
+        let mut stack = ctx
+            .invocation
+            .as_ref()
+            .map(|invocation| invocation.listener_stack.clone())
+            .unwrap_or_default();
+        stack.push(StackFrame::new(
+            definition.clone(),
+            params.to_vec(),
+            Vec::new(),
+            0,
+            0,
+        ));
+        stack
+    });
+    ctx.with_listener_stack(listener_stack)
+        .with_function_definition(definition.clone())
+}
+
+fn enforce_host_call_policy(
+    ctx: &Context,
+    module: &Module,
+    definition: &FunctionDefinition,
+) -> Result<()> {
+    let request = HostCallPolicyRequest::new().with_function(definition.clone());
+    let policy = get_host_call_policy(ctx).or_else(|| module.host_call_policy());
+    if policy
+        .as_ref()
+        .is_some_and(|policy| !policy.allow_host_call(ctx, &request))
+    {
+        return Err(policy_denied_error("host call"));
+    }
+    Ok(())
 }
 
 impl Default for Runtime {
@@ -617,6 +659,7 @@ impl Runtime {
             name,
             compiled.inner().exported_functions.clone(),
             compiled.inner().host_callbacks.clone(),
+            true,
             self.inner.config.fuel(),
             None,
             compiled.inner().exported_globals.clone(),
@@ -628,7 +671,9 @@ impl Runtime {
                 .collect(),
             ctx.close_notifier.clone(),
             close_hook,
+            self.inner.config.host_call_policy(),
             self.inner.config.close_on_context_done(),
+            self.inner.config.yield_policy(),
             Some(Arc::downgrade(&self.inner.modules)),
             Some(Arc::downgrade(&self.inner.store)),
             compiled.inner().lower_module.clone(),
@@ -690,9 +735,18 @@ impl Runtime {
                     signature.clone(),
                     Arc::new({
                         let callback = callback.clone();
+                        let definition = compiled
+                            .inner()
+                            .exported_functions
+                            .get(&export.name)
+                            .cloned()
+                            .expect("host function definition missing from compiled module");
                         move |params: &[u64]| {
                             let (ctx, module) = active_invocation()
                                 .ok_or_else(|| "active invocation is unavailable".to_string())?;
+                            let ctx = host_callback_context(&ctx, &module, &definition, params);
+                            enforce_host_call_policy(&ctx, &module, &definition)
+                                .map_err(|err| err.to_string())?;
                             callback(ctx, module, params).map_err(|err| err.to_string())
                         }
                     }),
@@ -739,13 +793,16 @@ impl Runtime {
             name,
             compiled.inner().exported_functions.clone(),
             callbacks,
+            false,
             self.inner.config.fuel(),
             memory,
             globals,
             all_globals,
             ctx.close_notifier.clone(),
             close_hook,
+            self.inner.config.host_call_policy(),
             self.inner.config.close_on_context_done(),
+            self.inner.config.yield_policy(),
             Some(Arc::downgrade(&self.inner.modules)),
             Some(Arc::downgrade(&self.inner.store)),
             Some(lower_module.clone()),
@@ -1163,6 +1220,7 @@ fn read_vec_artifact(
 
 pub(crate) fn lower_host_function_callback(
     callback: HostCallback,
+    definition: FunctionDefinition,
     param_count: usize,
     result_count: usize,
 ) -> razero_wasm::host_func::HostFuncRef {
@@ -1173,9 +1231,9 @@ pub(crate) fn lower_host_function_callback(
             )
         })?;
         let params = stack[..param_count].to_vec();
-        let ctx = merged_listener_stack(&ctx, &module)
-            .map(|listener_stack| ctx.with_listener_stack(listener_stack))
-            .unwrap_or(ctx);
+        let ctx = host_callback_context(&ctx, &module, &definition, &params);
+        enforce_host_call_policy(&ctx, &module, &definition)
+            .map_err(|err| razero_wasm::host_func::HostFuncError::new(err.to_string()))?;
         let results = match (
             caller.data_mut::<InterpRuntimeModule>(),
             module.store_module_id(),
@@ -1816,11 +1874,12 @@ mod tests {
         config::ModuleConfig,
         ctx_keys::Context,
         experimental::{
-            add_fuel, get_snapshotter, get_yielder, remaining_fuel, with_close_notifier,
-            with_compilation_workers, with_fuel_controller, with_function_listener_factory,
-            with_snapshotter, with_trap_observer, with_yielder, CloseNotifier, FuelController,
-            FunctionListener, FunctionListenerFactory, Snapshot, StackIterator, TrapCause,
-            TrapObservation,
+            add_fuel, get_snapshotter, get_yielder, remaining_fuel, trap_cause_of,
+            with_close_notifier, with_compilation_workers, with_fuel_controller,
+            with_function_listener_factory, with_host_call_policy, with_snapshotter,
+            with_trap_observer, with_yield_policy, with_yielder, CloseNotifier, FuelController,
+            FunctionListener, FunctionListenerFactory, HostCallPolicyRequest, Snapshot,
+            StackIterator, TrapCause, TrapObservation, YieldPolicyRequest,
         },
         RuntimeConfig,
     };
@@ -1847,6 +1906,38 @@ mod tests {
             configs.push(RuntimeConfig::new_compiler().with_close_on_context_done(true));
         }
         configs
+    }
+
+    fn policy_runtime_configs() -> Vec<RuntimeConfig> {
+        let mut configs = vec![RuntimeConfig::new_interpreter(), RuntimeConfig::new_auto()];
+        if compiler_supported() {
+            configs.push(RuntimeConfig::new_compiler());
+        }
+        configs
+    }
+
+    fn deny_env_host_calls(_ctx: &Context, request: &HostCallPolicyRequest) -> bool {
+        request
+            .function
+            .as_ref()
+            .and_then(FunctionDefinition::module_name)
+            != Some("env")
+    }
+
+    fn deny_hook_impl_host_call(_ctx: &Context, request: &HostCallPolicyRequest) -> bool {
+        request.function.as_ref().map(FunctionDefinition::name) != Some("hook_impl")
+    }
+
+    fn allow_all_host_calls(_ctx: &Context, _request: &HostCallPolicyRequest) -> bool {
+        true
+    }
+
+    fn deny_all_yields(_ctx: &Context, _request: &YieldPolicyRequest) -> bool {
+        false
+    }
+
+    fn allow_all_yields(_ctx: &Context, _request: &YieldPolicyRequest) -> bool {
+        true
     }
 
     #[derive(Clone)]
@@ -2000,6 +2091,25 @@ mod tests {
             Some(Arc::new(StackRecordingListener {
                 events: self.events.clone(),
             }))
+        }
+    }
+
+    struct RecordingDenyYieldPolicy {
+        observed: Arc<Mutex<Vec<FunctionDefinition>>>,
+    }
+
+    impl crate::experimental::YieldPolicy for RecordingDenyYieldPolicy {
+        fn allow_yield(&self, _ctx: &Context, request: &YieldPolicyRequest) -> bool {
+            self.observed
+                .lock()
+                .expect("observed yield metadata poisoned")
+                .push(
+                    request
+                        .function
+                        .clone()
+                        .expect("yield policy should receive metadata"),
+                );
+            false
         }
     }
 
@@ -3423,6 +3533,200 @@ mod tests {
     }
 
     #[test]
+    fn guest_host_callbacks_receive_host_function_definition_metadata() {
+        let mut configs = vec![RuntimeConfig::new_interpreter(), RuntimeConfig::new_auto()];
+        if compiler_supported() {
+            configs.push(RuntimeConfig::new_compiler());
+        }
+
+        for config in configs {
+            let runtime = Runtime::with_config(config);
+            let observed = Arc::new(Mutex::new(Vec::new()));
+            runtime
+                .new_host_module_builder("env")
+                .new_function_builder()
+                .with_func(
+                    {
+                        let observed = observed.clone();
+                        move |ctx, _module, _params| {
+                            observed.lock().expect("observed metadata poisoned").push(
+                                ctx.invocation
+                                    .as_ref()
+                                    .and_then(|invocation| invocation.function_definition.clone())
+                                    .expect("host callback should receive function definition"),
+                            );
+                            Ok(vec![7])
+                        }
+                    },
+                    &[ValueType::I32],
+                    &[ValueType::I32],
+                )
+                .with_name("hook_impl")
+                .with_parameter_names(&["value"])
+                .with_result_names(&["result"])
+                .export("hook")
+                .instantiate(&Context::default())
+                .unwrap();
+
+            let guest = runtime
+                .instantiate_binary(
+                    &[
+                        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60,
+                        0x01, 0x7f, 0x01, 0x7f, 0x02, 0x0c, 0x01, 0x03, b'e', b'n', b'v', 0x04,
+                        b'h', b'o', b'o', b'k', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07,
+                        0x01, 0x03, b'r', b'u', b'n', 0x00, 0x01, 0x0a, 0x08, 0x01, 0x06, 0x00,
+                        0x41, 0x2a, 0x10, 0x00, 0x0b,
+                    ],
+                    ModuleConfig::new().with_name("guest"),
+                )
+                .unwrap();
+
+            let results = guest.exported_function("run").unwrap().call(&[0]).unwrap();
+            assert_eq!(vec![7], results);
+
+            let observed = observed.lock().expect("observed metadata poisoned");
+            assert_eq!(1, observed.len());
+            let definition = &observed[0];
+            assert_eq!(Some("env"), definition.module_name());
+            assert_eq!("hook_impl", definition.name());
+            assert_eq!(&[ValueType::I32], definition.param_types());
+            assert_eq!(&[ValueType::I32], definition.result_types());
+            assert_eq!(&["hook".to_string()], definition.export_names());
+            assert_eq!(&["value".to_string()], definition.param_names());
+            assert_eq!(&["result".to_string()], definition.result_names());
+        }
+    }
+
+    #[test]
+    fn host_call_policy_denies_guest_host_callbacks_across_runtimes() {
+        for config in policy_runtime_configs() {
+            let runtime = Runtime::with_config(config.with_host_call_policy(deny_env_host_calls));
+            let called = Arc::new(AtomicU32::new(0));
+            runtime
+                .new_host_module_builder("env")
+                .new_function_builder()
+                .with_func(
+                    {
+                        let called = called.clone();
+                        move |_ctx, _module, _params| {
+                            called.fetch_add(1, Ordering::SeqCst);
+                            Ok(vec![7])
+                        }
+                    },
+                    &[ValueType::I32],
+                    &[ValueType::I32],
+                )
+                .with_name("hook_impl")
+                .export("hook")
+                .instantiate(&Context::default())
+                .unwrap();
+
+            let guest = runtime
+                .instantiate_binary(
+                    &[
+                        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60,
+                        0x01, 0x7f, 0x01, 0x7f, 0x02, 0x0c, 0x01, 0x03, b'e', b'n', b'v', 0x04,
+                        b'h', b'o', b'o', b'k', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07,
+                        0x01, 0x03, b'r', b'u', b'n', 0x00, 0x01, 0x0a, 0x08, 0x01, 0x06, 0x00,
+                        0x41, 0x2a, 0x10, 0x00, 0x0b,
+                    ],
+                    ModuleConfig::new(),
+                )
+                .unwrap();
+
+            let err = guest
+                .exported_function("run")
+                .unwrap()
+                .call_with_context(&Context::default(), &[0])
+                .unwrap_err();
+            assert_eq!("policy denied: host call", err.to_string());
+            assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+            assert_eq!(0, called.load(Ordering::SeqCst));
+        }
+    }
+
+    #[test]
+    fn host_call_policy_denies_direct_host_function_calls() {
+        let runtime = Runtime::new();
+        let called = Arc::new(AtomicU32::new(0));
+        let module = runtime
+            .new_host_module_builder("env")
+            .new_function_builder()
+            .with_func(
+                {
+                    let called = called.clone();
+                    move |_ctx, _module, params| {
+                        called.fetch_add(1, Ordering::SeqCst);
+                        Ok(vec![params[0]])
+                    }
+                },
+                &[ValueType::I32],
+                &[ValueType::I32],
+            )
+            .with_name("hook_impl")
+            .export("hook")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let ctx = with_host_call_policy(&Context::default(), deny_hook_impl_host_call);
+        let err = module
+            .exported_function("hook")
+            .unwrap()
+            .call_with_context(&ctx, &[1])
+            .unwrap_err();
+        assert_eq!("policy denied: host call", err.to_string());
+        assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+        assert_eq!(0, called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn host_call_policy_context_overrides_runtime_config_policy() {
+        let runtime =
+            Runtime::with_config(RuntimeConfig::new().with_host_call_policy(deny_env_host_calls));
+        let called = Arc::new(AtomicU32::new(0));
+        runtime
+            .new_host_module_builder("env")
+            .new_function_builder()
+            .with_func(
+                {
+                    let called = called.clone();
+                    move |_ctx, _module, _params| {
+                        called.fetch_add(1, Ordering::SeqCst);
+                        Ok(vec![7])
+                    }
+                },
+                &[ValueType::I32],
+                &[ValueType::I32],
+            )
+            .with_name("hook_impl")
+            .export("hook")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                &[
+                    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01,
+                    0x7f, 0x01, 0x7f, 0x02, 0x0c, 0x01, 0x03, b'e', b'n', b'v', 0x04, b'h', b'o',
+                    b'o', b'k', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r',
+                    b'u', b'n', 0x00, 0x01, 0x0a, 0x08, 0x01, 0x06, 0x00, 0x41, 0x2a, 0x10, 0x00,
+                    0x0b,
+                ],
+                ModuleConfig::new(),
+            )
+            .unwrap();
+
+        let ctx = with_host_call_policy(&Context::default(), allow_all_host_calls);
+        let results = guest
+            .exported_function("run")
+            .unwrap()
+            .call_with_context(&ctx, &[0])
+            .unwrap();
+        assert_eq!(vec![7], results);
+        assert_eq!(1, called.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn memory_supports_read_write_and_grow() {
         let runtime = Runtime::new();
         let bytes = [
@@ -4049,6 +4353,176 @@ mod tests {
             .resume(&with_yielder(&Context::default()), &[42])
             .unwrap_err();
         assert_eq!("cannot resume: resumer has been cancelled", err.to_string());
+    }
+
+    #[test]
+    fn yield_policy_denies_cooperative_suspension_across_runtimes() {
+        for config in policy_runtime_configs() {
+            let runtime = Runtime::with_config(config.with_yield_policy(deny_all_yields));
+            runtime
+                .new_host_module_builder("example")
+                .new_function_builder()
+                .with_callback(
+                    |ctx, _module, _params| {
+                        get_yielder(&ctx)
+                            .expect("yielder should be injected")
+                            .r#yield();
+                        Ok(vec![0])
+                    },
+                    &[],
+                    &[ValueType::I32],
+                )
+                .export("async_work")
+                .instantiate(&Context::default())
+                .unwrap();
+
+            let guest = runtime
+                .instantiate_binary(
+                    include_bytes!("../../experimental/testdata/yield.wasm"),
+                    ModuleConfig::new(),
+                )
+                .unwrap();
+
+            let err = guest
+                .exported_function("run")
+                .unwrap()
+                .call_with_context(&with_yielder(&Context::default()), &[])
+                .unwrap_err();
+            assert_eq!("policy denied: cooperative yield", err.to_string());
+            assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+        }
+    }
+
+    #[test]
+    fn yield_policy_denies_follow_on_suspension_during_resume() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("example")
+            .new_function_builder()
+            .with_callback(
+                |ctx, _module, _params| {
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .export("async_work")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                include_bytes!("../../experimental/testdata/yield.wasm"),
+                ModuleConfig::new(),
+            )
+            .unwrap();
+
+        let err = guest
+            .exported_function("run_twice")
+            .unwrap()
+            .call_with_context(&with_yielder(&Context::default()), &[])
+            .unwrap_err();
+        let RuntimeError::Yield(first_yield) = err else {
+            panic!("expected initial yield error");
+        };
+
+        let resume_ctx = with_yield_policy(&with_yielder(&Context::default()), deny_all_yields);
+        let err = first_yield
+            .resumer()
+            .expect("resumer should be present")
+            .resume(&resume_ctx, &[40])
+            .unwrap_err();
+        assert_eq!("policy denied: cooperative yield", err.to_string());
+        assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+    }
+
+    #[test]
+    fn yield_policy_denies_direct_host_function_suspension_with_function_metadata() {
+        let runtime = Runtime::new();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let module = runtime
+            .new_host_module_builder("example")
+            .new_function_builder()
+            .with_callback(
+                |ctx, _module, _params| {
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .with_name("async_work_impl")
+            .export("async_work")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let ctx = with_yield_policy(
+            &with_yielder(&Context::default()),
+            RecordingDenyYieldPolicy {
+                observed: observed.clone(),
+            },
+        );
+        let err = module
+            .exported_function("async_work")
+            .unwrap()
+            .call_with_context(&ctx, &[])
+            .unwrap_err();
+        assert_eq!("policy denied: cooperative yield", err.to_string());
+        assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+
+        let observed = observed.lock().expect("observed yield metadata poisoned");
+        assert_eq!(1, observed.len());
+        let definition = &observed[0];
+        assert_eq!(Some("example"), definition.module_name());
+        assert_eq!("async_work_impl", definition.name());
+        assert_eq!(&["async_work".to_string()], definition.export_names());
+    }
+
+    #[test]
+    fn yield_policy_context_overrides_runtime_config_policy() {
+        let runtime = Runtime::with_config(RuntimeConfig::new().with_yield_policy(deny_all_yields));
+        runtime
+            .new_host_module_builder("example")
+            .new_function_builder()
+            .with_callback(
+                |ctx, _module, _params| {
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .export("async_work")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                include_bytes!("../../experimental/testdata/yield.wasm"),
+                ModuleConfig::new(),
+            )
+            .unwrap();
+
+        let ctx = with_yield_policy(&with_yielder(&Context::default()), allow_all_yields);
+        let err = guest
+            .exported_function("run")
+            .unwrap()
+            .call_with_context(&ctx, &[])
+            .unwrap_err();
+        let RuntimeError::Yield(yield_error) = err else {
+            panic!("expected yield error");
+        };
+        yield_error
+            .resumer()
+            .expect("resumer should be present")
+            .cancel();
     }
 
     #[test]

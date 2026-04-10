@@ -12,11 +12,13 @@ use crate::api::wasm::FunctionDefinition;
 use crate::experimental::{
     close_notifier::CloseNotifier,
     fuel::FuelController,
+    host_call_policy::HostCallPolicy,
     listener::FunctionListenerFactory,
     listener::{FunctionListener, StackFrame},
     memory::MemoryAllocator,
     r#yield::Yielder,
     snapshotter::Snapshotter,
+    yield_policy::YieldPolicy,
 };
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -54,10 +56,12 @@ pub struct Context {
     pub(crate) yielder_enabled: bool,
     pub(crate) memory_allocator: Option<Arc<dyn MemoryAllocator>>,
     pub(crate) close_notifier: Option<Arc<dyn CloseNotifier>>,
+    pub(crate) host_call_policy: Option<Arc<dyn HostCallPolicy>>,
     pub(crate) import_resolver: Option<crate::experimental::import_resolver::ImportResolverConfig>,
     pub(crate) import_resolver_observer:
         Option<Arc<dyn crate::experimental::import_resolver_observer::ImportResolverObserver>>,
     pub(crate) trap_observer: Option<Arc<dyn crate::experimental::trap::TrapObserver>>,
+    pub(crate) yield_policy: Option<Arc<dyn YieldPolicy>>,
     pub(crate) invocation: Option<InvocationContext>,
 }
 
@@ -184,6 +188,23 @@ impl Context {
         });
         cloned.invocation = Some(InvocationContext {
             listener_stack,
+            ..invocation
+        });
+        cloned
+    }
+
+    pub(crate) fn with_function_definition(&self, function_definition: FunctionDefinition) -> Self {
+        let mut cloned = self.clone();
+        let invocation = cloned.invocation.take().unwrap_or(InvocationContext {
+            fuel_remaining: None,
+            snapshotter: None,
+            yielder: None,
+            function_listener: None,
+            function_definition: None,
+            listener_stack: Vec::new(),
+        });
+        cloned.invocation = Some(InvocationContext {
+            function_definition: Some(function_definition),
             ..invocation
         });
         cloned
