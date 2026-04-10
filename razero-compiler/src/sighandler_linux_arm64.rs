@@ -36,10 +36,43 @@ pub fn register_jit_code_range(start: usize, end: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::ASM_SOURCE;
+    use super::{signal_handler_supported, ASM_SOURCE};
+
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    use super::{install_signal_handler, register_jit_code_range, registered_jit_code_ranges};
+
+    #[cfg(not(all(target_os = "linux", target_arch = "aarch64")))]
+    #[test]
+    fn signal_handler_is_reported_unsupported_off_arm64_linux() {
+        assert!(!signal_handler_supported());
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    #[test]
+    fn registers_unique_ranges() {
+        crate::sighandler_linux::reset_jit_code_ranges_for_tests();
+        register_jit_code_range(100, 200);
+        register_jit_code_range(100, 200);
+        assert!(registered_jit_code_ranges()
+            .iter()
+            .any(|range| range.start == 100 && range.end == 200));
+    }
 
     #[test]
     fn assembly_source_contains_expected_labels() {
+        assert!(ASM_SOURCE.contains("razero_jit_sig_handler"));
         assert!(ASM_SOURCE.contains("razero_fault_return_trampoline"));
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    #[test]
+    fn install_signal_handler_replaces_sigsegv_handler() {
+        install_signal_handler();
+        assert!(signal_handler_supported());
+        assert!(crate::sighandler_linux::signal_handler_installed());
+        assert_eq!(
+            crate::sighandler_linux::current_sigsegv_handler(),
+            super::handler_addr()
+        );
     }
 }
