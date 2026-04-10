@@ -2598,6 +2598,85 @@ int main(void) {
     }
 
     #[test]
+    fn package_metadata_bundle_round_trips_with_three_modules_varying_sidecars() {
+        let bundle = NativePackageMetadataBundle {
+            modules: vec![
+                NativePackageMetadataEntry {
+                    module_name: "guest-a".to_string(),
+                    metadata_sidecar_bytes: Vec::new(),
+                },
+                NativePackageMetadataEntry {
+                    module_name: "guest-b".to_string(),
+                    metadata_sidecar_bytes: (0u8..100).collect(),
+                },
+                NativePackageMetadataEntry {
+                    module_name: "guest-c".to_string(),
+                    metadata_sidecar_bytes: vec![0xff],
+                },
+            ],
+            host_imports: Vec::new(),
+        };
+
+        let encoded = serialize_native_package_metadata_bundle(&bundle);
+        let decoded = deserialize_native_package_metadata_bundle(&encoded).unwrap();
+        assert_eq!(decoded, bundle);
+    }
+
+    #[test]
+    fn package_metadata_bundle_round_trips_with_four_imports_and_boundary_mix() {
+        let bundle = NativePackageMetadataBundle {
+            modules: vec![
+                NativePackageMetadataEntry {
+                    module_name: "guest-a".to_string(),
+                    metadata_sidecar_bytes: vec![1, 2, 3],
+                },
+                NativePackageMetadataEntry {
+                    module_name: "guest-b".to_string(),
+                    metadata_sidecar_bytes: vec![4, 5, 6, 7],
+                },
+            ],
+            host_imports: vec![
+                PackagedHostImportDescriptor {
+                    guest_module_name: "guest-a".to_string(),
+                    import_module: "env".to_string(),
+                    import_name: "zero".to_string(),
+                    function_import_index: 0,
+                    type_index: 0,
+                    host_symbol_name: "env_zero_handler".to_string(),
+                },
+                PackagedHostImportDescriptor {
+                    guest_module_name: "guest-a".to_string(),
+                    import_module: "env".to_string(),
+                    import_name: "max".to_string(),
+                    function_import_index: u32::MAX,
+                    type_index: u32::MAX,
+                    host_symbol_name: "env_max_handler".to_string(),
+                },
+                PackagedHostImportDescriptor {
+                    guest_module_name: "guest-b".to_string(),
+                    import_module: "math".to_string(),
+                    import_name: "mid".to_string(),
+                    function_import_index: 1,
+                    type_index: 100,
+                    host_symbol_name: "math_mid_handler".to_string(),
+                },
+                PackagedHostImportDescriptor {
+                    guest_module_name: "guest-b".to_string(),
+                    import_module: "math".to_string(),
+                    import_name: "near-max".to_string(),
+                    function_import_index: u32::MAX - 1,
+                    type_index: 1,
+                    host_symbol_name: "math_near_max_handler".to_string(),
+                },
+            ],
+        };
+
+        let encoded = serialize_native_package_metadata_bundle(&bundle);
+        let decoded = deserialize_native_package_metadata_bundle(&encoded).unwrap();
+        assert_eq!(decoded, bundle);
+    }
+
+    #[test]
     fn package_metadata_bundle_rejects_invalid_magic_number() {
         let bundle = sample_package_metadata_bundle();
         let mut encoded = serialize_native_package_metadata_bundle(&bundle);
