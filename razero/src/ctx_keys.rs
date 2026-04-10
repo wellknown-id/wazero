@@ -64,6 +64,8 @@ pub struct Context {
         Option<Arc<dyn crate::experimental::host_call_policy_observer::HostCallPolicyObserver>>,
     pub(crate) trap_observer: Option<Arc<dyn crate::experimental::trap::TrapObserver>>,
     pub(crate) yield_policy: Option<Arc<dyn YieldPolicy>>,
+    pub(crate) yield_policy_observer:
+        Option<Arc<dyn crate::experimental::yield_policy_observer::YieldPolicyObserver>>,
     pub(crate) invocation: Option<InvocationContext>,
 }
 

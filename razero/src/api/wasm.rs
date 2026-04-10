@@ -25,6 +25,7 @@ use crate::{
         snapshotter::{Snapshot, Snapshotter},
         trap::{get_trap_observer, trap_cause_of, TrapObservation},
         yield_policy::YieldPolicyRequest,
+        yield_policy_observer::{notify_yield_policy_observer, YieldPolicyDecision},
     },
     runtime::RuntimeStore,
 };
@@ -1779,11 +1780,21 @@ impl Yielder for ActiveYielder {
                 request = request.with_memory(memory.definition().clone());
             }
             let policy = ctx.yield_policy.clone().or_else(|| module.yield_policy());
-            if policy
-                .as_ref()
-                .is_some_and(|policy| !policy.allow_yield(&ctx, &request))
-            {
-                panic::panic_any(PolicyDeniedPayload("cooperative yield"));
+            if let Some(policy) = policy.as_ref() {
+                let allowed = policy.allow_yield(&ctx, &request);
+                notify_yield_policy_observer(
+                    &ctx,
+                    &module,
+                    &request,
+                    if allowed {
+                        YieldPolicyDecision::Allowed
+                    } else {
+                        YieldPolicyDecision::Denied
+                    },
+                );
+                if !allowed {
+                    panic::panic_any(PolicyDeniedPayload("cooperative yield"));
+                }
             }
         }
         panic::panic_any(YieldSuspend);

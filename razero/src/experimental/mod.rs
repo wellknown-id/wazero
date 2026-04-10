@@ -15,6 +15,7 @@ pub mod table;
 pub mod trap;
 pub mod r#yield;
 pub mod yield_policy;
+pub mod yield_policy_observer;
 
 pub use checkpoint::{get_snapshotter, with_snapshotter, Snapshot, Snapshotter};
 pub use close_notifier::{
@@ -62,4 +63,8 @@ pub use trap::{
 };
 pub use yield_policy::{
     get_yield_policy, with_yield_policy, IntoYieldPolicy, YieldPolicy, YieldPolicyRequest,
+};
+pub use yield_policy_observer::{
+    get_yield_policy_observer, with_yield_policy_observer, YieldPolicyDecision,
+    YieldPolicyObservation, YieldPolicyObserver,
 };
