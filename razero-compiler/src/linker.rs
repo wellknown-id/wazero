@@ -2491,6 +2491,21 @@ int main(void) {
     }
 
     #[test]
+    fn package_metadata_bundle_rejects_truncated_module_sidecar_length_partial() {
+        let bundle = sample_package_metadata_bundle();
+        let mut encoded = serialize_native_package_metadata_bundle(&bundle);
+        let truncate_at =
+            NATIVE_PACKAGE_MAGIC.len() + 4 + 4 + bundle.modules[0].module_name.len() + 1;
+        encoded.truncate(truncate_at);
+
+        let err = deserialize_native_package_metadata_bundle(&encoded).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "native package metadata: invalid u64 field"
+        );
+    }
+
+    #[test]
     fn package_metadata_bundle_rejects_truncated_host_import_count() {
         let bundle = NativePackageMetadataBundle {
             modules: vec![NativePackageMetadataEntry {
