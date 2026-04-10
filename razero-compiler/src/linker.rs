@@ -3055,6 +3055,118 @@ int main(void) {
     }
 
     #[test]
+    fn package_metadata_bundle_round_trips_with_memory_config_variants() {
+        let modules = [
+            (
+                "guest-unbounded",
+                Module {
+                    type_section: vec![function_type(&[], &[ValueType::I32])],
+                    function_section: vec![0],
+                    memory_section: Some(razero_wasm::module::Memory {
+                        min: 0,
+                        cap: 0,
+                        max: 0,
+                        is_max_encoded: false,
+                        ..razero_wasm::module::Memory::default()
+                    }),
+                    code_section: vec![Code {
+                        body: vec![0x41, 0x05, 0x0b],
+                        ..Code::default()
+                    }],
+                    export_section: vec![Export {
+                        ty: ExternType::FUNC,
+                        name: "run".to_string(),
+                        index: 0,
+                    }],
+                    enabled_features: CoreFeatures::V2,
+                    ..Module::default()
+                },
+            ),
+            (
+                "guest-tight",
+                Module {
+                    type_section: vec![function_type(&[], &[ValueType::I32])],
+                    function_section: vec![0],
+                    memory_section: Some(razero_wasm::module::Memory {
+                        min: 1,
+                        cap: 1,
+                        max: 1,
+                        is_max_encoded: true,
+                        ..razero_wasm::module::Memory::default()
+                    }),
+                    code_section: vec![Code {
+                        body: vec![0x41, 0x05, 0x0b],
+                        ..Code::default()
+                    }],
+                    export_section: vec![Export {
+                        ty: ExternType::FUNC,
+                        name: "run".to_string(),
+                        index: 0,
+                    }],
+                    enabled_features: CoreFeatures::V2,
+                    ..Module::default()
+                },
+            ),
+            (
+                "guest-wide",
+                Module {
+                    type_section: vec![function_type(&[], &[ValueType::I32])],
+                    function_section: vec![0],
+                    memory_section: Some(razero_wasm::module::Memory {
+                        min: 2,
+                        cap: 256,
+                        max: 256,
+                        is_max_encoded: true,
+                        ..razero_wasm::module::Memory::default()
+                    }),
+                    code_section: vec![Code {
+                        body: vec![0x41, 0x05, 0x0b],
+                        ..Code::default()
+                    }],
+                    export_section: vec![Export {
+                        ty: ExternType::FUNC,
+                        name: "run".to_string(),
+                        index: 0,
+                    }],
+                    enabled_features: CoreFeatures::V2,
+                    ..Module::default()
+                },
+            ),
+        ];
+        let bundle = NativePackageMetadataBundle {
+            modules: modules
+                .iter()
+                .map(|(name, module)| NativePackageMetadataEntry {
+                    module_name: (*name).to_string(),
+                    metadata_sidecar_bytes: serialize_aot_metadata(&compile_module_metadata(
+                        module,
+                    )),
+                })
+                .collect(),
+            host_imports: Vec::new(),
+        };
+
+        let encoded = serialize_native_package_metadata_bundle(&bundle);
+        let decoded = deserialize_native_package_metadata_bundle(&encoded).unwrap();
+        assert_eq!(decoded, bundle);
+        let memories = decoded
+            .modules
+            .iter()
+            .map(|module| {
+                crate::aot::deserialize_aot_metadata(&module.metadata_sidecar_bytes)
+                    .unwrap()
+                    .memory
+                    .expect("memory metadata should be present")
+            })
+            .map(|memory| (memory.min, memory.cap, memory.max, memory.is_max_encoded))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            memories,
+            vec![(0, 0, 0, false), (1, 1, 1, true), (2, 256, 256, true)]
+        );
+    }
+
+    #[test]
     fn package_metadata_bundle_rejects_invalid_magic_number() {
         let bundle = sample_package_metadata_bundle();
         let mut encoded = serialize_native_package_metadata_bundle(&bundle);
