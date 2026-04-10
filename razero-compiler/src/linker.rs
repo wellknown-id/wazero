@@ -3136,6 +3136,48 @@ int main(void) {
     }
 
     #[test]
+    fn package_metadata_bundle_rejects_invalid_utf8_in_host_symbol_name() {
+        let bundle = NativePackageMetadataBundle {
+            modules: vec![NativePackageMetadataEntry {
+                module_name: "guest".to_string(),
+                metadata_sidecar_bytes: vec![1, 2, 3],
+            }],
+            host_imports: vec![PackagedHostImportDescriptor {
+                guest_module_name: "guest".to_string(),
+                import_module: "env".to_string(),
+                import_name: "inc".to_string(),
+                function_import_index: 0,
+                type_index: 0,
+                host_symbol_name: "env_inc_handler".to_string(),
+            }],
+        };
+        let mut encoded = serialize_native_package_metadata_bundle(&bundle);
+        let host_symbol_name_offset = NATIVE_PACKAGE_MAGIC.len()
+            + 4
+            + 4
+            + bundle.modules[0].module_name.len()
+            + 8
+            + bundle.modules[0].metadata_sidecar_bytes.len()
+            + 4
+            + 4
+            + bundle.host_imports[0].guest_module_name.len()
+            + 4
+            + bundle.host_imports[0].import_module.len()
+            + 4
+            + bundle.host_imports[0].import_name.len()
+            + 4
+            + 4
+            + 4;
+        encoded[host_symbol_name_offset] = 0xff;
+
+        let err = deserialize_native_package_metadata_bundle(&encoded).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "native package metadata: invalid host symbol name: invalid UTF-8: invalid utf-8 sequence of 1 bytes from index 0"
+        );
+    }
+
+    #[test]
     fn package_metadata_bundle_rejects_truncated_host_import_metadata() {
         let bundle = NativePackageMetadataBundle {
             modules: vec![NativePackageMetadataEntry {
