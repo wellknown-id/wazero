@@ -2430,6 +2430,26 @@ int main(void) {
     }
 
     #[test]
+    fn package_metadata_bundle_rejects_truncated_module_name_length() {
+        let bundle = NativePackageMetadataBundle {
+            modules: vec![NativePackageMetadataEntry {
+                module_name: "guest".to_string(),
+                metadata_sidecar_bytes: vec![1, 2, 3],
+            }],
+            host_imports: Vec::new(),
+        };
+        let mut encoded = serialize_native_package_metadata_bundle(&bundle);
+        let truncate_at = NATIVE_PACKAGE_MAGIC.len() + 4 + 2;
+        encoded.truncate(truncate_at);
+
+        let err = deserialize_native_package_metadata_bundle(&encoded).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "native package metadata: invalid u32 field"
+        );
+    }
+
+    #[test]
     fn package_metadata_bundle_rejects_truncated_module_sidecar() {
         let bundle = sample_package_metadata_bundle();
         let mut encoded = serialize_native_package_metadata_bundle(&bundle);
