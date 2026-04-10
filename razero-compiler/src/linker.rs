@@ -2494,6 +2494,28 @@ int main(void) {
     }
 
     #[test]
+    fn package_metadata_bundle_round_trips_with_empty_host_symbol_name() {
+        let bundle = NativePackageMetadataBundle {
+            modules: vec![NativePackageMetadataEntry {
+                module_name: "guest".to_string(),
+                metadata_sidecar_bytes: vec![1, 2, 3],
+            }],
+            host_imports: vec![PackagedHostImportDescriptor {
+                guest_module_name: "guest".to_string(),
+                import_module: "env".to_string(),
+                import_name: "inc".to_string(),
+                function_import_index: 0,
+                type_index: 1,
+                host_symbol_name: String::new(),
+            }],
+        };
+
+        let encoded = serialize_native_package_metadata_bundle(&bundle);
+        let decoded = deserialize_native_package_metadata_bundle(&encoded).unwrap();
+        assert_eq!(decoded, bundle);
+    }
+
+    #[test]
     fn package_metadata_bundle_rejects_invalid_magic_number() {
         let bundle = sample_package_metadata_bundle();
         let mut encoded = serialize_native_package_metadata_bundle(&bundle);
