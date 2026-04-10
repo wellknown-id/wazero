@@ -190,6 +190,10 @@ impl<'a> Compiler<'a> {
             OPCODE_F32_MUL | OPCODE_F64_MUL => self.lower_binary_generic(Opcode::Fmul),
             OPCODE_F32_DIV | OPCODE_F64_DIV => self.lower_binary_generic(Opcode::Fdiv),
             OPCODE_F32_SQRT | OPCODE_F64_SQRT => self.lower_unary_generic(Opcode::Sqrt),
+            OPCODE_F32_CEIL | OPCODE_F64_CEIL => self.lower_unary_generic(Opcode::Ceil),
+            OPCODE_F32_FLOOR | OPCODE_F64_FLOOR => self.lower_unary_generic(Opcode::Floor),
+            OPCODE_F32_TRUNC | OPCODE_F64_TRUNC => self.lower_unary_generic(Opcode::Trunc),
+            OPCODE_F32_NEAREST | OPCODE_F64_NEAREST => self.lower_unary_generic(Opcode::Nearest),
             OPCODE_I32_AND | OPCODE_I64_AND => self.lower_binary_generic(Opcode::Band),
             OPCODE_I32_OR | OPCODE_I64_OR => self.lower_binary_generic(Opcode::Bor),
             OPCODE_I32_XOR | OPCODE_I64_XOR => self.lower_binary_generic(Opcode::Bxor),
@@ -1578,6 +1582,94 @@ mod tests {
         assert_eq!(
             compiler.format(),
             "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:f64)\n\tv3:f64 = Sqrt v2\n\tJump blk_ret, v3\n"
+        );
+    }
+
+    #[test]
+    fn lowers_f32_ceil_to_ssa() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::F32], &[ValueType::F32])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_F32_CEIL, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:f32)\n\tv3:f32 = Ceil v2\n\tJump blk_ret, v3\n"
+        );
+    }
+
+    #[test]
+    fn lowers_f64_floor_to_ssa() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::F64], &[ValueType::F64])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_F64_FLOOR, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:f64)\n\tv3:f64 = Floor v2\n\tJump blk_ret, v3\n"
+        );
+    }
+
+    #[test]
+    fn lowers_f32_trunc_to_ssa() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::F32], &[ValueType::F32])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_F32_TRUNC, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:f32)\n\tv3:f32 = Trunc v2\n\tJump blk_ret, v3\n"
+        );
+    }
+
+    #[test]
+    fn lowers_f64_nearest_to_ssa() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::F64], &[ValueType::F64])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_F64_NEAREST, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:f64)\n\tv3:f64 = Nearest v2\n\tJump blk_ret, v3\n"
         );
     }
 

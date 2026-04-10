@@ -19,6 +19,8 @@ pub enum SseOpcode {
     Ucomisd,
     Sqrtss,
     Sqrtsd,
+    Roundss,
+    Roundsd,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,6 +124,18 @@ impl SseOpcode {
                 store_opcode: 0x0F51,
                 opcode_len: 2,
             },
+            Self::Roundss => SseEncoding {
+                prefix: Some(0xF3),
+                load_opcode: 0x0F3A0A,
+                store_opcode: 0x0F3A0A,
+                opcode_len: 3,
+            },
+            Self::Roundsd => SseEncoding {
+                prefix: Some(0xF2),
+                load_opcode: 0x0F3A0A,
+                store_opcode: 0x0F3A0A,
+                opcode_len: 3,
+            },
         }
     }
 
@@ -141,7 +155,9 @@ impl SseOpcode {
             11 => Self::Ucomiss,
             12 => Self::Ucomisd,
             13 => Self::Sqrtss,
-            _ => Self::Sqrtsd,
+            14 => Self::Sqrtsd,
+            15 => Self::Roundss,
+            _ => Self::Roundsd,
         }
     }
 
@@ -168,6 +184,8 @@ impl fmt::Display for SseOpcode {
             Self::Ucomisd => "ucomisd",
             Self::Sqrtss => "sqrtss",
             Self::Sqrtsd => "sqrtsd",
+            Self::Roundss => "roundss",
+            Self::Roundsd => "roundsd",
         })
     }
 }
@@ -182,15 +200,18 @@ mod tests {
         let addss = SseOpcode::Addss.encoding();
         let ucomisd = SseOpcode::Ucomisd.encoding();
         let sqrtsd = SseOpcode::Sqrtsd.encoding();
+        let roundss = SseOpcode::Roundss.encoding();
         assert_eq!(movsd.prefix, Some(0xF2));
         assert_eq!(movsd.load_opcode, 0x0F10);
         assert_eq!(addss.prefix, Some(0xF3));
         assert_eq!(addss.load_opcode, 0x0F58);
         assert_eq!(ucomisd.load_opcode, 0x0F2E);
         assert_eq!(sqrtsd.load_opcode, 0x0F51);
+        assert_eq!(roundss.load_opcode, 0x0F3A0A);
         assert_eq!(SseOpcode::Movdqu.to_string(), "movdqu");
         assert_eq!(SseOpcode::Divsd.to_string(), "divsd");
         assert_eq!(SseOpcode::Ucomiss.to_string(), "ucomiss");
         assert_eq!(SseOpcode::Sqrtss.to_string(), "sqrtss");
+        assert_eq!(SseOpcode::Roundsd.to_string(), "roundsd");
     }
 }

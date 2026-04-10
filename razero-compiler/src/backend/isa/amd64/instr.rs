@@ -110,6 +110,7 @@ pub enum InstructionKind {
     CallIndirect,
     Xchg,
     XmmUnaryRmR,
+    XmmUnaryRmRImm,
     XmmCmpRmR,
     XmmMovRM,
     XmmLoadConst,
@@ -425,6 +426,18 @@ impl Amd64Instr {
             d.op1 = Some(src);
             d.op2 = Some(Operand::reg(dst));
             d.u1 = op as u64;
+        }
+        inst
+    }
+
+    pub fn xmm_unary_rm_r_imm(op: SseOpcode, imm: u8, src: Operand, dst: VReg) -> Self {
+        let inst = Self::new(InstructionKind::XmmUnaryRmRImm);
+        {
+            let mut d = inst.0.borrow_mut();
+            d.op1 = Some(src);
+            d.op2 = Some(Operand::reg(dst));
+            d.u1 = op as u64;
+            d.u2 = imm as u64;
         }
         inst
     }
@@ -865,6 +878,14 @@ impl fmt::Display for Amd64Instr {
                 SseOpcode::from_u64(d.u1),
                 op1.expect("xmm src").format(false),
                 op2.expect("xmm dst").format(false)
+            ),
+            InstructionKind::XmmUnaryRmRImm => write!(
+                f,
+                "{} ${}, {}, {}",
+                SseOpcode::from_u64(d.u1),
+                d.u2,
+                op1.expect("xmm imm src").format(false),
+                op2.expect("xmm imm dst").format(false)
             ),
             InstructionKind::XmmCmpRmR => write!(
                 f,

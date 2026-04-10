@@ -811,6 +811,30 @@ impl BackendMachine for Amd64Machine {
                     .instructions
                     .push(Amd64Instr::xmm_unary_rm_r(op, Operand::reg(src), dst));
             }
+            Opcode::Ceil | Opcode::Floor | Opcode::Trunc | Opcode::Nearest => {
+                let dst = self.compiler().v_reg_of(instruction.return_());
+                let src = self.compiler().v_reg_of(instruction.v);
+                let op = match instruction.typ {
+                    Type::F32 => SseOpcode::Roundss,
+                    Type::F64 => SseOpcode::Roundsd,
+                    _ => panic!("unsupported amd64 round type: {:?}", instruction.typ),
+                };
+                let mode = match instruction.opcode {
+                    Opcode::Nearest => 0,
+                    Opcode::Floor => 1,
+                    Opcode::Ceil => 2,
+                    Opcode::Trunc => 3,
+                    _ => unreachable!(),
+                };
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::xmm_unary_rm_r_imm(
+                        op,
+                        mode,
+                        Operand::reg(src),
+                        dst,
+                    ));
+            }
             Opcode::Icmp => {
                 let dst = self.compiler().v_reg_of(instruction.return_());
                 let cond = Self::integer_cmp_cond_from_u8(instruction.u1 as u8);
@@ -1641,6 +1665,28 @@ mod tests {
         m.format()
     }
 
+    fn lower_round_opcode(opcode: Opcode, ty: Type) -> String {
+        let mut m = Amd64Machine::new();
+        m.start_lowering_function(BasicBlockId(0));
+        m.start_block(BasicBlockId(0));
+
+        let mut compiler = Box::new(TestCompilerContext::default());
+        compiler.regs = vec![
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::XMM0, RegType::Float),
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::XMM2, RegType::Float),
+        ];
+        let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
+        m.set_compiler(ptr);
+
+        let mut instruction = crate::ssa::Instruction::new().with_opcode(opcode);
+        instruction.v = Value(0).with_type(ty);
+        instruction.r_value = Value(1).with_type(ty);
+        instruction.typ = ty;
+
+        m.lower_instr(&instruction);
+        m.format()
+    }
+
     fn lower_fcmp_opcode(ty: Type, cond: FloatCmpCond) -> String {
         let mut m = Amd64Machine::new();
         m.start_lowering_function(BasicBlockId(0));
@@ -1862,6 +1908,30 @@ mod tests {
     fn lowers_f64_sqrt_with_sse_sequence() {
         let formatted = lower_sqrt_opcode(Type::F64);
         assert!(formatted.contains("sqrtsd %xmm0, %xmm2"));
+    }
+
+    #[test]
+    fn lowers_f32_ceil_with_roundss_up_mode() {
+        let formatted = lower_round_opcode(Opcode::Ceil, Type::F32);
+        assert!(formatted.contains("roundss $2, %xmm0, %xmm2"));
+    }
+
+    #[test]
+    fn lowers_f64_floor_with_roundsd_down_mode() {
+        let formatted = lower_round_opcode(Opcode::Floor, Type::F64);
+        assert!(formatted.contains("roundsd $1, %xmm0, %xmm2"));
+    }
+
+    #[test]
+    fn lowers_f32_trunc_with_roundss_zero_mode() {
+        let formatted = lower_round_opcode(Opcode::Trunc, Type::F32);
+        assert!(formatted.contains("roundss $3, %xmm0, %xmm2"));
+    }
+
+    #[test]
+    fn lowers_f64_nearest_with_roundsd_nearest_mode() {
+        let formatted = lower_round_opcode(Opcode::Nearest, Type::F64);
+        assert!(formatted.contains("roundsd $0, %xmm0, %xmm2"));
     }
 
     #[test]
