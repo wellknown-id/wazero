@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-    api::wasm::{FunctionDefinition, ValueType},
+    api::wasm::{FunctionDefinition, MemoryDefinition, ValueType},
     ctx_keys::Context,
 };
 
@@ -9,6 +9,7 @@ use crate::{
 #[non_exhaustive]
 pub struct HostCallPolicyRequest {
     pub function: Option<FunctionDefinition>,
+    pub memory: Option<MemoryDefinition>,
     pub caller_module_name: Option<String>,
 }
 
@@ -22,6 +23,11 @@ impl HostCallPolicyRequest {
         self
     }
 
+    pub fn with_memory(mut self, memory: MemoryDefinition) -> Self {
+        self.memory = Some(memory);
+        self
+    }
+
     pub fn with_caller_module_name(mut self, caller_module_name: impl Into<String>) -> Self {
         self.caller_module_name = Some(caller_module_name.into());
         self
@@ -29,6 +35,10 @@ impl HostCallPolicyRequest {
 
     pub fn caller_module_name(&self) -> Option<&str> {
         self.caller_module_name.as_deref()
+    }
+
+    pub fn memory(&self) -> Option<&MemoryDefinition> {
+        self.memory.as_ref()
     }
 
     pub fn param_types(&self) -> Option<&[ValueType]> {
@@ -129,7 +139,7 @@ mod tests {
     use super::{
         get_host_call_policy, with_host_call_policy, HostCallPolicyRequest, IntoHostCallPolicy,
     };
-    use crate::{ctx_keys::ContextKey, Context, FunctionDefinition, ValueType};
+    use crate::{ctx_keys::ContextKey, Context, FunctionDefinition, MemoryDefinition, ValueType};
 
     fn allow_all(_ctx: &Context, _request: &HostCallPolicyRequest) -> bool {
         true
@@ -190,9 +200,37 @@ mod tests {
         assert_eq!(0, request.param_count());
         assert_eq!(0, request.result_count());
         assert_eq!(None, request.import());
+        assert_eq!(None, request.memory());
         assert_eq!(None, request.module_name());
         assert_eq!(None, request.name());
         assert!(request.export_names().is_empty());
+    }
+
+    #[test]
+    fn host_call_policy_request_tracks_memory_metadata() {
+        let memory = MemoryDefinition::new(1, Some(2))
+            .with_module_name(Some("env".to_string()))
+            .with_import("env", "memory")
+            .with_export_name("memory");
+        let request = HostCallPolicyRequest::new().with_memory(memory.clone());
+
+        assert_eq!(Some(&memory), request.memory());
+        assert_eq!(
+            Some("env"),
+            request.memory().and_then(MemoryDefinition::module_name)
+        );
+        assert_eq!(
+            Some(("env", "memory")),
+            request.memory().and_then(MemoryDefinition::import)
+        );
+        assert_eq!(
+            Some(1),
+            request.memory().map(MemoryDefinition::minimum_pages)
+        );
+        assert_eq!(
+            Some(Some(2)),
+            request.memory().map(MemoryDefinition::maximum_pages)
+        );
     }
 
     #[test]
