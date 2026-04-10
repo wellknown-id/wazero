@@ -2560,6 +2560,44 @@ int main(void) {
     }
 
     #[test]
+    fn package_metadata_bundle_round_trips_with_multiple_modules_and_boundary_indices() {
+        let bundle = NativePackageMetadataBundle {
+            modules: vec![
+                NativePackageMetadataEntry {
+                    module_name: "guest-a".to_string(),
+                    metadata_sidecar_bytes: vec![1, 2, 3],
+                },
+                NativePackageMetadataEntry {
+                    module_name: "guest-b".to_string(),
+                    metadata_sidecar_bytes: vec![4, 5, 6],
+                },
+            ],
+            host_imports: vec![
+                PackagedHostImportDescriptor {
+                    guest_module_name: "guest-a".to_string(),
+                    import_module: "env".to_string(),
+                    import_name: "low".to_string(),
+                    function_import_index: 0,
+                    type_index: u32::MAX,
+                    host_symbol_name: "env_low_handler".to_string(),
+                },
+                PackagedHostImportDescriptor {
+                    guest_module_name: "guest-b".to_string(),
+                    import_module: "math".to_string(),
+                    import_name: "high".to_string(),
+                    function_import_index: u32::MAX,
+                    type_index: 0,
+                    host_symbol_name: "math_high_handler".to_string(),
+                },
+            ],
+        };
+
+        let encoded = serialize_native_package_metadata_bundle(&bundle);
+        let decoded = deserialize_native_package_metadata_bundle(&encoded).unwrap();
+        assert_eq!(decoded, bundle);
+    }
+
+    #[test]
     fn package_metadata_bundle_rejects_invalid_magic_number() {
         let bundle = sample_package_metadata_bundle();
         let mut encoded = serialize_native_package_metadata_bundle(&bundle);
