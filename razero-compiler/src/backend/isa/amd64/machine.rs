@@ -463,6 +463,32 @@ impl BackendMachine for Amd64Machine {
                     .instructions
                     .push(Amd64Instr::unary_rm_r(op, Operand::reg(src), dst, is_64));
             }
+            Opcode::Select => {
+                let dst = self.compiler().v_reg_of(instruction.return_());
+                let cond = self.compiler().v_reg_of(instruction.v);
+                let v_true = self.compiler().v_reg_of(instruction.v2);
+                let v_false = self.compiler().v_reg_of(instruction.v3);
+                let is_64 = instruction.typ.bits() == 64;
+                match instruction.typ {
+                    Type::I32 | Type::I64 => {
+                        self.current_block_mut()
+                            .instructions
+                            .push(Amd64Instr::cmp_rmi_r(
+                                Operand::reg(cond),
+                                cond,
+                                false,
+                                false,
+                            ));
+                        self.current_block_mut()
+                            .instructions
+                            .push(Amd64Instr::mov_rr(v_false, dst, is_64));
+                        self.current_block_mut()
+                            .instructions
+                            .push(Amd64Instr::cmove(Cond::NZ, Operand::reg(v_true), dst, is_64));
+                    }
+                    _ => panic!("unsupported amd64 select type: {:?}", instruction.typ),
+                }
+            }
             Opcode::Ishl | Opcode::Ushr | Opcode::Sshr | Opcode::Rotl | Opcode::Rotr => {
                 let dst = self.compiler().v_reg_of(instruction.return_());
                 let lhs = self.compiler().v_reg_of(instruction.v);
@@ -1045,6 +1071,32 @@ mod tests {
         m.format()
     }
 
+    fn lower_select_opcode(typ: Type) -> String {
+        let mut m = Amd64Machine::new();
+        m.start_lowering_function(BasicBlockId(0));
+        m.start_block(BasicBlockId(0));
+
+        let mut compiler = Box::new(TestCompilerContext::default());
+        compiler.regs = vec![
+            VReg::from_real_reg(1, RegType::Int),
+            VReg::from_real_reg(4, RegType::Int),
+            VReg::from_real_reg(2, RegType::Int),
+            VReg::from_real_reg(7, RegType::Int),
+        ];
+        let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
+        m.set_compiler(ptr);
+
+        let mut instruction = crate::ssa::Instruction::new().with_opcode(Opcode::Select);
+        instruction.v = Value(0).with_type(Type::I32);
+        instruction.v2 = Value(1).with_type(typ);
+        instruction.v3 = Value(2).with_type(typ);
+        instruction.r_value = Value(3).with_type(typ);
+        instruction.typ = typ;
+
+        m.lower_instr(&instruction);
+        m.format()
+    }
+
     fn lower_partial_load_opcode(opcode: Opcode, typ: Type) -> String {
         let mut m = Amd64Machine::new();
         m.start_lowering_function(BasicBlockId(0));
@@ -1086,6 +1138,22 @@ mod tests {
     fn lowers_rotr_to_amd64_rotate_sequence() {
         let formatted = lower_shift_opcode(Opcode::Rotr);
         assert!(formatted.contains("rorq %cl, %r11"));
+    }
+
+    #[test]
+    fn lowers_i32_select_to_amd64_cmov_sequence() {
+        let formatted = lower_select_opcode(Type::I32);
+        assert!(formatted.contains("testl %eax, %eax"));
+        assert!(formatted.contains("movl %ecx, %esi"));
+        assert!(formatted.contains("cmovnzl %ebx, %esi"));
+    }
+
+    #[test]
+    fn lowers_i64_select_to_amd64_cmov_sequence() {
+        let formatted = lower_select_opcode(Type::I64);
+        assert!(formatted.contains("testl %eax, %eax"));
+        assert!(formatted.contains("movq %rcx, %rsi"));
+        assert!(formatted.contains("cmovnzq %rbx, %rsi"));
     }
 
     #[test]
