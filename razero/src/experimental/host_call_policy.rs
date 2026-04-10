@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use crate::{api::wasm::FunctionDefinition, ctx_keys::Context};
+use crate::{
+    api::wasm::{FunctionDefinition, ValueType},
+    ctx_keys::Context,
+};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
@@ -16,6 +19,26 @@ impl HostCallPolicyRequest {
     pub fn with_function(mut self, function: FunctionDefinition) -> Self {
         self.function = Some(function);
         self
+    }
+
+    pub fn param_types(&self) -> Option<&[ValueType]> {
+        self.function.as_ref().map(FunctionDefinition::param_types)
+    }
+
+    pub fn result_types(&self) -> Option<&[ValueType]> {
+        self.function.as_ref().map(FunctionDefinition::result_types)
+    }
+
+    pub fn param_count(&self) -> usize {
+        self.param_types().map_or(0, <[ValueType]>::len)
+    }
+
+    pub fn result_count(&self) -> usize {
+        self.result_types().map_or(0, <[ValueType]>::len)
+    }
+
+    pub fn import(&self) -> Option<(&str, &str)> {
+        self.function.as_ref().and_then(FunctionDefinition::import)
     }
 }
 
@@ -72,7 +95,7 @@ mod tests {
     use super::{
         get_host_call_policy, with_host_call_policy, HostCallPolicyRequest, IntoHostCallPolicy,
     };
-    use crate::{ctx_keys::ContextKey, Context, FunctionDefinition};
+    use crate::{ctx_keys::ContextKey, Context, FunctionDefinition, ValueType};
 
     fn allow_all(_ctx: &Context, _request: &HostCallPolicyRequest) -> bool {
         true
@@ -86,6 +109,40 @@ mod tests {
         let request = HostCallPolicyRequest::new().with_function(function.clone());
 
         assert_eq!(Some(function), request.function);
+    }
+
+    #[test]
+    fn host_call_policy_request_exposes_signature_metadata() {
+        let function = FunctionDefinition::new("host.call")
+            .with_signature(vec![ValueType::I32, ValueType::I64], vec![ValueType::F32]);
+        let request = HostCallPolicyRequest::new().with_function(function);
+
+        assert_eq!(
+            Some(&[ValueType::I32, ValueType::I64][..]),
+            request.param_types()
+        );
+        assert_eq!(Some(&[ValueType::F32][..]), request.result_types());
+        assert_eq!(2, request.param_count());
+        assert_eq!(1, request.result_count());
+    }
+
+    #[test]
+    fn host_call_policy_request_exposes_import_metadata() {
+        let function = FunctionDefinition::new("host.call").with_import("env", "clock_time_get");
+        let request = HostCallPolicyRequest::new().with_function(function);
+
+        assert_eq!(Some(("env", "clock_time_get")), request.import());
+    }
+
+    #[test]
+    fn host_call_policy_request_defaults_to_empty_metadata() {
+        let request = HostCallPolicyRequest::new();
+
+        assert_eq!(None, request.param_types());
+        assert_eq!(None, request.result_types());
+        assert_eq!(0, request.param_count());
+        assert_eq!(0, request.result_count());
+        assert_eq!(None, request.import());
     }
 
     #[test]
