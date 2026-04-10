@@ -2758,6 +2758,67 @@ int main(void) {
     }
 
     #[test]
+    fn package_metadata_bundle_round_trips_with_multiple_tables_varying_max_flags() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            function_section: vec![0],
+            table_section: vec![
+                Table {
+                    min: 0,
+                    max: None,
+                    ty: RefType::FUNCREF,
+                },
+                Table {
+                    min: 1,
+                    max: Some(1),
+                    ty: RefType::FUNCREF,
+                },
+                Table {
+                    min: 2,
+                    max: Some(u32::MAX),
+                    ty: RefType::FUNCREF,
+                },
+            ],
+            code_section: vec![Code {
+                body: vec![0x41, 0x05, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let metadata = compile_module_metadata(&module);
+        let sidecar = serialize_aot_metadata(&metadata);
+        let bundle = NativePackageMetadataBundle {
+            modules: vec![NativePackageMetadataEntry {
+                module_name: "guest".to_string(),
+                metadata_sidecar_bytes: sidecar,
+            }],
+            host_imports: Vec::new(),
+        };
+
+        let encoded = serialize_native_package_metadata_bundle(&bundle);
+        let decoded = deserialize_native_package_metadata_bundle(&encoded).unwrap();
+        assert_eq!(decoded, bundle);
+        let decoded_metadata =
+            crate::aot::deserialize_aot_metadata(&decoded.modules[0].metadata_sidecar_bytes)
+                .unwrap();
+        assert_eq!(decoded_metadata, metadata);
+        assert_eq!(
+            decoded_metadata
+                .tables
+                .iter()
+                .map(|table| (table.min, table.max))
+                .collect::<Vec<_>>(),
+            vec![(0, None), (1, Some(1)), (2, Some(u32::MAX))]
+        );
+    }
+
+    #[test]
     fn package_metadata_bundle_rejects_invalid_magic_number() {
         let bundle = sample_package_metadata_bundle();
         let mut encoded = serialize_native_package_metadata_bundle(&bundle);
