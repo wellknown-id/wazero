@@ -5044,6 +5044,32 @@ mod tests {
     }
 
     #[test]
+    fn public_memory_generic_read_write_returns_none_oob_in_secure_mode() {
+        if !compiler_supported() {
+            return;
+        }
+
+        let runtime = Runtime::with_config(RuntimeConfig::new_compiler().with_secure_mode(true));
+        let compiled = runtime
+            .compile(&[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07,
+                0x0a, 0x01, 0x06, b'm', b'e', b'm', b'o', b'r', b'y', 0x02, 0x00,
+            ])
+            .unwrap();
+        let module = runtime.instantiate(&compiled, ModuleConfig::new()).unwrap();
+        let memory = module.exported_memory("memory").unwrap();
+
+        let size = memory.size() as usize;
+        let valid_data = vec![0x42; 8];
+
+        assert!(memory.write(size - 8, &valid_data));
+        assert_eq!(Some(valid_data.clone()), memory.read(size - 8, 8));
+
+        assert_eq!(None, memory.read(size - 4, 8));
+        assert!(!memory.write(size - 4, &[0xff; 8]));
+    }
+
+    #[test]
     fn later_imported_host_functions_dispatch_correctly() {
         let runtime = Runtime::new();
         runtime
