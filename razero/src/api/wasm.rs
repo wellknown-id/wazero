@@ -1299,6 +1299,69 @@ impl Module {
         self.inner.globals.get(name).cloned()
     }
 
+    pub fn exported_global_definitions(&self) -> BTreeMap<String, GlobalDefinition> {
+        let Some(lower_module) = self.inner.lower_module.as_ref() else {
+            return BTreeMap::new();
+        };
+
+        let mut definitions_by_index = BTreeMap::new();
+        let module_name = self.name().map(str::to_owned);
+        for export in lower_module
+            .export_section
+            .iter()
+            .filter(|export| export.ty == razero_wasm::module::ExternType::GLOBAL)
+        {
+            let definition = definitions_by_index.entry(export.index).or_insert_with(|| {
+                if export.index < lower_module.import_global_count {
+                    lower_module
+                        .import_section
+                        .iter()
+                        .filter_map(|import| match &import.desc {
+                            razero_wasm::module::ImportDesc::Global(global) => {
+                                Some((import, global))
+                            }
+                            _ => None,
+                        })
+                        .nth(export.index as usize)
+                        .map(|(import, global)| {
+                            GlobalDefinition::new(
+                                crate::runtime::convert_value_type(global.val_type),
+                                global.mutable,
+                            )
+                            .with_import(import.module.clone(), import.name.clone())
+                        })
+                        .unwrap_or_default()
+                } else {
+                    let local_index = (export.index - lower_module.import_global_count) as usize;
+                    lower_module
+                        .global_section
+                        .get(local_index)
+                        .map(|global| {
+                            GlobalDefinition::new(
+                                crate::runtime::convert_value_type(global.ty.val_type),
+                                global.ty.mutable,
+                            )
+                            .with_module_name(module_name.clone())
+                        })
+                        .unwrap_or_default()
+                }
+            });
+            *definition = definition.clone().with_export_name(export.name.clone());
+        }
+
+        lower_module
+            .export_section
+            .iter()
+            .filter(|export| export.ty == razero_wasm::module::ExternType::GLOBAL)
+            .filter_map(|export| {
+                definitions_by_index
+                    .get(&export.index)
+                    .cloned()
+                    .map(|definition| (export.name.clone(), definition))
+            })
+            .collect()
+    }
+
     pub fn num_global(&self) -> usize {
         self.inner.all_globals.len()
     }

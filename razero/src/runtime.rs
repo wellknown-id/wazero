@@ -4168,6 +4168,35 @@ mod tests {
     }
 
     #[test]
+    fn module_exported_global_definitions_expose_export_metadata() {
+        let runtime = Runtime::new();
+        let guest = runtime
+            .instantiate_binary(
+                &[
+                    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x06, 0x06, 0x01, 0x7e, 0x01,
+                    0x42, 0x2a, 0x0b, 0x07, 0x13, 0x02, 0x07, b'c', b'o', b'u', b'n', b't', b'e',
+                    b'r', 0x03, 0x00, 0x05, b'a', b'l', b'i', b'a', b's', 0x03, 0x00,
+                ],
+                ModuleConfig::new().with_name("guest"),
+            )
+            .unwrap();
+
+        let exported = guest.exported_global_definitions();
+        assert_eq!(2, exported.len());
+        let counter = exported.get("counter").unwrap();
+        let alias = exported.get("alias").unwrap();
+        assert_eq!(ValueType::I64, counter.value_type());
+        assert!(counter.is_mutable());
+        assert_eq!(Some("guest"), counter.module_name());
+        assert_eq!(None, counter.import());
+        assert_eq!(
+            &["counter".to_string(), "alias".to_string()],
+            counter.export_names()
+        );
+        assert_eq!(counter, alias);
+    }
+
+    #[test]
     fn host_call_policy_denies_direct_host_function_calls() {
         let runtime = Runtime::new();
         let called = Arc::new(AtomicU32::new(0));
