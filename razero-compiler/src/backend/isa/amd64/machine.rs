@@ -6,8 +6,8 @@ use crate::backend::{
     AbiArgKind, CompilerContext, FunctionAbi, RealReg, RegType, RelocationInfo, VReg,
 };
 use crate::ssa::{
-    cmp::{FloatCmpCond, IntegerCmpCond}, BasicBlock, BasicBlockId, Instruction, Opcode, Signature,
-    SourceOffset, Type, Value,
+    cmp::{FloatCmpCond, IntegerCmpCond},
+    BasicBlock, BasicBlockId, Instruction, Opcode, Signature, SourceOffset, Type, Value,
 };
 use crate::wazevoapi::ExitCode;
 
@@ -190,21 +190,23 @@ impl Amd64Machine {
     }
 
     fn emit_exit_with_code(&mut self, exec_ctx: VReg, exit_code: ExitCode) {
-        let tmp = crate::backend::VReg::from_real_reg(
-            super::reg::R11,
-            crate::backend::RegType::Int,
-        );
+        let tmp =
+            crate::backend::VReg::from_real_reg(super::reg::R11, crate::backend::RegType::Int);
+        self.current_block_mut().instructions.push(Amd64Instr::imm(
+            tmp,
+            exit_code.raw() as u64,
+            false,
+        ));
         self.current_block_mut()
             .instructions
-            .push(Amd64Instr::imm(tmp, exit_code.raw() as u64, false));
-        self.current_block_mut().instructions.push(Amd64Instr::mov_rm(
-            tmp,
-            Operand::mem(AddressMode::imm_reg(
-                crate::wazevoapi::offsetdata::EXECUTION_CONTEXT_OFFSET_EXIT_CODE_OFFSET.u32(),
-                exec_ctx,
-            )),
-            4,
-        ));
+            .push(Amd64Instr::mov_rm(
+                tmp,
+                Operand::mem(AddressMode::imm_reg(
+                    crate::wazevoapi::offsetdata::EXECUTION_CONTEXT_OFFSET_EXIT_CODE_OFFSET.u32(),
+                    exec_ctx,
+                )),
+                4,
+            ));
         append_epilogue(self);
     }
 
@@ -319,15 +321,13 @@ impl Amd64Machine {
         let div_block = self.next_synthetic_block_id();
         self.current_block_mut()
             .instructions
-            .push(Amd64Instr::cmp_rmi_r(
-                Operand::reg(rhs),
-                rhs,
-                false,
-                is_64,
-            ));
+            .push(Amd64Instr::cmp_rmi_r(Operand::reg(rhs), rhs, false, is_64));
         self.current_block_mut()
             .instructions
-            .push(Amd64Instr::jmp_if(Cond::NZ, Operand::label(Label(div_block))));
+            .push(Amd64Instr::jmp_if(
+                Cond::NZ,
+                Operand::label(Label(div_block)),
+            ));
         self.link_branch_edge(BasicBlockId(div_block));
         self.emit_exit_with_code(exec_ctx, ExitCode::INTEGER_DIVISION_BY_ZERO);
         self.start_synthetic_block(div_block);
@@ -338,23 +338,16 @@ impl Amd64Machine {
 
         if is_signed {
             let neg1 = self.compiler_mut().allocate_vreg(instruction.typ);
-            self.current_block_mut()
-                .instructions
-                .push(Amd64Instr::imm(
-                    neg1,
-                    if is_64 { u64::MAX } else { u32::MAX as u64 },
-                    is_64,
-                ));
+            self.current_block_mut().instructions.push(Amd64Instr::imm(
+                neg1,
+                if is_64 { u64::MAX } else { u32::MAX as u64 },
+                is_64,
+            ));
             if is_div {
                 let normal_block = self.next_synthetic_block_id();
                 self.current_block_mut()
                     .instructions
-                    .push(Amd64Instr::cmp_rmi_r(
-                        Operand::reg(neg1),
-                        rhs,
-                        true,
-                        is_64,
-                    ));
+                    .push(Amd64Instr::cmp_rmi_r(Operand::reg(neg1), rhs, true, is_64));
                 self.current_block_mut()
                     .instructions
                     .push(Amd64Instr::jmp_if(
@@ -363,17 +356,15 @@ impl Amd64Machine {
                     ));
 
                 let min_int = self.compiler_mut().allocate_vreg(instruction.typ);
-                self.current_block_mut()
-                    .instructions
-                    .push(Amd64Instr::imm(
-                        min_int,
-                        if is_64 {
-                            0x8000_0000_0000_0000
-                        } else {
-                            0x8000_0000
-                        },
-                        is_64,
-                    ));
+                self.current_block_mut().instructions.push(Amd64Instr::imm(
+                    min_int,
+                    if is_64 {
+                        0x8000_0000_0000_0000
+                    } else {
+                        0x8000_0000
+                    },
+                    is_64,
+                ));
                 self.current_block_mut()
                     .instructions
                     .push(Amd64Instr::cmp_rmi_r(
@@ -399,12 +390,7 @@ impl Amd64Machine {
                 let done_block = normal_block + 1;
                 self.current_block_mut()
                     .instructions
-                    .push(Amd64Instr::cmp_rmi_r(
-                        Operand::reg(neg1),
-                        rhs,
-                        true,
-                        is_64,
-                    ));
+                    .push(Amd64Instr::cmp_rmi_r(Operand::reg(neg1), rhs, true, is_64));
                 self.current_block_mut()
                     .instructions
                     .push(Amd64Instr::jmp_if(
@@ -424,9 +410,11 @@ impl Amd64Machine {
                 self.current_block_mut()
                     .instructions
                     .push(Amd64Instr::sign_extend_data(is_64));
-                self.current_block_mut()
-                    .instructions
-                    .push(Amd64Instr::div(Operand::reg(rhs), true, is_64));
+                self.current_block_mut().instructions.push(Amd64Instr::div(
+                    Operand::reg(rhs),
+                    true,
+                    is_64,
+                ));
                 self.current_block_mut()
                     .instructions
                     .push(Amd64Instr::jmp(Operand::label(Label(done_block))));
@@ -444,14 +432,18 @@ impl Amd64Machine {
                 .push(Amd64Instr::imm(rdx, 0, false));
         }
 
-        self.current_block_mut()
-            .instructions
-            .push(Amd64Instr::div(Operand::reg(rhs), is_signed, is_64));
-        self.current_block_mut().instructions.push(Amd64Instr::mov_rr(
-            if is_div { rax } else { rdx },
-            dst,
+        self.current_block_mut().instructions.push(Amd64Instr::div(
+            Operand::reg(rhs),
+            is_signed,
             is_64,
         ));
+        self.current_block_mut()
+            .instructions
+            .push(Amd64Instr::mov_rr(
+                if is_div { rax } else { rdx },
+                dst,
+                is_64,
+            ));
     }
 
     fn link_branch_edge(&mut self, target: BasicBlock) {
@@ -753,16 +745,18 @@ impl BackendMachine for Amd64Machine {
                         self.current_block_mut()
                             .instructions
                             .push(Amd64Instr::setcc(second_cond, tmp2));
-                        self.current_block_mut().instructions.push(Amd64Instr::alu_rmi_r(
-                            if and {
-                                super::AluRmiROpcode::And
-                            } else {
-                                super::AluRmiROpcode::Or
-                            },
-                            Operand::reg(tmp1),
-                            tmp2,
-                            false,
-                        ));
+                        self.current_block_mut()
+                            .instructions
+                            .push(Amd64Instr::alu_rmi_r(
+                                if and {
+                                    super::AluRmiROpcode::And
+                                } else {
+                                    super::AluRmiROpcode::Or
+                                },
+                                Operand::reg(tmp1),
+                                tmp2,
+                                false,
+                            ));
                         self.current_block_mut()
                             .instructions
                             .push(Amd64Instr::movzx_rm_r(ExtMode::BQ, Operand::reg(tmp2), dst));
@@ -782,7 +776,10 @@ impl BackendMachine for Amd64Machine {
                     (Opcode::Fmul, Type::F64) => SseOpcode::Mulsd,
                     (Opcode::Fdiv, Type::F32) => SseOpcode::Divss,
                     (Opcode::Fdiv, Type::F64) => SseOpcode::Divsd,
-                    _ => panic!("unsupported amd64 float arithmetic type: {:?}", instruction.typ),
+                    _ => panic!(
+                        "unsupported amd64 float arithmetic type: {:?}",
+                        instruction.typ
+                    ),
                 };
                 self.current_block_mut()
                     .instructions
@@ -827,28 +824,30 @@ impl BackendMachine for Amd64Machine {
                 let dst = self.compiler().v_reg_of(instruction.return_());
                 let src = self.compiler().v_reg_of(instruction.v);
                 match (instruction.v.ty(), instruction.typ) {
-                    (Type::I32, Type::F32) => self
-                        .current_block_mut()
-                        .instructions
-                        .push(Amd64Instr::gpr_to_xmm(
-                            SseOpcode::Movd,
-                            Operand::reg(src),
-                            dst,
-                            false,
-                        )),
+                    (Type::I32, Type::F32) => {
+                        self.current_block_mut()
+                            .instructions
+                            .push(Amd64Instr::gpr_to_xmm(
+                                SseOpcode::Movd,
+                                Operand::reg(src),
+                                dst,
+                                false,
+                            ))
+                    }
                     (Type::F32, Type::I32) => self
                         .current_block_mut()
                         .instructions
                         .push(Amd64Instr::xmm_to_gpr(SseOpcode::Movd, src, dst, false)),
-                    (Type::I64, Type::F64) => self
-                        .current_block_mut()
-                        .instructions
-                        .push(Amd64Instr::gpr_to_xmm(
-                            SseOpcode::Movq,
-                            Operand::reg(src),
-                            dst,
-                            true,
-                        )),
+                    (Type::I64, Type::F64) => {
+                        self.current_block_mut()
+                            .instructions
+                            .push(Amd64Instr::gpr_to_xmm(
+                                SseOpcode::Movq,
+                                Operand::reg(src),
+                                dst,
+                                true,
+                            ))
+                    }
                     (Type::F64, Type::I64) => self
                         .current_block_mut()
                         .instructions
@@ -922,15 +921,20 @@ impl BackendMachine for Amd64Machine {
                     };
                     let tmp = self.compiler_mut().allocate_vreg(Type::I64);
                     let tmp2 = self.compiler_mut().allocate_vreg(Type::I64);
-                    let rcx =
-                        crate::backend::VReg::from_real_reg(super::reg::RCX, crate::backend::RegType::Int);
+                    let rcx = crate::backend::VReg::from_real_reg(
+                        super::reg::RCX,
+                        crate::backend::RegType::Int,
+                    );
 
                     self.current_block_mut()
                         .instructions
                         .push(Amd64Instr::cmp_rmi_r(Operand::reg(src), src, false, true));
                     self.current_block_mut()
                         .instructions
-                        .push(Amd64Instr::jmp_if(Cond::S, Operand::label(Label(sign_block))));
+                        .push(Amd64Instr::jmp_if(
+                            Cond::S,
+                            Operand::label(Label(sign_block)),
+                        ));
                     self.link_branch_edge(BasicBlockId(sign_block));
 
                     self.current_block_mut()
@@ -950,22 +954,30 @@ impl BackendMachine for Amd64Machine {
                         .push(Amd64Instr::imm(rcx, 1, false));
                     self.current_block_mut()
                         .instructions
-                        .push(Amd64Instr::shift_r(super::instr::ShiftROpcode::Shr, tmp, true));
+                        .push(Amd64Instr::shift_r(
+                            super::instr::ShiftROpcode::Shr,
+                            tmp,
+                            true,
+                        ));
                     self.current_block_mut()
                         .instructions
                         .push(Amd64Instr::mov_rr(src, tmp2, true));
-                    self.current_block_mut().instructions.push(Amd64Instr::alu_rmi_r(
-                        super::instr::AluRmiROpcode::And,
-                        Operand::imm32(1),
-                        tmp2,
-                        true,
-                    ));
-                    self.current_block_mut().instructions.push(Amd64Instr::alu_rmi_r(
-                        super::instr::AluRmiROpcode::Or,
-                        Operand::reg(tmp2),
-                        tmp,
-                        true,
-                    ));
+                    self.current_block_mut()
+                        .instructions
+                        .push(Amd64Instr::alu_rmi_r(
+                            super::instr::AluRmiROpcode::And,
+                            Operand::imm32(1),
+                            tmp2,
+                            true,
+                        ));
+                    self.current_block_mut()
+                        .instructions
+                        .push(Amd64Instr::alu_rmi_r(
+                            super::instr::AluRmiROpcode::Or,
+                            Operand::reg(tmp2),
+                            tmp,
+                            true,
+                        ));
                     self.current_block_mut()
                         .instructions
                         .push(Amd64Instr::gpr_to_xmm(op, Operand::reg(tmp), dst, true));
@@ -984,13 +996,14 @@ impl BackendMachine for Amd64Machine {
                 let dst = self.compiler().v_reg_of(instruction.return_());
                 let src = self.compiler().v_reg_of(instruction.v);
                 let exec_ctx = self.compiler().v_reg_of(instruction.v3);
-                let (cmp_op, trunc_op, min_int_bits, move_op, src_64, above_threshold) =
+                let (cmp_op, trunc_op, min_int_bits, move_op, src_64, dst_64, above_threshold) =
                     match (instruction.v.ty(), instruction.typ) {
                         (Type::F32, Type::I32) => (
                             SseOpcode::Ucomiss,
                             SseOpcode::Cvttss2si,
                             0xCF00_0000,
                             SseOpcode::Movd,
+                            false,
                             false,
                             Cond::NB,
                         ),
@@ -1000,7 +1013,26 @@ impl BackendMachine for Amd64Machine {
                             0xC1E0_0000_0020_0000,
                             SseOpcode::Movq,
                             true,
+                            false,
                             Cond::NBE,
+                        ),
+                        (Type::F32, Type::I64) => (
+                            SseOpcode::Ucomiss,
+                            SseOpcode::Cvttss2si,
+                            0xDF00_0000,
+                            SseOpcode::Movd,
+                            false,
+                            true,
+                            Cond::NB,
+                        ),
+                        (Type::F64, Type::I64) => (
+                            SseOpcode::Ucomisd,
+                            SseOpcode::Cvttsd2si,
+                            0xC3E0_0000_0000_0000,
+                            SseOpcode::Movq,
+                            true,
+                            true,
+                            Cond::NB,
                         ),
                         _ => panic!(
                             "unsupported amd64 float-to-signed-int conversion: {:?} -> {:?}",
@@ -1018,13 +1050,16 @@ impl BackendMachine for Amd64Machine {
 
                 self.current_block_mut()
                     .instructions
-                    .push(Amd64Instr::xmm_to_gpr(trunc_op, src, dst, false));
+                    .push(Amd64Instr::xmm_to_gpr(trunc_op, src, dst, dst_64));
                 self.current_block_mut()
                     .instructions
-                    .push(Amd64Instr::cmp_rmi_r(Operand::imm32(1), dst, true, false));
+                    .push(Amd64Instr::cmp_rmi_r(Operand::imm32(1), dst, true, dst_64));
                 self.current_block_mut()
                     .instructions
-                    .push(Amd64Instr::jmp_if(Cond::NO, Operand::label(Label(done_block))));
+                    .push(Amd64Instr::jmp_if(
+                        Cond::NO,
+                        Operand::label(Label(done_block)),
+                    ));
                 self.link_branch_edge(BasicBlockId(done_block));
 
                 self.current_block_mut()
@@ -1032,20 +1067,27 @@ impl BackendMachine for Amd64Machine {
                     .push(Amd64Instr::xmm_cmp_rm_r(cmp_op, Operand::reg(src), src));
                 self.current_block_mut()
                     .instructions
-                    .push(Amd64Instr::jmp_if(Cond::NP, Operand::label(Label(not_nan_block))));
+                    .push(Amd64Instr::jmp_if(
+                        Cond::NP,
+                        Operand::label(Label(not_nan_block)),
+                    ));
                 self.link_branch_edge(BasicBlockId(not_nan_block));
                 self.emit_exit_with_code(exec_ctx, ExitCode::INVALID_CONVERSION_TO_INTEGER);
 
                 self.start_synthetic_block(not_nan_block);
-                self.current_block_mut()
-                    .instructions
-                    .push(Amd64Instr::imm(tmp_gp, min_int_bits, src_64));
-                self.current_block_mut().instructions.push(Amd64Instr::gpr_to_xmm(
-                    move_op,
-                    Operand::reg(tmp_gp),
-                    tmp_xmm,
+                self.current_block_mut().instructions.push(Amd64Instr::imm(
+                    tmp_gp,
+                    min_int_bits,
                     src_64,
                 ));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::gpr_to_xmm(
+                        move_op,
+                        Operand::reg(tmp_gp),
+                        tmp_xmm,
+                        src_64,
+                    ));
                 self.current_block_mut()
                     .instructions
                     .push(Amd64Instr::xmm_cmp_rm_r(cmp_op, Operand::reg(tmp_xmm), src));
@@ -1062,18 +1104,23 @@ impl BackendMachine for Amd64Machine {
                 self.current_block_mut()
                     .instructions
                     .push(Amd64Instr::imm(tmp_gp, 0, false));
-                self.current_block_mut().instructions.push(Amd64Instr::gpr_to_xmm(
-                    move_op,
-                    Operand::reg(tmp_gp),
-                    tmp_xmm,
-                    src_64,
-                ));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::gpr_to_xmm(
+                        move_op,
+                        Operand::reg(tmp_gp),
+                        tmp_xmm,
+                        src_64,
+                    ));
                 self.current_block_mut()
                     .instructions
                     .push(Amd64Instr::xmm_cmp_rm_r(cmp_op, Operand::reg(src), tmp_xmm));
                 self.current_block_mut()
                     .instructions
-                    .push(Amd64Instr::jmp_if(Cond::NB, Operand::label(Label(done_block))));
+                    .push(Amd64Instr::jmp_if(
+                        Cond::NB,
+                        Operand::label(Label(done_block)),
+                    ));
                 self.link_branch_edge(BasicBlockId(done_block));
                 self.emit_exit_with_code(exec_ctx, ExitCode::INTEGER_OVERFLOW);
 
@@ -1117,25 +1164,35 @@ impl BackendMachine for Amd64Machine {
                 let tmp_xmm = self.compiler_mut().allocate_vreg(instruction.v.ty());
                 let tmp_xmm2 = self.compiler_mut().allocate_vreg(instruction.v.ty());
 
-                self.current_block_mut()
-                    .instructions
-                    .push(Amd64Instr::imm(tmp_gp, threshold_bits, src_64));
-                self.current_block_mut().instructions.push(Amd64Instr::gpr_to_xmm(
-                    move_op,
-                    Operand::reg(tmp_gp),
-                    tmp_xmm,
+                self.current_block_mut().instructions.push(Amd64Instr::imm(
+                    tmp_gp,
+                    threshold_bits,
                     src_64,
                 ));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::gpr_to_xmm(
+                        move_op,
+                        Operand::reg(tmp_gp),
+                        tmp_xmm,
+                        src_64,
+                    ));
                 self.current_block_mut()
                     .instructions
                     .push(Amd64Instr::xmm_cmp_rm_r(cmp_op, Operand::reg(tmp_xmm), src));
                 self.current_block_mut()
                     .instructions
-                    .push(Amd64Instr::jmp_if(Cond::NB, Operand::label(Label(large_block))));
+                    .push(Amd64Instr::jmp_if(
+                        Cond::NB,
+                        Operand::label(Label(large_block)),
+                    ));
                 self.link_branch_edge(BasicBlockId(large_block));
                 self.current_block_mut()
                     .instructions
-                    .push(Amd64Instr::jmp_if(Cond::NP, Operand::label(Label(not_nan_block))));
+                    .push(Amd64Instr::jmp_if(
+                        Cond::NP,
+                        Operand::label(Label(not_nan_block)),
+                    ));
                 self.link_branch_edge(BasicBlockId(not_nan_block));
                 self.emit_exit_with_code(exec_ctx, ExitCode::INVALID_CONVERSION_TO_INTEGER);
 
@@ -1148,7 +1205,10 @@ impl BackendMachine for Amd64Machine {
                     .push(Amd64Instr::cmp_rmi_r(Operand::imm32(0), dst, true, false));
                 self.current_block_mut()
                     .instructions
-                    .push(Amd64Instr::jmp_if(Cond::NL, Operand::label(Label(done_block))));
+                    .push(Amd64Instr::jmp_if(
+                        Cond::NL,
+                        Operand::label(Label(done_block)),
+                    ));
                 self.link_branch_edge(BasicBlockId(done_block));
                 self.emit_exit_with_code(exec_ctx, ExitCode::INTEGER_OVERFLOW);
 
@@ -1162,7 +1222,11 @@ impl BackendMachine for Amd64Machine {
                     ));
                 self.current_block_mut()
                     .instructions
-                    .push(Amd64Instr::xmm_unary_rm_r(sub_op, Operand::reg(tmp_xmm), tmp_xmm2));
+                    .push(Amd64Instr::xmm_unary_rm_r(
+                        sub_op,
+                        Operand::reg(tmp_xmm),
+                        tmp_xmm2,
+                    ));
                 self.current_block_mut()
                     .instructions
                     .push(Amd64Instr::xmm_to_gpr(trunc_op, tmp_xmm2, dst, false));
@@ -1179,12 +1243,14 @@ impl BackendMachine for Amd64Machine {
                 self.emit_exit_with_code(exec_ctx, ExitCode::INTEGER_OVERFLOW);
 
                 self.start_synthetic_block(next_large_block);
-                self.current_block_mut().instructions.push(Amd64Instr::alu_rmi_r(
-                    super::instr::AluRmiROpcode::Add,
-                    Operand::imm32(0x8000_0000),
-                    dst,
-                    false,
-                ));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::alu_rmi_r(
+                        super::instr::AluRmiROpcode::Add,
+                        Operand::imm32(0x8000_0000),
+                        dst,
+                        false,
+                    ));
                 self.current_block_mut()
                     .instructions
                     .push(Amd64Instr::jmp(Operand::label(Label(done_block))));
@@ -1265,11 +1331,17 @@ impl BackendMachine for Amd64Machine {
                     .push(Amd64Instr::xmm_cmp_rm_r(cmp_op, Operand::reg(rhs), dst));
                 self.current_block_mut()
                     .instructions
-                    .push(Amd64Instr::jmp_if(Cond::NZ, Operand::label(Label(diff_block))));
+                    .push(Amd64Instr::jmp_if(
+                        Cond::NZ,
+                        Operand::label(Label(diff_block)),
+                    ));
                 self.link_branch_edge(BasicBlockId(diff_block));
                 self.current_block_mut()
                     .instructions
-                    .push(Amd64Instr::jmp_if(Cond::P, Operand::label(Label(nan_block))));
+                    .push(Amd64Instr::jmp_if(
+                        Cond::P,
+                        Operand::label(Label(nan_block)),
+                    ));
                 self.link_branch_edge(BasicBlockId(nan_block));
                 self.current_block_mut()
                     .instructions
@@ -1337,7 +1409,12 @@ impl BackendMachine for Amd64Machine {
                             .push(Amd64Instr::mov_rr(v_false, dst, is_64));
                         self.current_block_mut()
                             .instructions
-                            .push(Amd64Instr::cmove(Cond::NZ, Operand::reg(v_true), dst, is_64));
+                            .push(Amd64Instr::cmove(
+                                Cond::NZ,
+                                Operand::reg(v_true),
+                                dst,
+                                is_64,
+                            ));
                     }
                     _ => panic!("unsupported amd64 select type: {:?}", instruction.typ),
                 }
@@ -1509,7 +1586,10 @@ impl BackendMachine for Amd64Machine {
                 };
                 self.current_block_mut()
                     .instructions
-                    .push(Amd64Instr::jmp_if(continue_cond, Operand::label(Label(cont_id))));
+                    .push(Amd64Instr::jmp_if(
+                        continue_cond,
+                        Operand::label(Label(cont_id)),
+                    ));
                 self.link_adjacent_blocks(BasicBlockId(current_id), BasicBlockId(cont_id));
                 self.emit_exit_with_code(exec_ctx, code);
                 self.start_synthetic_block(cont_id);
@@ -1759,8 +1839,8 @@ mod tests {
         CompilerContext, FunctionAbi, RegType, SSAValueDefinition, SourceOffsetInfo, VReg,
     };
     use crate::ssa::{
-        cmp::{FloatCmpCond, IntegerCmpCond}, BasicBlockId, Builder, FuncRef, Opcode, Signature,
-        SourceOffset, Type, Value,
+        cmp::{FloatCmpCond, IntegerCmpCond},
+        BasicBlockId, Builder, FuncRef, Opcode, Signature, SourceOffset, Type, Value,
     };
     use crate::wazevoapi::ExitCode;
 
@@ -1803,7 +1883,10 @@ mod tests {
         }
 
         fn value_definition(&self, value: Value) -> SSAValueDefinition {
-            self.defs.get(value.id().0 as usize).copied().unwrap_or_default()
+            self.defs
+                .get(value.id().0 as usize)
+                .copied()
+                .unwrap_or_default()
         }
 
         fn v_reg_of(&self, value: Value) -> VReg {
@@ -2444,7 +2527,8 @@ mod tests {
         let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
         m.set_compiler(ptr);
 
-        let mut instruction = crate::ssa::Instruction::new().with_opcode(Opcode::ExitIfTrueWithCode);
+        let mut instruction =
+            crate::ssa::Instruction::new().with_opcode(Opcode::ExitIfTrueWithCode);
         instruction.v = Value(0).with_type(Type::I64);
         instruction.v2 = Value(1).with_type(Type::I32);
         instruction.u1 = exit_code.raw() as u64;
@@ -2463,13 +2547,14 @@ mod tests {
         compiler.builder.set_current_block(bb);
         let x = compiler.builder.allocate_value(Type::I32);
         let y = compiler.builder.allocate_value(Type::I32);
-        let icmp_id = compiler
-            .builder
-            .insert_instruction(compiler.builder.allocate_instruction().as_icmp(
-                x,
-                y,
-                IntegerCmpCond::Equal,
-            ));
+        let icmp_id =
+            compiler
+                .builder
+                .insert_instruction(compiler.builder.allocate_instruction().as_icmp(
+                    x,
+                    y,
+                    IntegerCmpCond::Equal,
+                ));
         let cond = compiler.builder.instruction(icmp_id).return_();
         let exec_ctx = compiler.builder.allocate_value(Type::I64);
         compiler.regs = vec![
@@ -2478,7 +2563,9 @@ mod tests {
             VReg::from_real_reg(3, RegType::Int),
             VReg::from_real_reg(1, RegType::Int),
         ];
-        compiler.defs.resize(cond.id().0 as usize + 1, SSAValueDefinition::default());
+        compiler
+            .defs
+            .resize(cond.id().0 as usize + 1, SSAValueDefinition::default());
         compiler.defs[cond.id().0 as usize] = SSAValueDefinition {
             value: cond,
             instr: Some(icmp_id),
@@ -2487,7 +2574,8 @@ mod tests {
         let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
         m.set_compiler(ptr);
 
-        let mut instruction = crate::ssa::Instruction::new().with_opcode(Opcode::ExitIfTrueWithCode);
+        let mut instruction =
+            crate::ssa::Instruction::new().with_opcode(Opcode::ExitIfTrueWithCode);
         instruction.v = exec_ctx;
         instruction.v2 = cond;
         instruction.u1 = exit_code.raw() as u64;
@@ -2661,6 +2749,31 @@ mod tests {
         assert!(formatted.contains("jnbe L"));
         assert!(formatted.contains("movq "));
         assert!(formatted.contains("movabsq $"));
+    }
+
+    #[test]
+    fn lowers_f32_to_i64_with_cvttss2si_and_trap_guards() {
+        let formatted = lower_fcvt_to_sint_opcode(Type::F32, Type::I64);
+        assert!(formatted.contains("cvttss2si %xmm0, %rax"));
+        assert!(formatted.contains("cmpq $1, %rax"));
+        assert!(formatted.contains("jno L"));
+        assert!(formatted.contains("ucomiss %xmm0, %xmm0"));
+        assert!(formatted.contains("movd "));
+        assert!(formatted.contains("movl $12, %r11d"));
+        assert!(formatted.contains("movl $11, %r11d"));
+    }
+
+    #[test]
+    fn lowers_f64_to_i64_with_cvttsd2si_and_threshold_guard() {
+        let formatted = lower_fcvt_to_sint_opcode(Type::F64, Type::I64);
+        assert!(formatted.contains("cvttsd2si %xmm0, %rax"));
+        assert!(formatted.contains("cmpq $1, %rax"));
+        assert!(formatted.contains("ucomisd %xmm0, %xmm0"));
+        assert!(formatted.contains("jnb L"));
+        assert!(formatted.contains("movq "));
+        assert!(formatted.contains("movabsq $"));
+        assert!(formatted.contains("movl $12, %r11d"));
+        assert!(formatted.contains("movl $11, %r11d"));
     }
 
     #[test]
