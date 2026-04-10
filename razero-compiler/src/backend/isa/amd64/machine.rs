@@ -1079,6 +1079,119 @@ impl BackendMachine for Amd64Machine {
 
                 self.start_synthetic_block(done_block);
             }
+            Opcode::FcvtToUint => {
+                let dst = self.compiler().v_reg_of(instruction.return_());
+                let src = self.compiler().v_reg_of(instruction.v);
+                let exec_ctx = self.compiler().v_reg_of(instruction.v3);
+                let (cmp_op, trunc_op, threshold_bits, move_op, sub_op, src_64) =
+                    match (instruction.v.ty(), instruction.typ) {
+                        (Type::F32, Type::I32) => (
+                            SseOpcode::Ucomiss,
+                            SseOpcode::Cvttss2si,
+                            0x4F00_0000,
+                            SseOpcode::Movd,
+                            SseOpcode::Subss,
+                            false,
+                        ),
+                        (Type::F64, Type::I32) => (
+                            SseOpcode::Ucomisd,
+                            SseOpcode::Cvttsd2si,
+                            0x41E0_0000_0000_0000,
+                            SseOpcode::Movq,
+                            SseOpcode::Subsd,
+                            true,
+                        ),
+                        _ => panic!(
+                            "unsupported amd64 float-to-unsigned-int conversion: {:?} -> {:?}",
+                            instruction.v.ty(),
+                            instruction.typ
+                        ),
+                    };
+
+                let done_block = self.next_synthetic_block_id();
+                let large_block = done_block + 1;
+                let not_nan_block = large_block + 1;
+                let next_large_block = not_nan_block + 1;
+
+                let tmp_gp = self.compiler_mut().allocate_vreg(Type::I64);
+                let tmp_xmm = self.compiler_mut().allocate_vreg(instruction.v.ty());
+                let tmp_xmm2 = self.compiler_mut().allocate_vreg(instruction.v.ty());
+
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::imm(tmp_gp, threshold_bits, src_64));
+                self.current_block_mut().instructions.push(Amd64Instr::gpr_to_xmm(
+                    move_op,
+                    Operand::reg(tmp_gp),
+                    tmp_xmm,
+                    src_64,
+                ));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::xmm_cmp_rm_r(cmp_op, Operand::reg(tmp_xmm), src));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::jmp_if(Cond::NB, Operand::label(Label(large_block))));
+                self.link_branch_edge(BasicBlockId(large_block));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::jmp_if(Cond::NP, Operand::label(Label(not_nan_block))));
+                self.link_branch_edge(BasicBlockId(not_nan_block));
+                self.emit_exit_with_code(exec_ctx, ExitCode::INVALID_CONVERSION_TO_INTEGER);
+
+                self.start_synthetic_block(not_nan_block);
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::xmm_to_gpr(trunc_op, src, dst, false));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::cmp_rmi_r(Operand::imm32(0), dst, true, false));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::jmp_if(Cond::NL, Operand::label(Label(done_block))));
+                self.link_branch_edge(BasicBlockId(done_block));
+                self.emit_exit_with_code(exec_ctx, ExitCode::INTEGER_OVERFLOW);
+
+                self.start_synthetic_block(large_block);
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::xmm_unary_rm_r(
+                        SseOpcode::Movdqu,
+                        Operand::reg(src),
+                        tmp_xmm2,
+                    ));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::xmm_unary_rm_r(sub_op, Operand::reg(tmp_xmm), tmp_xmm2));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::xmm_to_gpr(trunc_op, tmp_xmm2, dst, false));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::cmp_rmi_r(Operand::imm32(0), dst, true, false));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::jmp_if(
+                        Cond::NL,
+                        Operand::label(Label(next_large_block)),
+                    ));
+                self.link_branch_edge(BasicBlockId(next_large_block));
+                self.emit_exit_with_code(exec_ctx, ExitCode::INTEGER_OVERFLOW);
+
+                self.start_synthetic_block(next_large_block);
+                self.current_block_mut().instructions.push(Amd64Instr::alu_rmi_r(
+                    super::instr::AluRmiROpcode::Add,
+                    Operand::imm32(0x8000_0000),
+                    dst,
+                    false,
+                ));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::jmp(Operand::label(Label(done_block))));
+                self.link_branch_edge(BasicBlockId(done_block));
+
+                self.start_synthetic_block(done_block);
+            }
             Opcode::Ceil | Opcode::Floor | Opcode::Trunc | Opcode::Nearest => {
                 let dst = self.compiler().v_reg_of(instruction.return_());
                 let src = self.compiler().v_reg_of(instruction.v);
@@ -2198,6 +2311,30 @@ mod tests {
         m.format()
     }
 
+    fn lower_fcvt_to_uint_opcode(src_ty: Type, dst_ty: Type) -> String {
+        let mut m = Amd64Machine::new();
+        m.start_lowering_function(BasicBlockId(0));
+        m.start_block(BasicBlockId(0));
+
+        let mut compiler = Box::new(TestCompilerContext::default());
+        compiler.regs = vec![
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::XMM0, RegType::Float),
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::RAX, RegType::Int),
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::RBX, RegType::Int),
+        ];
+        let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
+        m.set_compiler(ptr);
+
+        let mut instruction = crate::ssa::Instruction::new().with_opcode(Opcode::FcvtToUint);
+        instruction.v = Value(0).with_type(src_ty);
+        instruction.r_value = Value(1).with_type(dst_ty);
+        instruction.v3 = Value(2).with_type(Type::I64);
+        instruction.typ = dst_ty;
+
+        m.lower_instr(&instruction);
+        m.format()
+    }
+
     fn lower_round_opcode(opcode: Opcode, ty: Type) -> String {
         let mut m = Amd64Machine::new();
         m.start_lowering_function(BasicBlockId(0));
@@ -2524,6 +2661,25 @@ mod tests {
         assert!(formatted.contains("jnbe L"));
         assert!(formatted.contains("movq "));
         assert!(formatted.contains("movabsq $"));
+    }
+
+    #[test]
+    fn lowers_f32_to_u32_with_threshold_subtract_and_add_back() {
+        let formatted = lower_fcvt_to_uint_opcode(Type::F32, Type::I32);
+        assert!(formatted.contains("ucomiss "));
+        assert!(formatted.contains("cvttss2si %xmm0, %eax"));
+        assert!(formatted.contains("subss "));
+        assert!(formatted.contains("movl $12, %r11d"));
+        assert!(formatted.contains("movl $11, %r11d"));
+    }
+
+    #[test]
+    fn lowers_f64_to_u32_with_threshold_subtract_and_add_back() {
+        let formatted = lower_fcvt_to_uint_opcode(Type::F64, Type::I32);
+        assert!(formatted.contains("ucomisd "));
+        assert!(formatted.contains("cvttsd2si %xmm0, %eax"));
+        assert!(formatted.contains("subsd "));
+        assert!(formatted.contains("movabsq $4746794007248502784"));
     }
 
     #[test]
