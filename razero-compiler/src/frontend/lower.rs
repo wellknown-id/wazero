@@ -3085,6 +3085,35 @@ mod tests {
     }
 
     #[test]
+    fn lowers_i32_load16_s_with_local_memory_bounds_check() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            memory_section: Some(wasm::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                is_shared: false,
+            }),
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_I32_LOAD16_S, 1, 0, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32)\n\tv3:i64 = UExtend v2\n\tv4:i64 = Iconst 2\n\tv5:i64 = Iadd v3, v4\n\tv6:i64 = Uload32 module_ctx, 0x10\n\tv7:i32 = Icmp v6, v5\n\tExitIfTrueWithCode v7, exec_ctx, memory_out_of_bounds\n\tv8:i64 = Load module_ctx, 0x8\n\tv9:i64 = Iadd v8, v3\n\tv10:i32 = Sload16 v9, 0x0\n\tJump blk_ret, v10\n"
+        );
+    }
+
+    #[test]
     fn lowers_i64_load32_s_with_local_memory_bounds_check() {
         let module = Module {
             type_section: vec![function_type(&[ValueType::I32], &[ValueType::I64])],
