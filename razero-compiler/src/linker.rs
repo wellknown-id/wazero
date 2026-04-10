@@ -2819,6 +2819,74 @@ int main(void) {
     }
 
     #[test]
+    fn package_metadata_bundle_round_trips_with_multiple_data_segments_passive_boundary() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            function_section: vec![0],
+            memory_section: Some(razero_wasm::module::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                ..razero_wasm::module::Memory::default()
+            }),
+            code_section: vec![Code {
+                body: vec![0x41, 0x05, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            data_section: vec![
+                DataSegment {
+                    offset_expression: ConstExpr::from_opcode(0x41, &[0x00]),
+                    init: vec![1, 2, 3],
+                    passive: false,
+                },
+                DataSegment {
+                    offset_expression: ConstExpr::from_opcode(0x41, &[0x00]),
+                    init: Vec::new(),
+                    passive: true,
+                },
+                DataSegment {
+                    offset_expression: ConstExpr::from_opcode(0x41, &[0x10]),
+                    init: vec![0xff; 32],
+                    passive: true,
+                },
+            ],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let metadata = compile_module_metadata(&module);
+        let sidecar = serialize_aot_metadata(&metadata);
+        let bundle = NativePackageMetadataBundle {
+            modules: vec![NativePackageMetadataEntry {
+                module_name: "guest".to_string(),
+                metadata_sidecar_bytes: sidecar,
+            }],
+            host_imports: Vec::new(),
+        };
+
+        let encoded = serialize_native_package_metadata_bundle(&bundle);
+        let decoded = deserialize_native_package_metadata_bundle(&encoded).unwrap();
+        assert_eq!(decoded, bundle);
+        let decoded_metadata =
+            crate::aot::deserialize_aot_metadata(&decoded.modules[0].metadata_sidecar_bytes)
+                .unwrap();
+        assert_eq!(decoded_metadata, metadata);
+        assert_eq!(
+            decoded_metadata
+                .data_segments
+                .iter()
+                .map(|segment| (segment.passive, segment.init.len()))
+                .collect::<Vec<_>>(),
+            vec![(false, 3), (true, 0), (true, 32)]
+        );
+    }
+
+    #[test]
     fn package_metadata_bundle_rejects_invalid_magic_number() {
         let bundle = sample_package_metadata_bundle();
         let mut encoded = serialize_native_package_metadata_bundle(&bundle);
