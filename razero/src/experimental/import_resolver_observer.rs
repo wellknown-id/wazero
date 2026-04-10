@@ -6,6 +6,7 @@ use crate::{api::wasm::Module, ctx_keys::Context};
 pub enum ImportResolverEvent {
     AclAllowed,
     AclDenied,
+    ResolverAttempted,
     ResolverResolved,
     StoreFallback,
     FailClosedDenied,

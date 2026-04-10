@@ -968,21 +968,27 @@ fn resolve_imports_with_context(
                 crate::ImportResolverEvent::AclAllowed,
             );
         }
-        if let Some(module) = cfg
-            .resolver
-            .as_ref()
-            .and_then(|resolver| resolver(import_name))
-        {
+        if let Some(resolver) = cfg.resolver.as_ref() {
             notify_import_resolver_observer(
                 &observer,
                 ctx,
                 &module_name,
                 import_name,
-                Some(module.clone()),
-                crate::ImportResolverEvent::ResolverResolved,
+                None,
+                crate::ImportResolverEvent::ResolverAttempted,
             );
-            module.register_import_alias(import_name)?;
-            continue;
+            if let Some(module) = resolver(import_name) {
+                notify_import_resolver_observer(
+                    &observer,
+                    ctx,
+                    &module_name,
+                    import_name,
+                    Some(module.clone()),
+                    crate::ImportResolverEvent::ResolverResolved,
+                );
+                module.register_import_alias(import_name)?;
+                continue;
+            }
         }
         if cfg.fail_closed {
             notify_import_resolver_observer(
@@ -3453,11 +3459,73 @@ mod tests {
 
         assert_eq!(1, resolved_count.load(Ordering::SeqCst));
         assert_eq!(
-            vec![ImportObserverRecord {
-                import_module: "env".to_string(),
-                event: crate::ImportResolverEvent::ResolverResolved,
-                resolved: true,
-            }],
+            vec![
+                ImportObserverRecord {
+                    import_module: "env".to_string(),
+                    event: crate::ImportResolverEvent::ResolverAttempted,
+                    resolved: false,
+                },
+                ImportObserverRecord {
+                    import_module: "env".to_string(),
+                    event: crate::ImportResolverEvent::ResolverResolved,
+                    resolved: true,
+                },
+            ],
+            *events.lock().expect("import observer events poisoned")
+        );
+    }
+
+    #[test]
+    fn import_resolver_observer_reports_resolver_attempt_before_store_fallback() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("env")
+            .new_function_builder()
+            .with_callback(|_ctx, _module, _params| Ok(Vec::new()), &[], &[])
+            .export("start")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let ctx = crate::with_import_resolver_observer(
+            &crate::experimental::with_import_resolver_config(
+                &Context::default(),
+                crate::experimental::ImportResolverConfig {
+                    resolver: Some(Arc::new(|_| None)),
+                    ..crate::experimental::ImportResolverConfig::default()
+                },
+            ),
+            RecordingImportResolverObserver {
+                events: events.clone(),
+            },
+        );
+        let compiled_guest = runtime
+            .compile(&[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+                0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r', b't', 0x00,
+                0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x01,
+                0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+            ])
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_with_context(&ctx, &compiled_guest, ModuleConfig::new())
+            .unwrap();
+        guest.exported_function("run").unwrap().call(&[]).unwrap();
+
+        assert_eq!(
+            vec![
+                ImportObserverRecord {
+                    import_module: "env".to_string(),
+                    event: crate::ImportResolverEvent::ResolverAttempted,
+                    resolved: false,
+                },
+                ImportObserverRecord {
+                    import_module: "env".to_string(),
+                    event: crate::ImportResolverEvent::StoreFallback,
+                    resolved: false,
+                },
+            ],
             *events.lock().expect("import observer events poisoned")
         );
     }
