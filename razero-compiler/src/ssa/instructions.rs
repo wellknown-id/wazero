@@ -441,6 +441,30 @@ impl Instruction {
         self
     }
 
+    pub fn as_sextend(mut self, v: Value, from: u8, to: u8) -> Self {
+        self.opcode = Opcode::SExtend;
+        self.v = v;
+        self.u1 = (u64::from(from) << 8) | u64::from(to);
+        self.typ = match to {
+            64 => Type::I64,
+            32 | 16 | 8 => Type::I32,
+            _ => panic!("invalid sextend target width: {to}"),
+        };
+        self
+    }
+
+    pub fn as_uextend(mut self, v: Value, from: u8, to: u8) -> Self {
+        self.opcode = Opcode::UExtend;
+        self.v = v;
+        self.u1 = (u64::from(from) << 8) | u64::from(to);
+        self.typ = match to {
+            64 => Type::I64,
+            32 | 16 | 8 => Type::I32,
+            _ => panic!("invalid uextend target width: {to}"),
+        };
+        self
+    }
+
     pub fn call_data(&self) -> (FuncRef, SignatureId, &[Value]) {
         (
             FuncRef(self.u1 as u32),
@@ -483,6 +507,17 @@ impl Instruction {
 
     pub fn vconst_data(&self) -> (u64, u64) {
         (self.u1, self.u2)
+    }
+
+    pub fn extend_data(&self) -> (u8, u8, bool) {
+        if self.opcode != Opcode::SExtend && self.opcode != Opcode::UExtend {
+            panic!("extend_data only available for Opcode::SExtend and Opcode::UExtend");
+        }
+        (
+            (self.u1 >> 8) as u8,
+            self.u1 as u8,
+            self.opcode == Opcode::SExtend,
+        )
     }
 
     pub fn branch_data(&self) -> (Value, &[Value], BasicBlockId) {
@@ -744,6 +779,7 @@ impl Instruction {
 #[cfg(test)]
 mod tests {
     use super::{Instruction, Opcode};
+    use crate::ssa::{Type, Value};
 
     #[test]
     fn invert_conditional_branch() {
@@ -752,5 +788,17 @@ mod tests {
         assert_eq!(i.opcode, Opcode::Brz);
         i.invert_brx();
         assert_eq!(i.opcode, Opcode::Brnz);
+    }
+
+    #[test]
+    fn extend_builders_store_metadata() {
+        let v = Value(1).with_type(Type::I32);
+        let sext = Instruction::new().as_sextend(v, 8, 32);
+        assert_eq!(sext.extend_data(), (8, 32, true));
+        assert_eq!(sext.typ, Type::I32);
+
+        let uext = Instruction::new().as_uextend(v, 32, 64);
+        assert_eq!(uext.extend_data(), (32, 64, false));
+        assert_eq!(uext.typ, Type::I64);
     }
 }

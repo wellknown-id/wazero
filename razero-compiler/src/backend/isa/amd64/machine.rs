@@ -1537,26 +1537,40 @@ impl BackendMachine for Amd64Machine {
             Opcode::UExtend => {
                 let dst = self.compiler().v_reg_of(instruction.return_());
                 let src = self.compiler().v_reg_of(instruction.v);
-                match instruction.typ {
-                    Type::I64 => {
-                        self.current_block_mut()
-                            .instructions
-                            .push(Amd64Instr::movzx_rm_r(ExtMode::LQ, Operand::reg(src), dst));
-                    }
-                    _ => panic!("unsupported amd64 uextend type: {:?}", instruction.typ),
-                }
+                let (from, to, signed) = instruction.extend_data();
+                let mode = match (from, to, signed) {
+                    (8, 16, false) => ExtMode::BL,
+                    (8, 32, false) => ExtMode::BQ,
+                    (8, 64, false) => ExtMode::BQ,
+                    (16, 32, false) => ExtMode::WL,
+                    (16, 64, false) => ExtMode::WQ,
+                    (32, 64, false) => ExtMode::LQ,
+                    _ => panic!(
+                        "unsupported amd64 uextend metadata: from={from}, to={to}, signed={signed}"
+                    ),
+                };
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::movzx_rm_r(mode, Operand::reg(src), dst));
             }
             Opcode::SExtend => {
                 let dst = self.compiler().v_reg_of(instruction.return_());
                 let src = self.compiler().v_reg_of(instruction.v);
-                match instruction.typ {
-                    Type::I64 => {
-                        self.current_block_mut()
-                            .instructions
-                            .push(Amd64Instr::movsx_rm_r(ExtMode::LQ, Operand::reg(src), dst));
-                    }
-                    _ => panic!("unsupported amd64 sextend type: {:?}", instruction.typ),
-                }
+                let (from, to, signed) = instruction.extend_data();
+                let mode = match (from, to, signed) {
+                    (8, 16, true) => ExtMode::BQ,
+                    (8, 32, true) => ExtMode::BL,
+                    (8, 64, true) => ExtMode::BQ,
+                    (16, 32, true) => ExtMode::WL,
+                    (16, 64, true) => ExtMode::WQ,
+                    (32, 64, true) => ExtMode::LQ,
+                    _ => panic!(
+                        "unsupported amd64 sextend metadata: from={from}, to={to}, signed={signed}"
+                    ),
+                };
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::movsx_rm_r(mode, Operand::reg(src), dst));
             }
             Opcode::Ishl | Opcode::Ushr | Opcode::Sshr | Opcode::Rotl | Opcode::Rotr => {
                 let dst = self.compiler().v_reg_of(instruction.return_());
@@ -2231,7 +2245,7 @@ mod tests {
         m.format()
     }
 
-    fn lower_uextend_opcode() -> String {
+    fn lower_uextend_opcode(src_ty: Type, dst_ty: Type, from: u8, to: u8) -> String {
         let mut m = Amd64Machine::new();
         m.start_lowering_function(BasicBlockId(0));
         m.start_block(BasicBlockId(0));
@@ -2244,16 +2258,16 @@ mod tests {
         let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
         m.set_compiler(ptr);
 
-        let mut instruction = crate::ssa::Instruction::new().with_opcode(Opcode::UExtend);
-        instruction.v = Value(0).with_type(Type::I32);
-        instruction.r_value = Value(1).with_type(Type::I64);
-        instruction.typ = Type::I64;
+        let instruction =
+            crate::ssa::Instruction::new().as_uextend(Value(0).with_type(src_ty), from, to);
+        let mut instruction = instruction;
+        instruction.r_value = Value(1).with_type(dst_ty);
 
         m.lower_instr(&instruction);
         m.format()
     }
 
-    fn lower_sextend_opcode() -> String {
+    fn lower_sextend_opcode(src_ty: Type, dst_ty: Type, from: u8, to: u8) -> String {
         let mut m = Amd64Machine::new();
         m.start_lowering_function(BasicBlockId(0));
         m.start_block(BasicBlockId(0));
@@ -2266,10 +2280,10 @@ mod tests {
         let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
         m.set_compiler(ptr);
 
-        let mut instruction = crate::ssa::Instruction::new().with_opcode(Opcode::SExtend);
-        instruction.v = Value(0).with_type(Type::I32);
-        instruction.r_value = Value(1).with_type(Type::I64);
-        instruction.typ = Type::I64;
+        let instruction =
+            crate::ssa::Instruction::new().as_sextend(Value(0).with_type(src_ty), from, to);
+        let mut instruction = instruction;
+        instruction.r_value = Value(1).with_type(dst_ty);
 
         m.lower_instr(&instruction);
         m.format()
@@ -3207,14 +3221,38 @@ mod tests {
 
     #[test]
     fn lowers_uextend_i32_to_i64_to_amd64_movzx_lq() {
-        let formatted = lower_uextend_opcode();
+        let formatted = lower_uextend_opcode(Type::I32, Type::I64, 32, 64);
         assert!(formatted.contains("movzx.lq %rax, %rsi"));
     }
 
     #[test]
     fn lowers_sextend_i32_to_i64_to_amd64_movsx_lq() {
-        let formatted = lower_sextend_opcode();
+        let formatted = lower_sextend_opcode(Type::I32, Type::I64, 32, 64);
         assert!(formatted.contains("movsx.lq %rax, %rsi"));
+    }
+
+    #[test]
+    fn lowers_sextend_i32_extend8_s_to_amd64_movsx_bl() {
+        let formatted = lower_sextend_opcode(Type::I32, Type::I32, 8, 32);
+        assert!(formatted.contains("movsx.bl"));
+    }
+
+    #[test]
+    fn lowers_sextend_i32_extend16_s_to_amd64_movsx_wl() {
+        let formatted = lower_sextend_opcode(Type::I32, Type::I32, 16, 32);
+        assert!(formatted.contains("movsx.wl"));
+    }
+
+    #[test]
+    fn lowers_sextend_i64_extend8_s_to_amd64_movsx_bq() {
+        let formatted = lower_sextend_opcode(Type::I64, Type::I64, 8, 64);
+        assert!(formatted.contains("movsx.bq %rax, %rsi"));
+    }
+
+    #[test]
+    fn lowers_sextend_i64_extend16_s_to_amd64_movsx_wq() {
+        let formatted = lower_sextend_opcode(Type::I64, Type::I64, 16, 64);
+        assert!(formatted.contains("movsx.wq %rax, %rsi"));
     }
 
     #[test]

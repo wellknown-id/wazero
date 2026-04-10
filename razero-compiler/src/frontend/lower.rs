@@ -206,8 +206,14 @@ impl<'a> Compiler<'a> {
             OPCODE_I64_TRUNC_F32_U => self.lower_typed_unary(Opcode::FcvtToUint, Type::I64),
             OPCODE_I64_TRUNC_F64_S => self.lower_typed_unary(Opcode::FcvtToSint, Type::I64),
             OPCODE_I64_TRUNC_F64_U => self.lower_typed_unary(Opcode::FcvtToUint, Type::I64),
-            OPCODE_I64_EXTEND_I32_S => self.lower_typed_unary(Opcode::SExtend, Type::I64),
-            OPCODE_I64_EXTEND_I32_U => self.lower_typed_unary(Opcode::UExtend, Type::I64),
+            OPCODE_I32_EXTEND8_S => self.insert_integer_extend(true, 8, 32),
+            OPCODE_I32_EXTEND16_S => self.insert_integer_extend(true, 16, 32),
+            OPCODE_I64_EXTEND8_S => self.insert_integer_extend(true, 8, 64),
+            OPCODE_I64_EXTEND16_S => self.insert_integer_extend(true, 16, 64),
+            OPCODE_I64_EXTEND32_S | OPCODE_I64_EXTEND_I32_S => {
+                self.insert_integer_extend(true, 32, 64)
+            }
+            OPCODE_I64_EXTEND_I32_U => self.insert_integer_extend(false, 32, 64),
             OPCODE_I32_REINTERPRET_F32 => self.lower_typed_unary(Opcode::Bitcast, Type::I32),
             OPCODE_I64_REINTERPRET_F64 => self.lower_typed_unary(Opcode::Bitcast, Type::I64),
             OPCODE_F32_REINTERPRET_I32 => self.lower_typed_unary(Opcode::Bitcast, Type::F32),
@@ -1113,14 +1119,33 @@ impl<'a> Compiler<'a> {
         self.ssa_builder.instruction(id).return_()
     }
 
-    fn emit_uextend(&mut self, value: Value, ty: Type) -> Value {
-        let mut instr = self
-            .ssa_builder
-            .allocate_instruction()
-            .with_opcode(Opcode::UExtend);
-        instr.v = value;
-        instr.typ = ty;
+    fn insert_integer_extend(&mut self, signed: bool, from: u8, to: u8) {
+        if self.lowering_state.unreachable {
+            return;
+        }
+        let value = self.lowering_state.pop();
+        let instr = if signed {
+            self.ssa_builder
+                .allocate_instruction()
+                .as_sextend(value, from, to)
+        } else {
+            self.ssa_builder
+                .allocate_instruction()
+                .as_uextend(value, from, to)
+        };
         let id = self.ssa_builder.insert_instruction(instr);
+        self.lowering_state
+            .push(self.ssa_builder.instruction(id).return_());
+    }
+
+    fn emit_uextend(&mut self, value: Value, ty: Type) -> Value {
+        let id = self.ssa_builder.insert_instruction(
+            self.ssa_builder.allocate_instruction().as_uextend(
+                value,
+                value.ty().bits() as u8,
+                ty.bits() as u8,
+            ),
+        );
         self.ssa_builder.instruction(id).return_()
     }
 
@@ -2088,6 +2113,50 @@ mod tests {
         assert_eq!(
             compiler.format(),
             "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:f64)\n\tv3:i64 = FcvtToUint v2, exec_ctx\n\tJump blk_ret, v3\n"
+        );
+    }
+
+    #[test]
+    fn lowers_i32_extend8_s_to_ssa() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_I32_EXTEND8_S, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i32)\n\tv3:i32 = SExtend v2\n\tJump blk_ret, v3\n"
+        );
+    }
+
+    #[test]
+    fn lowers_i64_extend32_s_to_ssa() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I64], &[ValueType::I64])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOCAL_GET, 0, OPCODE_I64_EXTEND32_S, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut compiler = compiler_for(&module);
+        compiler.init_with_module_function(0, false);
+        compiler.lower_to_ssa();
+
+        assert_eq!(
+            compiler.format(),
+            "\nblk0: (exec_ctx:i64, module_ctx:i64, v2:i64)\n\tv3:i64 = SExtend v2\n\tJump blk_ret, v3\n"
         );
     }
 
