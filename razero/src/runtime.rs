@@ -1936,6 +1936,14 @@ mod tests {
         configs
     }
 
+    fn secure_memory_runtime_configs() -> Vec<RuntimeConfig> {
+        let mut configs = vec![RuntimeConfig::new_interpreter().with_secure_mode(true)];
+        if compiler_supported() {
+            configs.push(RuntimeConfig::new_compiler().with_secure_mode(true));
+        }
+        configs
+    }
+
     fn deny_env_host_calls(_ctx: &Context, request: &HostCallPolicyRequest) -> bool {
         request
             .function
@@ -4830,6 +4838,102 @@ mod tests {
                 .expect("guest memory should be exported")
                 .read_u32_le(0)
         );
+    }
+
+    #[test]
+    fn imported_host_function_oob_writes_are_rejected_in_secure_mode() {
+        let guest_bytes = [
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x02, 0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b'w', b'r', b'i', b't', b'e', 0x00,
+            0x00, 0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x10, 0x02, 0x03,
+            b'r', b'u', b'n', 0x00, 0x01, 0x06, b'm', b'e', b'm', b'o', b'r', b'y', 0x02, 0x00,
+            0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+        ];
+
+        for config in secure_memory_runtime_configs() {
+            let runtime = Runtime::with_config(config);
+            runtime
+                .new_host_module_builder("env")
+                .new_function_builder()
+                .with_callback(
+                    |_ctx, module, _params| {
+                        let memory = module.memory().expect("guest memory should be present");
+                        let size = memory.size();
+                        assert!(memory.write_u32_le(size - 4, 42));
+                        assert!(!memory.write_u32_le(size - 3, 99));
+                        Ok(Vec::new())
+                    },
+                    &[],
+                    &[],
+                )
+                .export("write")
+                .instantiate(&Context::default())
+                .unwrap();
+
+            let guest = runtime
+                .instantiate_binary(&guest_bytes, ModuleConfig::new())
+                .unwrap();
+
+            guest.exported_function("run").unwrap().call(&[]).unwrap();
+
+            let memory = guest.memory().expect("guest memory should be exported");
+            let size = memory.size();
+            assert_eq!(Some(42), memory.read_u32_le(size - 4));
+            assert_eq!(None, memory.read_u32_le(size - 3));
+        }
+    }
+
+    #[test]
+    fn imported_host_function_oob_reads_return_none_in_secure_mode() {
+        if !compiler_supported() {
+            return;
+        }
+
+        let guest_bytes = [
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x02, 0x0c, 0x01, 0x03, b'e', b'n', b'v', 0x04, b'r', b'e', b'a', b'd', 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x10, 0x02, 0x03, b'r',
+            b'u', b'n', 0x00, 0x01, 0x06, b'm', b'e', b'm', b'o', b'r', b'y', 0x02, 0x00, 0x0a,
+            0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+        ];
+
+        for config in [RuntimeConfig::new_compiler().with_secure_mode(true)] {
+            let runtime = Runtime::with_config(config);
+            let observed = Arc::new(Mutex::new(Vec::new()));
+            runtime
+                .new_host_module_builder("env")
+                .new_function_builder()
+                .with_callback(
+                    {
+                        let observed = observed.clone();
+                        move |_ctx, module, _params| {
+                            let memory = module.memory().expect("guest memory should be present");
+                            let size = memory.size();
+                            assert!(memory.write_u32_le(size - 4, 0x1122_3344));
+                            observed
+                                .lock()
+                                .expect("observations poisoned")
+                                .push((memory.read_u32_le(size - 4), memory.read_u32_le(size - 3)));
+                            Ok(Vec::new())
+                        }
+                    },
+                    &[],
+                    &[],
+                )
+                .export("read")
+                .instantiate(&Context::default())
+                .unwrap();
+
+            let guest = runtime
+                .instantiate_binary(&guest_bytes, ModuleConfig::new())
+                .unwrap();
+
+            guest.exported_function("run").unwrap().call(&[]).unwrap();
+            assert_eq!(
+                vec![(Some(0x1122_3344), None)],
+                *observed.lock().expect("observations poisoned")
+            );
+        }
     }
 
     #[test]
