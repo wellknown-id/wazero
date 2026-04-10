@@ -829,15 +829,18 @@ impl BackendMachine for Amd64Machine {
                 let op = match (instruction.v.ty(), instruction.typ) {
                     (Type::I32, Type::F32) => SseOpcode::Cvtsi2ss,
                     (Type::I32, Type::F64) => SseOpcode::Cvtsi2sd,
+                    (Type::I64, Type::F32) => SseOpcode::Cvtsi2ss,
+                    (Type::I64, Type::F64) => SseOpcode::Cvtsi2sd,
                     _ => panic!(
                         "unsupported amd64 signed int-to-float conversion: {:?} -> {:?}",
                         instruction.v.ty(),
                         instruction.typ
                     ),
                 };
+                let src_64 = matches!(instruction.v.ty(), Type::I64);
                 self.current_block_mut()
                     .instructions
-                    .push(Amd64Instr::gpr_to_xmm(op, Operand::reg(src), dst, false));
+                    .push(Amd64Instr::gpr_to_xmm(op, Operand::reg(src), dst, src_64));
             }
             Opcode::FcvtFromUint => {
                 let dst = self.compiler().v_reg_of(instruction.return_());
@@ -2153,6 +2156,18 @@ mod tests {
     fn lowers_i32_to_f64_with_cvtsi2sd_sequence() {
         let formatted = lower_fcvt_from_sint_opcode(Type::I32, Type::F64);
         assert!(formatted.contains("cvtsi2sd %eax, %xmm2"));
+    }
+
+    #[test]
+    fn lowers_i64_to_f32_with_cvtsi2ss_sequence() {
+        let formatted = lower_fcvt_from_sint_opcode(Type::I64, Type::F32);
+        assert!(formatted.contains("cvtsi2ss %rax, %xmm2"));
+    }
+
+    #[test]
+    fn lowers_i64_to_f64_with_cvtsi2sd_sequence() {
+        let formatted = lower_fcvt_from_sint_opcode(Type::I64, Type::F64);
+        assert!(formatted.contains("cvtsi2sd %rax, %xmm2"));
     }
 
     #[test]
