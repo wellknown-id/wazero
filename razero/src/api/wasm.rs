@@ -400,6 +400,62 @@ impl MemoryDefinition {
     }
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GlobalDefinition {
+    value_type: ValueType,
+    is_mutable: bool,
+    export_names: Vec<String>,
+    module_name: Option<String>,
+    import: Option<(String, String)>,
+}
+
+impl GlobalDefinition {
+    pub fn new(value_type: ValueType, is_mutable: bool) -> Self {
+        Self {
+            value_type,
+            is_mutable,
+            ..Self::default()
+        }
+    }
+
+    pub fn with_module_name(mut self, module_name: Option<String>) -> Self {
+        self.module_name = module_name;
+        self
+    }
+
+    pub fn with_export_name(mut self, export_name: impl Into<String>) -> Self {
+        self.export_names.push(export_name.into());
+        self
+    }
+
+    pub fn with_import(mut self, module: impl Into<String>, name: impl Into<String>) -> Self {
+        self.import = Some((module.into(), name.into()));
+        self
+    }
+
+    pub fn value_type(&self) -> ValueType {
+        self.value_type
+    }
+
+    pub fn is_mutable(&self) -> bool {
+        self.is_mutable
+    }
+
+    pub fn module_name(&self) -> Option<&str> {
+        self.module_name.as_deref()
+    }
+
+    pub fn export_names(&self) -> &[String] {
+        &self.export_names
+    }
+
+    pub fn import(&self) -> Option<(&str, &str)> {
+        self.import
+            .as_ref()
+            .map(|(module, name)| (module.as_str(), name.as_str()))
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CustomSection {
     name: String,
@@ -1673,8 +1729,8 @@ mod tests {
     use super::{
         decode_externref, decode_f32, decode_f64, decode_i32, decode_u32, encode_externref,
         encode_f32, encode_f64, encode_i32, encode_i64, encode_u32, extern_type_name,
-        value_type_name, ExternType, FunctionDefinition, Global, GlobalValue, MemoryDefinition,
-        ValueType,
+        value_type_name, ExternType, FunctionDefinition, Global, GlobalDefinition, GlobalValue,
+        MemoryDefinition, ValueType,
     };
     use std::{
         f32, f64,
@@ -1713,6 +1769,20 @@ mod tests {
         assert_eq!(Some("guest"), definition.module_name());
         assert_eq!(Some(("env", "memory")), definition.import());
         assert_eq!(&["memory".to_string()], definition.export_names());
+    }
+
+    #[test]
+    fn global_definition_tracks_metadata() {
+        let definition = GlobalDefinition::new(ValueType::I64, true)
+            .with_module_name(Some("guest".to_string()))
+            .with_import("env", "counter")
+            .with_export_name("counter");
+
+        assert_eq!(ValueType::I64, definition.value_type());
+        assert!(definition.is_mutable());
+        assert_eq!(Some("guest"), definition.module_name());
+        assert_eq!(Some(("env", "counter")), definition.import());
+        assert_eq!(&["counter".to_string()], definition.export_names());
     }
 
     #[test]
