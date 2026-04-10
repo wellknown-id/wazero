@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use crate::{api::wasm::FunctionDefinition, ctx_keys::Context};
+use crate::{
+    api::wasm::{FunctionDefinition, ValueType},
+    ctx_keys::Context,
+};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
@@ -26,6 +29,34 @@ impl YieldPolicyRequest {
 
     pub fn caller_module_name(&self) -> Option<&str> {
         self.caller_module_name.as_deref()
+    }
+
+    pub fn param_types(&self) -> Option<&[ValueType]> {
+        self.function.as_ref().map(FunctionDefinition::param_types)
+    }
+
+    pub fn result_types(&self) -> Option<&[ValueType]> {
+        self.function.as_ref().map(FunctionDefinition::result_types)
+    }
+
+    pub fn param_names(&self) -> Option<&[String]> {
+        self.function.as_ref().map(FunctionDefinition::param_names)
+    }
+
+    pub fn result_names(&self) -> Option<&[String]> {
+        self.function.as_ref().map(FunctionDefinition::result_names)
+    }
+
+    pub fn param_count(&self) -> usize {
+        self.param_types().map_or(0, <[ValueType]>::len)
+    }
+
+    pub fn result_count(&self) -> usize {
+        self.result_types().map_or(0, <[ValueType]>::len)
+    }
+
+    pub fn import(&self) -> Option<(&str, &str)> {
+        self.function.as_ref().and_then(FunctionDefinition::import)
     }
 }
 
@@ -80,7 +111,7 @@ pub fn get_yield_policy(ctx: &Context) -> Option<Arc<dyn YieldPolicy>> {
 #[cfg(test)]
 mod tests {
     use super::{get_yield_policy, with_yield_policy, IntoYieldPolicy, YieldPolicyRequest};
-    use crate::{ctx_keys::ContextKey, Context, FunctionDefinition};
+    use crate::{ctx_keys::ContextKey, Context, FunctionDefinition, ValueType};
 
     fn allow_all(_ctx: &Context, _request: &YieldPolicyRequest) -> bool {
         true
@@ -124,6 +155,50 @@ mod tests {
         let policy = get_yield_policy(&ctx).expect("policy should be present");
 
         assert!(policy.allow_yield(&ctx, &YieldPolicyRequest::new().with_function(function)));
+    }
+
+    #[test]
+    fn yield_policy_request_exposes_signature_metadata() {
+        let function = FunctionDefinition::new("host.yield")
+            .with_signature(vec![ValueType::I32, ValueType::I64], vec![ValueType::F32])
+            .with_parameter_names(vec!["ptr".to_string(), "len".to_string()])
+            .with_result_names(vec!["ok".to_string()]);
+        let request = YieldPolicyRequest::new().with_function(function);
+
+        assert_eq!(
+            Some(&[ValueType::I32, ValueType::I64][..]),
+            request.param_types()
+        );
+        assert_eq!(Some(&[ValueType::F32][..]), request.result_types());
+        assert_eq!(
+            Some(&["ptr".to_string(), "len".to_string()][..]),
+            request.param_names()
+        );
+        assert_eq!(Some(&["ok".to_string()][..]), request.result_names());
+        assert_eq!(2, request.param_count());
+        assert_eq!(1, request.result_count());
+    }
+
+    #[test]
+    fn yield_policy_request_exposes_import_metadata() {
+        let function = FunctionDefinition::new("host.yield").with_import("env", "yield_now");
+        let request = YieldPolicyRequest::new().with_function(function);
+
+        assert_eq!(Some(("env", "yield_now")), request.import());
+    }
+
+    #[test]
+    fn yield_policy_request_defaults_to_empty_metadata() {
+        let request = YieldPolicyRequest::new();
+
+        assert_eq!(None, request.param_types());
+        assert_eq!(None, request.result_types());
+        assert_eq!(None, request.param_names());
+        assert_eq!(None, request.result_names());
+        assert_eq!(None, request.caller_module_name());
+        assert_eq!(0, request.param_count());
+        assert_eq!(0, request.result_count());
+        assert_eq!(None, request.import());
     }
 
     #[test]
