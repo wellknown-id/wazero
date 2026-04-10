@@ -643,11 +643,7 @@ fn ext_mode_from_u64(raw: u64) -> ExtMode {
 }
 
 fn sse_opcode_from_u64(raw: u64) -> SseOpcode {
-    match raw {
-        0 => SseOpcode::Movss,
-        1 => SseOpcode::Movsd,
-        _ => SseOpcode::Movdqu,
-    }
+    SseOpcode::from_u64(raw)
 }
 
 fn lower32will_sign_extend_to64(value: u64) -> bool {

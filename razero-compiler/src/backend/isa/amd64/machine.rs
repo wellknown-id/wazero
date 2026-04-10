@@ -683,6 +683,36 @@ impl BackendMachine for Amd64Machine {
                     .instructions
                     .push(Amd64Instr::unary_rm_r(op, Operand::reg(src), dst, is_64));
             }
+            Opcode::Fadd | Opcode::Fsub | Opcode::Fmul | Opcode::Fdiv => {
+                let dst = self.compiler().v_reg_of(instruction.return_());
+                let lhs = self.compiler().v_reg_of(instruction.v);
+                let rhs = self.compiler().v_reg_of(instruction.v2);
+                let op = match (instruction.opcode, instruction.typ) {
+                    (Opcode::Fadd, Type::F32) => SseOpcode::Addss,
+                    (Opcode::Fadd, Type::F64) => SseOpcode::Addsd,
+                    (Opcode::Fsub, Type::F32) => SseOpcode::Subss,
+                    (Opcode::Fsub, Type::F64) => SseOpcode::Subsd,
+                    (Opcode::Fmul, Type::F32) => SseOpcode::Mulss,
+                    (Opcode::Fmul, Type::F64) => SseOpcode::Mulsd,
+                    (Opcode::Fdiv, Type::F32) => SseOpcode::Divss,
+                    (Opcode::Fdiv, Type::F64) => SseOpcode::Divsd,
+                    _ => panic!("unsupported amd64 float arithmetic type: {:?}", instruction.typ),
+                };
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::xmm_unary_rm_r(
+                        match instruction.typ {
+                            Type::F32 => SseOpcode::Movss,
+                            Type::F64 => SseOpcode::Movsd,
+                            _ => unreachable!(),
+                        },
+                        Operand::reg(lhs),
+                        dst,
+                    ));
+                self.current_block_mut()
+                    .instructions
+                    .push(Amd64Instr::xmm_unary_rm_r(op, Operand::reg(rhs), dst));
+            }
             Opcode::Icmp => {
                 let dst = self.compiler().v_reg_of(instruction.return_());
                 let cond = Self::integer_cmp_cond_from_u8(instruction.u1 as u8);
@@ -1467,6 +1497,30 @@ mod tests {
         m.format()
     }
 
+    fn lower_float_binary_opcode(opcode: Opcode, ty: Type) -> String {
+        let mut m = Amd64Machine::new();
+        m.start_lowering_function(BasicBlockId(0));
+        m.start_block(BasicBlockId(0));
+
+        let mut compiler = Box::new(TestCompilerContext::default());
+        compiler.regs = vec![
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::XMM0, RegType::Float),
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::XMM1, RegType::Float),
+            VReg::from_real_reg(crate::backend::isa::amd64::reg::XMM2, RegType::Float),
+        ];
+        let ptr = NonNull::from(compiler.as_mut() as &mut dyn CompilerContext);
+        m.set_compiler(ptr);
+
+        let mut instruction = crate::ssa::Instruction::new().with_opcode(opcode);
+        instruction.v = Value(0).with_type(ty);
+        instruction.v2 = Value(1).with_type(ty);
+        instruction.r_value = Value(2).with_type(ty);
+        instruction.typ = ty;
+
+        m.lower_instr(&instruction);
+        m.format()
+    }
+
     fn lower_icmp_opcode(ty: Type, cond: IntegerCmpCond) -> String {
         let mut m = Amd64Machine::new();
         m.start_lowering_function(BasicBlockId(0));
@@ -1630,6 +1684,27 @@ mod tests {
         assert!(formatted.contains("cmpq "));
         assert!(formatted.contains("setb"));
         assert!(formatted.contains("movzx.bq"));
+    }
+
+    #[test]
+    fn lowers_f32_add_with_sse_sequence() {
+        let formatted = lower_float_binary_opcode(Opcode::Fadd, Type::F32);
+        assert!(formatted.contains("movss %xmm0, %xmm2"));
+        assert!(formatted.contains("addss %xmm1, %xmm2"));
+    }
+
+    #[test]
+    fn lowers_f64_sub_with_sse_sequence() {
+        let formatted = lower_float_binary_opcode(Opcode::Fsub, Type::F64);
+        assert!(formatted.contains("movsd %xmm0, %xmm2"));
+        assert!(formatted.contains("subsd %xmm1, %xmm2"));
+    }
+
+    #[test]
+    fn lowers_f64_div_with_sse_sequence() {
+        let formatted = lower_float_binary_opcode(Opcode::Fdiv, Type::F64);
+        assert!(formatted.contains("movsd %xmm0, %xmm2"));
+        assert!(formatted.contains("divsd %xmm1, %xmm2"));
     }
 
     #[test]

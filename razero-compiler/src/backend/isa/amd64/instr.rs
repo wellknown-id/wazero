@@ -848,22 +848,14 @@ impl fmt::Display for Amd64Instr {
             InstructionKind::XmmUnaryRmR => write!(
                 f,
                 "{} {}, {}",
-                match d.u1 {
-                    0 => SseOpcode::Movss,
-                    1 => SseOpcode::Movsd,
-                    _ => SseOpcode::Movdqu,
-                },
+                SseOpcode::from_u64(d.u1),
                 op1.expect("xmm src").format(false),
                 op2.expect("xmm dst").format(false)
             ),
             InstructionKind::XmmMovRM => write!(
                 f,
                 "{} {}, {}",
-                match d.u1 {
-                    0 => SseOpcode::Movss,
-                    1 => SseOpcode::Movsd,
-                    _ => SseOpcode::Movdqu,
-                },
+                SseOpcode::from_u64(d.u1),
                 op1.expect("xmmmov src").format(true),
                 op2.expect("xmmmov dst").format(true)
             ),
