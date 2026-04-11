@@ -14,11 +14,13 @@ Currently, we have the following fuzzing targets:
 - `no_diff`: generates terminating Wasm modules and compares native Rust execution outcomes between standard and secure mode.
 - `memory_no_diff`: same as `no_diff`, and also compares the final guest memory snapshot between modes.
 - `logging_no_diff`: same as `no_diff`, and also compares listener/log formatting output between modes.
+- `policy_no_diff`: replays fixed cooperative-yield guest scenarios and compares policy-denied / trap-observer behavior between standard and secure mode.
 - `validation`: compiles maybe-invalid Wasm module binaries with the native Rust runtime to ensure validation and compilation do not panic.
 
 `cargo test` in this workspace also runs deterministic replay coverage for
-`fac.wasm`, `mem_grow.wasm`, an additional bundled `test.wasm` fixture, and
-fixed seed inputs shared across all native targets.
+`fac.wasm`, `mem_grow.wasm`, `oob_load.wasm`, the cooperative-yield fixture,
+an additional bundled `test.wasm` fixture, and fixed seed inputs shared across
+all native targets.
 
 
 To run the fuzzer on a target, execute the following command:
@@ -50,6 +52,9 @@ $ cargo fuzz run memory_no_diff --sanitizer=none --no-trace-compares -- -timeout
 
 # Running the `validation` target with 4 concurrent jobs with timeout 2hrs and setting timeout per fuzz case to 30s.
 # cargo fuzz run validation --sanitizer=none --no-trace-compares -- -timeout=30 -max_total_time=7200 -jobs=4
+
+# Running the `policy_no_diff` target to compare policy denial and trap-observer behavior.
+$ cargo fuzz run policy_no_diff --sanitizer=none --no-trace-compares -- -max_total_time=3600 -jobs=4
 ```
 
 Note that `--sanitizer=none` and `--no-trace-compares` are always recommended to use because the sanitizer is not useful for our use case plus this will speed up the fuzzing by like multiple times.
@@ -65,6 +70,9 @@ WASM_BINARY_PATH=fuzz/artifacts/no_diff/crash-... \
 
 WASM_BINARY_PATH=fuzz/artifacts/validation/crash-... \
   cargo test --manifest-path internal/integration_test/fuzz/fuzz/Cargo.toml --test native_replay rerun_failed_native_validation_case -- --exact --nocapture
+
+FUZZ_INPUT_PATH=fuzz/artifacts/policy_no_diff/crash-... \
+  cargo test --manifest-path internal/integration_test/fuzz/fuzz/Cargo.toml --test native_replay rerun_failed_native_policy_case -- --exact --nocapture
 ```
 
 `cargo fuzz tmin` still works to minimize the crashing input while preserving the native Rust failure.
