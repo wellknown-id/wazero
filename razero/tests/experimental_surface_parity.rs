@@ -531,6 +531,46 @@ fn module_exported_table_definitions_round_trip_through_public_surface() {
 }
 
 #[test]
+fn module_imported_function_definitions_round_trip_through_public_surface() {
+    let runtime = Runtime::new();
+    runtime
+        .new_host_module_builder("env")
+        .new_function_builder()
+        .with_func(
+            |_ctx, _module, _params| Ok(vec![7]),
+            &[ValueType::I32],
+            &[ValueType::I32],
+        )
+        .with_name("hook_impl")
+        .with_parameter_names(&["value"])
+        .with_result_names(&["result"])
+        .export("hook")
+        .instantiate(&Context::default())
+        .unwrap();
+
+    let guest = runtime
+        .instantiate_binary(
+            &[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f,
+                0x01, 0x7f, 0x02, 0x0c, 0x01, 0x03, b'e', b'n', b'v', 0x04, b'h', b'o', b'o', b'k',
+                0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00,
+                0x01, 0x0a, 0x08, 0x01, 0x06, 0x00, 0x41, 0x2a, 0x10, 0x00, 0x0b,
+            ],
+            ModuleConfig::new().with_name("guest"),
+        )
+        .unwrap();
+
+    let imported = guest.imported_function_definitions();
+    assert_eq!(1, imported.len());
+    let definition = &imported[0];
+    assert_eq!("", definition.name());
+    assert_eq!(None, definition.module_name());
+    assert_eq!(Some(("env", "hook")), definition.import());
+    assert_eq!(&[ValueType::I32], definition.param_types());
+    assert_eq!(&[ValueType::I32], definition.result_types());
+}
+
+#[test]
 fn linear_memory_is_empty_tracks_length() {
     let mut memory = LinearMemory::new(8, 16);
     assert!(!memory.is_empty());
