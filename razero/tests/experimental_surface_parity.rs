@@ -227,6 +227,29 @@ fn yielder_public_surface_enables_runtime_injection() {
 }
 
 #[test]
+fn yield_error_resumer_round_trips_through_public_surface() {
+    struct TestResumer;
+
+    impl razero::Resumer for TestResumer {
+        fn resume(&self, _ctx: &Context, host_results: &[u64]) -> razero::Result<Vec<u64>> {
+            Ok(host_results.to_vec())
+        }
+
+        fn cancel(&self) {}
+    }
+
+    let err_none = razero::YieldError::new(None);
+    assert!(err_none.resumer().is_none());
+
+    let resumer: Arc<dyn razero::Resumer> = Arc::new(TestResumer);
+    let err = razero::YieldError::new(Some(resumer.clone()));
+    assert!(Arc::ptr_eq(
+        &resumer,
+        &err.resumer().expect("resumer should be present")
+    ));
+}
+
+#[test]
 fn memory_allocator_round_trips_through_public_surface() {
     let ctx = with_memory_allocator(&Context::default(), |cap, max| {
         Some(LinearMemory::new(cap, max))
