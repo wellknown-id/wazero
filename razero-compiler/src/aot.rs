@@ -1641,6 +1641,14 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
             "aot metadata: passive data segment with offset expression".to_string(),
         ));
     }
+    if data_segments
+        .iter()
+        .any(|segment| !segment.passive && segment.offset_expression.is_empty())
+    {
+        return Err(AotMetadataError::InvalidHeader(
+            "aot metadata: active data segment requires offset expression".to_string(),
+        ));
+    }
     if module_shape.element_segment_count as usize != element_segments.len() {
         return Err(AotMetadataError::InvalidHeader(
             "aot metadata: element segment count mismatch".to_string(),
@@ -1651,6 +1659,13 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
     }) {
         return Err(AotMetadataError::InvalidHeader(
             "aot metadata: passive/declarative element with offset expression".to_string(),
+        ));
+    }
+    if element_segments.iter().any(|element| {
+        matches!(element.mode, ElementMode::Active) && element.offset_expression.is_empty()
+    }) {
+        return Err(AotMetadataError::InvalidHeader(
+            "aot metadata: active element requires offset expression".to_string(),
         ));
     }
     if module_shape.local_function_count as usize != functions.len() {
