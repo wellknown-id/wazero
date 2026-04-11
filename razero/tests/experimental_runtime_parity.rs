@@ -476,6 +476,83 @@ fn yield_policy_denial_notifies_trap_observer_via_public_runtime() {
 }
 
 #[test]
+fn yield_policy_observer_reports_direct_host_export_denial_before_trap() {
+    let runtime = Runtime::new();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let module = runtime
+        .new_host_module_builder("example")
+        .new_function_builder()
+        .with_func(
+            |ctx, _module, _params| {
+                get_yielder(&ctx)
+                    .expect("yielder should be injected")
+                    .r#yield();
+                Ok(vec![0])
+            },
+            &[],
+            &[ValueType::I32],
+        )
+        .with_name("async_work_impl")
+        .export("async_work")
+        .instantiate(&Context::default())
+        .unwrap();
+
+    let policy_ctx = with_yield_policy(&with_yielder(&Context::default()), deny_all_yields);
+    let observer_ctx = with_yield_policy_observer(&policy_ctx, {
+        let events = events.clone();
+        move |_ctx: &Context, observation: YieldPolicyObservation| {
+            events.lock().expect("yield policy events poisoned").push((
+                "policy".to_string(),
+                observation.module.name().map(str::to_string),
+                observation.request.name().map(str::to_string),
+                observation.request.caller_module_name().map(str::to_string),
+                observation.decision,
+            ));
+        }
+    });
+    let ctx = with_trap_observer(&observer_ctx, {
+        let events = events.clone();
+        move |_ctx: &Context, observation: razero::TrapObservation| {
+            events.lock().expect("yield policy events poisoned").push((
+                "trap".to_string(),
+                observation.module.name().map(str::to_string),
+                None,
+                None,
+                YieldPolicyDecision::Denied,
+            ));
+        }
+    });
+
+    let err = module
+        .exported_function("async_work")
+        .unwrap()
+        .call_with_context(&ctx, &[])
+        .unwrap_err();
+
+    assert_eq!("policy denied: cooperative yield", err.to_string());
+    assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+    assert_eq!(
+        vec![
+            (
+                "policy".to_string(),
+                Some("example".to_string()),
+                Some("async_work_impl".to_string()),
+                Some("example".to_string()),
+                YieldPolicyDecision::Denied,
+            ),
+            (
+                "trap".to_string(),
+                Some("example".to_string()),
+                None,
+                None,
+                YieldPolicyDecision::Denied,
+            ),
+        ],
+        *events.lock().expect("yield policy events poisoned")
+    );
+}
+
+#[test]
 fn yield_policy_denies_follow_on_suspension_via_public_resume_path() {
     let (_runtime, guest) = setup_yield_runtime();
 
