@@ -148,6 +148,9 @@ allowed host function later calls `Yield()`.
 - A `TimeProvider` attached to the resume context is what later resumed-segment
   host calls observe. If the resume context omits `TimeProvider`, resumed host
   calls do not inherit the initial call's provider.
+- `Snapshotter` is currently narrower: it is injected for the initial exported
+  call path, but resumed host calls do not currently receive a snapshotter even
+  if the resume context includes `experimental::with_snapshotter`.
 
 ### Import resolution
 
@@ -257,6 +260,7 @@ Instead, the current experimental contract is:
   | runtime defaults | `RuntimeConfig::with_host_call_policy`, `RuntimeConfig::with_yield_policy`, `RuntimeConfig::with_fuel` | Sets a baseline for every module instantiated by that runtime. Call-scoped overrides can still narrow or replace the default later. |
   | instantiation context | `experimental::with_import_resolver_acl`, `experimental::with_import_resolver_config` | Import resolution happens only while instantiating a module, so attach ACL/resolver policy to `compile`, `instantiate`, or `instantiate_with_context` flows. |
   | call / resume context | `experimental::with_yielder`, `experimental::with_trap_observer`, `experimental::with_yield_observer`, `experimental::with_fuel_controller`, `experimental::with_fuel_observer`, `experimental::with_host_call_policy`, `experimental::with_yield_policy`, `experimental::with_time_provider` | These govern a specific execution attempt and can change on `Resume`. Rebuild the resume context with the observers/policies you still want active. |
+  | initial call context only | `experimental::with_snapshotter` | Snapshot capture currently attaches to the initial exported call path; resumed host calls do not currently get a snapshotter re-injected from the resume context. |
 
 - A practical pattern is:
   1. set runtime-wide host/yield defaults once;

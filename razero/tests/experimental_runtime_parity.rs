@@ -917,6 +917,123 @@ fn time_provider_initial_context_does_not_persist_when_resume_omits_one() {
 }
 
 #[test]
+fn snapshotter_is_not_reinjected_on_follow_on_resumed_host_call() {
+    let runtime = Runtime::new();
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    runtime
+        .new_host_module_builder("example")
+        .new_function_builder()
+        .with_func(
+            {
+                let observations = observations.clone();
+                move |ctx, _module, _params| {
+                    observations
+                        .lock()
+                        .expect("snapshotter observations poisoned")
+                        .push(get_snapshotter(&ctx).is_some());
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                }
+            },
+            &[],
+            &[ValueType::I32],
+        )
+        .with_name("async_work")
+        .export("async_work")
+        .instantiate(&Context::default())
+        .unwrap();
+    let guest = runtime
+        .instantiate_binary(YIELD_WASM, ModuleConfig::new())
+        .unwrap();
+
+    let err = guest
+        .exported_function("run_twice")
+        .unwrap()
+        .call_with_context(&with_snapshotter(&with_yielder(&Context::default())), &[])
+        .unwrap_err();
+    let first_resumer = yielded(err).resumer().expect("resumer should be present");
+    assert_eq!(
+        vec![true],
+        *observations
+            .lock()
+            .expect("snapshotter observations poisoned")
+    );
+
+    let err = first_resumer
+        .resume(&with_snapshotter(&with_yielder(&Context::default())), &[40])
+        .unwrap_err();
+    let second_resumer = yielded(err).resumer().expect("resumer should be present");
+
+    assert_eq!(vec![true, false], *observations.lock().expect("snapshotter observations poisoned"));
+    assert_eq!(
+        vec![42],
+        second_resumer
+            .resume(&with_yielder(&Context::default()), &[2])
+            .unwrap()
+    );
+}
+
+#[test]
+fn snapshotter_initial_context_does_not_persist_when_resume_omits_one() {
+    let runtime = Runtime::new();
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    runtime
+        .new_host_module_builder("example")
+        .new_function_builder()
+        .with_func(
+            {
+                let observations = observations.clone();
+                move |ctx, _module, _params| {
+                    observations
+                        .lock()
+                        .expect("snapshotter observations poisoned")
+                        .push(get_snapshotter(&ctx).is_some());
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                }
+            },
+            &[],
+            &[ValueType::I32],
+        )
+        .with_name("async_work")
+        .export("async_work")
+        .instantiate(&Context::default())
+        .unwrap();
+    let guest = runtime
+        .instantiate_binary(YIELD_WASM, ModuleConfig::new())
+        .unwrap();
+
+    let err = guest
+        .exported_function("run_twice")
+        .unwrap()
+        .call_with_context(&with_snapshotter(&with_yielder(&Context::default())), &[])
+        .unwrap_err();
+    let first_resumer = yielded(err).resumer().expect("resumer should be present");
+
+    let err = first_resumer
+        .resume(&with_yielder(&Context::default()), &[40])
+        .unwrap_err();
+    let second_resumer = yielded(err).resumer().expect("resumer should be present");
+
+    assert_eq!(
+        vec![true, false],
+        *observations
+            .lock()
+            .expect("snapshotter observations poisoned")
+    );
+    assert_eq!(
+        vec![42],
+        second_resumer
+            .resume(&with_yielder(&Context::default()), &[2])
+            .unwrap()
+    );
+}
+
+#[test]
 fn yield_policy_context_overrides_runtime_default_via_public_runtime() {
     let (_runtime, guest) =
         setup_yield_runtime_with_config(RuntimeConfig::new().with_yield_policy(deny_all_yields));
