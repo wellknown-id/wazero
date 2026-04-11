@@ -7,15 +7,10 @@ in TinyGo, built with
 (cd testdata; tinygo build -scheduler=none -target=wasip1 -buildmode=c-shared -o greet.wasm greet.go)
 ```
 
-```bash
-$ go run greet.go wazero
-wasm >> Hello, wazero!
-go >> Hello, wazero!
-```
-
 Under the covers, [greet.go](testdata/greet.go) does a few things of interest:
 * Uses `unsafe.Pointer` to change a Go pointer to a numeric type.
 * Uses `reflect.StringHeader` to build back a string from a pointer, len pair.
 * Relies on CGO to allocate memory used to pass data from TinyGo to host.
 
-See https://wazero.io/languages/tinygo/ for more tips.
+In this Rust workspace the directory is kept as a guest fixture; the old
+standalone Go-host walkthrough does not apply directly anymore.

@@ -1,21 +1,14 @@
-## wazero examples
+## razero examples
 
-The following example projects can help you practice WebAssembly with wazero:
+The current example material in this repository falls into two groups:
 
-* [allocation](allocation) - how to pass strings in and out of WebAssembly
-  functions defined in Rust or TinyGo.
-* [assemblyscript](../imports/assemblyscript/example) - how to configure
-  special imports needed by AssemblyScript when not using WASI.
-* [basic](basic) - how to use both WebAssembly and Go-defined functions.
-* [import-go](import-go) - how to define, import and call a Go-defined function
-  from a WebAssembly-defined function.
-* [concurrent-instantiation](concurrent-instantiation) - how to instantiate multiple Wasm instances per Goroutine concurrently.
-* [hello-host](hello-host) - how to run a Wasm module without WASI by supplying a tiny explicit host print API, and how the same guest now maps onto the first Linux/x86_64 native-link path in the Rust port.
-* [multiple-results](multiple-results) - how to return more than one result
-  from WebAssembly or Go-defined functions.
-* [multiple-runtimes](multiple-runtimes) - how to share compilation caches across multiple runtimes.
-* [wasi](../imports/wasi_snapshot_preview1/example) - how to use I/O in your
-  WebAssembly modules using WASI (WebAssembly System Interface).
+- [hello-host](hello-host) - the current Rust host example, including the
+  Linux/ELF-first AOT packaging path.
+- [allocation](allocation) - guest-side allocation fixtures in Rust, TinyGo,
+  and Zig used for string/byte passing experiments.
 
-Please [open an issue](https://github.com/tetratelabs/wazero/issues/new) if you
-would like to see another example.
+Some sibling directories currently contain only fixture/testdata content carried
+over during the port and are not yet standalone walkthroughs.
+
+Please open an issue in this repository if you would like to see another
+end-to-end example.

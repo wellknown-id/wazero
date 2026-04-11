@@ -1,19 +1,14 @@
-## Allocation examples
+## Allocation fixtures
 
-The examples in this directory deal with memory allocation concerns in
-WebAssembly, e.g. How to pass strings in and out of WebAssembly functions.
-
-```bash
-$ go run greet.go wazero
-wasm >> Hello, wazero!
-go >> Hello, wazero!
-```
+This directory keeps guest-side fixtures for memory-allocation experiments in
+WebAssembly, such as passing strings and byte buffers across the host/guest
+boundary.
 
 While the below examples use strings, they are written in a way that would work
 for binary serialization.
 
-* [Rust](rust) - Calls Wasm built with `cargo build --release --target wasm32-unknown-unknown`
-* [TinyGo](tinygo) - Calls Wasm built with `tinygo build -o X.wasm -scheduler=none --no-debug -target=wasi X.go`
+* [Rust](rust) - guest built with `cargo build --release --target wasm32-unknown-unknown`
+* [TinyGo](tinygo) - guest built with `tinygo build -o X.wasm -scheduler=none --no-debug -target=wasip1 X.go`
 * [Zig](zig) - Calls Wasm built with `zig build`
 
 Note: Each of the above languages differ in both terms of exports and runtime
@@ -22,5 +17,6 @@ it. For example, TinyGo exports allocation functions while Rust and Zig don't.
 Also, Rust eagerly collects memory before returning from a Wasm function while TinyGo
 does not.
 
-We still try to keep the examples as close to the same as possible, and
-highlight things to be aware of in the respective source and README files.
+The old Go-host walkthrough from the original porting source no longer exists in
+this Rust workspace, so these directories should currently be read as fixture
+documentation rather than fully runnable host examples.

@@ -1,144 +1,67 @@
-# wazero: the zero dependency WebAssembly runtime for Go developers
+# razero
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/tetratelabs/wazero.svg)](https://pkg.go.dev/github.com/tetratelabs/wazero) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+`razero` is a Rust WebAssembly runtime evolved from an earlier Go codebase into
+a Rust-first workspace. The focus here is embedding untrusted
+Wasm workloads with stronger isolation experiments, deterministic resource
+controls, and explicit host-owned system integration.
 
-WebAssembly is a way to safely run code compiled in other languages. Runtimes
-execute WebAssembly Modules (Wasm), which are most often binaries with a `.wasm`
-extension.
+## Status
 
-wazero is a WebAssembly Core Specification [1.0][1] and [2.0][2] compliant
-runtime written in Go. It has _zero dependencies_, and doesn't rely on CGO.
-This means you can run applications in other languages and still keep cross
-compilation.
+This repository is **experimental**. The workspace version is currently
+`0.0.0`, the public API is still moving, and the repo documents below are the
+best source of truth for what is implemented today.
 
-Import wazero and extend your Go application with code written in any language!
+## Workspace layout
 
-## Example
+The main crates are:
 
-The best way to learn wazero is by trying one of our [examples](examples/README.md). The
-most [basic example](examples/basic) extends a Go application with an addition
-function defined in WebAssembly.
+- `razero` - public embedding/runtime API
+- `razero-compiler` - compiler and AOT/native packaging support
+- `razero-interp` - interpreter engine
+- `razero-wasm`, `razero-decoder`, `razero-platform`, `razero-secmem`,
+  `razero-features`, `razero-ffi` - supporting runtime/compiler crates
 
-## Runtime
+## Quick start
 
-There are two runtime configurations supported in wazero: _Compiler_ is default:
-
-By default, ex `wazero.NewRuntime(ctx)`, the Compiler is used if supported. You
-can also force the interpreter like so:
-
-```go
-r := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfigInterpreter())
-```
-
-### Interpreter
-
-Interpreter is a naive interpreter-based implementation of Wasm virtual
-machine. Its implementation doesn't have any platform (GOARCH, GOOS) specific
-code, therefore _interpreter_ can be used for any compilation target available
-for Go (such as `riscv64`).
-
-### Compiler
-
-Compiler compiles WebAssembly modules into machine code ahead of time (AOT),
-during `Runtime.CompileModule`. This means your WebAssembly functions execute
-natively at runtime. Compiler is faster than Interpreter, often by order of
-magnitude (10x) or more. This is done without host-specific dependencies.
-
-### Conformance
-
-Both runtimes pass WebAssembly Core [1.0][3] and [2.0][4] specification tests
-on supported platforms:
-
-|   Runtime   |                 Usage                  | amd64 | arm64 | others |
-| :---------: | :------------------------------------: | :---: | :---: | :----: |
-| Interpreter | `wazero.NewRuntimeConfigInterpreter()` |  ✅   |  ✅   |   ✅   |
-|  Compiler   |  `wazero.NewRuntimeConfigCompiler()`   |  ✅   |  ✅   |   ❌   |
-
-For the se-wazero Workstream 1 support story (secure mode, fuel metering,
-validation status, and runtime fallback behavior), see
-[SUPPORT_MATRIX.md](SUPPORT_MATRIX.md).
-
-## Support Policy
-
-The below support policy focuses on compatibility concerns of those embedding
-wazero into their Go applications.
-
-### wazero
-
-wazero's [1.0 release][8] happened in March 2023, and is [in use][9] by many
-projects and production sites.
-
-We offer an API stability promise with semantic versioning. In other words, we
-promise to not break any exported function signature without incrementing the
-major version. This does not mean no innovation: New features and behaviors
-happen with a minor version increment, e.g. 1.0.11 to 1.2.0. We also fix bugs
-or change internal details with a patch version, e.g. 1.0.0 to 1.0.1.
-
-You can get the latest version of wazero like this.
+Run the bundled host-import example:
 
 ```bash
-go get github.com/tetratelabs/wazero@latest
+cargo run -p razero --example hello_world
 ```
 
-Please give us a [star][10] if you end up using wazero!
+Expected output:
 
-### Go
+```text
+hello world from guest
+```
 
-wazero has no dependencies except Go and [`x/sys`][12], so the only source of
-conflict in your project's use of wazero is the Go version.
+## Runtime configuration
 
-wazero follows the same version policy as Go's [Release Policy][5]: two
-versions. wazero will ensure these versions work and bugs are valid if there's
-an issue with a current Go version.
+`razero` currently exposes three runtime-engine entry points:
 
-### Platform
+- `RuntimeConfig::new()` - interpreter-first default configuration
+- `RuntimeConfig::new_auto()` - compiler when supported, otherwise interpreter
+- `RuntimeConfig::new_compiler()` / `RuntimeConfig::new_interpreter()` - force a
+  specific engine
 
-wazero has two runtime modes: Interpreter and Compiler. The only supported operating
-systems are ones we test, but that doesn't necessarily mean other operating
-system versions won't work.
+Selected hardening controls are configured directly on `RuntimeConfig`, for
+example:
 
-We currently test Linux (Ubuntu and scratch), MacOS and Windows as packaged by
-[GitHub Actions][6], as well as nested VMs running on Linux for FreeBSD, NetBSD,
-OpenBSD, DragonFly BSD, illumos and Solaris.
+- `with_secure_mode(true)` for guard-page-backed secure-mode execution where
+  supported
+- `with_fuel(...)` for deterministic execution budgeting
+- `with_close_on_context_done(true)` for context-driven termination
 
-We also test cross compilation for many `GOOS` and `GOARCH` combinations.
+For exact platform/runtime support details, see
+[SUPPORT_MATRIX.md](SUPPORT_MATRIX.md).
 
-- Interpreter
-  - Linux is tested on amd64 and arm64 (native) as well as riscv64 via emulation.
-  - Windows, FreeBSD, NetBSD, OpenBSD, DragonFly BSD, illumos and Solaris are
-    tested only on amd64.
-  - macOS is tested only on arm64.
-- Compiler
-  - Linux is tested on amd64 and arm64.
-  - Windows, FreeBSD, NetBSD, DragonFly BSD, illumos and Solaris are
-    tested only on amd64.
-  - macOS is tested only on arm64.
+## Repository guide
 
-wazero has no dependencies and doesn't require CGO. This means it can also be
-embedded in an application that doesn't use an operating system. This is a main
-differentiator between wazero and alternatives.
-
-We verify zero dependencies by running tests in Docker's [scratch image][7].
-This approach ensures compatibility with any parent image.
-
-### macOS code-signing entitlements
-
-If you're developing for macOS and need to code-sign your application,
-please read issue [#2393][11].
-
----
-
-wazero is a registered trademark of Tetrate.io, Inc. in the United States and/or other countries
-
-[1]: https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/
-[2]: https://www.w3.org/TR/2022/WD-wasm-core-2-20220419/
-[3]: https://github.com/WebAssembly/spec/tree/wg-1.0/test/core
-[4]: https://github.com/WebAssembly/spec/tree/d39195773112a22b245ffbe864bab6d1182ccb06/test/core
-[5]: https://go.dev/doc/devel/release
-[6]: https://github.com/actions/virtual-environments
-[7]: https://docs.docker.com/develop/develop-images/baseimages/#create-a-simple-parent-image-using-scratch
-[8]: https://tetrate.io/blog/introducing-wazero-from-tetrate/
-[9]: https://wazero.io/community/users/
-[10]: https://github.com/wazero/wazero/stargazers
-[11]: https://github.com/wazero/wazero/issues/2393
-[12]: https://pkg.go.dev/golang.org/x/sys
+- [examples/README.md](examples/README.md) - example and fixture overview
+- [THREAT_MODEL.md](THREAT_MODEL.md) - current security assumptions and
+  boundaries
+- [SUPPORT_MATRIX.md](SUPPORT_MATRIX.md) - runtime/feature/platform support
+- [SE-ROADMAP.md](SE-ROADMAP.md) - staged implementation roadmap
+- [razero-compiler/AOT_PACKAGING_ABI.md](razero-compiler/AOT_PACKAGING_ABI.md) -
+  current AOT packaging ABI
+- [CONTRIBUTING.md](CONTRIBUTING.md) - contributor workflow

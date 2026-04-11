@@ -4,9 +4,9 @@ We welcome contributions from the community. Please read the following guideline
 
 ## Coding Style
 
-- To ensure your change passes format checks, run `make check`. To format your files, you can run `make format`.
+- Format Rust changes with `cargo fmt --all`.
 - Install hooks with `lefthook install` to auto-format staged Rust files on `git commit`.
-- We follow standard Go table-driven tests and use an internal [testing library](./internal/testing/require) to assert correctness. To verify all tests pass, you can run `make test`.
+- Run the workspace test suite with `cargo test --workspace`.
 
 ## DCO
 

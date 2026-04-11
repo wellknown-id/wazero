@@ -1,6 +1,6 @@
 ---
 name: Feature Request
-about: Suggest an idea for wazero to support.
+about: Suggest an idea for razero to support.
 title: ''
 labels: enhancement
 assignees: ''

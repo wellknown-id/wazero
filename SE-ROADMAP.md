@@ -1,6 +1,6 @@
 # razero roadmap
 
-`razero` is a Rust-based WebAssembly runtime focused on running untrusted workloads in multi-tenant environments with stronger isolation and more deterministic resource controls. It is an experimental fork of the Go-based wazero, fully ported to Rust.
+`razero` is a Rust-based WebAssembly runtime focused on running untrusted workloads in multi-tenant environments with stronger isolation and more deterministic resource controls. The project started as a port of an earlier Go runtime and now documents a Rust-first workspace and API surface.
 
 This document turns the rough specification into an initial roadmap. It is intentionally ambitious and should be treated as a staged research and implementation plan, not a promise of short-term delivery.
 

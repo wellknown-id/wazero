@@ -16,7 +16,9 @@ Currently, we have the following fuzzing targets:
 - `logging_no_diff`: same as `no_diff`, and also compares listener/log formatting output between modes.
 - `validation`: compiles maybe-invalid Wasm module binaries with the native Rust runtime to ensure validation and compilation do not panic.
 
-`cargo test` in this workspace also runs deterministic replay coverage for `fac.wasm`, `mem_grow.wasm`, `wazerolib/testdata/test.wasm`, and fixed seed inputs shared across all native targets.
+`cargo test` in this workspace also runs deterministic replay coverage for
+`fac.wasm`, `mem_grow.wasm`, an additional bundled `test.wasm` fixture, and
+fixed seed inputs shared across all native targets.
 
 
 To run the fuzzer on a target, execute the following command:
@@ -59,10 +61,10 @@ You can replay that input against the native Rust helpers with:
 
 ```
 WASM_BINARY_PATH=fuzz/artifacts/no_diff/crash-... \
-  cargo test -p wazero-fuzz-fuzz --test native_replay rerun_failed_native_parity_case -- --exact --nocapture
+  cargo test --manifest-path internal/integration_test/fuzz/fuzz/Cargo.toml --test native_replay rerun_failed_native_parity_case -- --exact --nocapture
 
 WASM_BINARY_PATH=fuzz/artifacts/validation/crash-... \
-  cargo test -p wazero-fuzz-fuzz --test native_replay rerun_failed_native_validation_case -- --exact --nocapture
+  cargo test --manifest-path internal/integration_test/fuzz/fuzz/Cargo.toml --test native_replay rerun_failed_native_validation_case -- --exact --nocapture
 ```
 
 `cargo fuzz tmin` still works to minimize the crashing input while preserving the native Rust failure.

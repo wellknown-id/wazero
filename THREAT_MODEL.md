@@ -1,6 +1,6 @@
-# se-wazero Threat Model
+# razero Threat Model
 
-This document describes the security assumptions, threat boundaries, and mitigations that se-wazero provides for running untrusted WebAssembly workloads in multi-tenant Go processes.
+This document describes the security assumptions, threat boundaries, and mitigations that razero provides for running untrusted WebAssembly workloads in multi-tenant Rust processes.
 
 ## Actors
 
@@ -10,11 +10,11 @@ WebAssembly modules provided by tenants. These modules are assumed to be adversa
 
 ### Trusted host code
 
-Go code that embeds se-wazero. Host functions registered via `api.GoModuleFunction` or `api.GoFunction` are trusted. Security bugs in host function implementations are outside the scope of this model but the runtime should limit the damage a buggy host function can cause.
+Rust code that embeds razero. Host functions registered through the runtime's host-module builder surface are trusted. Security bugs in host function implementations are outside the scope of this model, but the runtime should limit the damage a buggy host function can cause.
 
 ### Shared infrastructure
 
-The wazero `Store`, `Engine`, compilation caches, and type registries are shared across module instances within a single `Runtime`. These are assumed to be correctly implemented and are part of the trusted computing base.
+The razero store, engine, compilation caches, and type registries are shared across module instances within a single `Runtime`. These are assumed to be correctly implemented and are part of the trusted computing base.
 
 ## Trust boundaries
 
@@ -42,9 +42,9 @@ The wazero `Store`, `Engine`, compilation caches, and type registries are shared
 └──────────────────────────────────────────────┘
 ```
 
-**Boundary 1 — Module ↔ Linear Memory**: Each module instance has its own linear memory. In standard mode, bounds are checked in software. In secure mode, wazero prefers guard-page-backed linear memory on `unix` / `windows` targets, and the compiler's Linux `amd64` / `arm64` secure-mode path can enforce bounds via hardware faults instead of the normal checked path.
+**Boundary 1 — Module ↔ Linear Memory**: Each module instance has its own linear memory. In standard mode, bounds are checked in software. In secure mode, razero prefers guard-page-backed linear memory on `unix` / `windows` targets, and the compiler's Linux `amd64` / `arm64` secure-mode path can enforce bounds via hardware faults instead of the normal checked path.
 
-**Boundary 2 — Module ↔ Host Functions**: Host function calls cross from compiled/interpreted Wasm into Go code. Arguments are passed via a value stack. The module cannot influence which host functions are called except via its declared imports.
+**Boundary 2 — Module ↔ Host Functions**: Host function calls cross from compiled/interpreted Wasm into Rust code. Arguments are passed via a value stack. The module cannot influence which host functions are called except via its declared imports.
 
 **Boundary 3 — Module ↔ Tables**: Indirect calls through `call_indirect` are type-checked at runtime using `FunctionTypeID` comparisons. A type mismatch traps the module.
 
@@ -64,7 +64,7 @@ The wazero `Store`, `Engine`, compilation caches, and type registries are shared
 
 **Attack**: A Wasm module enters an infinite loop or performs excessive computation, consuming host CPU indefinitely and starving other tenants.
 
-**Current mitigation**: `WithCloseOnContextDone(true)` inserts periodic exit-code checks at loop headers and function entries. Combined with `context.WithTimeout`, this terminates runaway modules. However, this relies on wall-clock time, not deterministic instruction counting.
+**Current mitigation**: `RuntimeConfig::with_close_on_context_done(true)` inserts periodic exit-code checks at loop headers and function entries. Combined with `Context::with_timeout(...)`, this terminates runaway modules. However, this relies on wall-clock time, not deterministic instruction counting.
 
 **Mitigation (fuel metering, compiler path)**: Deterministic fuel metering injects fuel counters at function entries and loop back-edges. Fuel exhaustion triggers `ErrRuntimeFuelExhausted` without relying on wall-clock timing. Host functions can inspect remaining fuel via `experimental.RemainingFuel()` and recharge via `experimental.AddFuel()`. Multi-tenant budgets are supported via `FuelController` and `AggregatingFuelController`.
 
@@ -130,16 +130,16 @@ platform, see [SUPPORT_MATRIX.md](SUPPORT_MATRIX.md).
 
 ## Assumptions
 
-1. The Go runtime is trusted and correctly implements `runtime.SetPanicOnFault`.
+1. The Rust runtime, standard library, and any platform-specific signal/exception handling used by secure mode are trusted.
 2. The host operating system kernel correctly enforces virtual memory protections.
 3. Host functions provided by the embedder are correctly implemented and do not violate the memory safety guarantees of Go.
-4. The WebAssembly module is structurally valid (passes wazero's validation phase) before execution.
+4. The WebAssembly module is structurally valid (passes razero's validation phase) before execution.
 5. The attack surface of the compilation cache (file-backed or in-memory) is limited to availability (filling disk), not integrity (compiled code is checksummed).
 6. Any filesystem, network, clock, random, or other system-facing imports are supplied externally by the embedder and are governed by embedder policy rather than by a built-in runtime subsystem.
 
 ## Out of scope for Phase 1
 
 - Speculative execution side channels (Spectre, Meltdown). Mitigation requires CPU microarchitectural controls beyond what a userspace runtime can enforce.
-- Multi-process isolation. se-wazero runs modules in-process. For stronger isolation, use separate OS processes or containers.
-- Supply chain attacks on the Wasm binary. se-wazero validates structural correctness but does not verify provenance or signing.
+- Multi-process isolation. razero runs modules in-process. For stronger isolation, use separate OS processes or containers.
+- Supply chain attacks on the Wasm binary. razero validates structural correctness but does not verify provenance or signing.
 - Denial-of-service via compilation. Modules with pathological structure may consume excessive compile time. This will be addressed in Phase 6 (validation and hardening).
