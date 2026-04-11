@@ -152,6 +152,20 @@ allowed host function later calls `Yield()`.
   call path, but resumed host calls do not currently receive a snapshotter even
   if the resume context includes `experimental::with_snapshotter`.
 
+Current resumed-segment handoff semantics are easiest to reason about as a
+matrix:
+
+| Surface | What the resumed segment uses today | What happens if resume omits it |
+| --- | --- | --- |
+| `YieldObserver` | The resume context's observer receives `resumed` | No resumed-segment yield observer callbacks |
+| `TrapObserver` | The resume context's observer sees follow-on traps | Follow-on resumed-segment traps are not reported to the original observer |
+| `HostCallPolicy` | The resume context's policy decides later resumed-segment host calls | Later resumed-segment host calls run without a call-scoped override |
+| `HostCallPolicyObserver` | The resume context's observer sees resumed-segment allow/deny decisions | No resumed-segment host-call policy observer callbacks |
+| `TimeProvider` | Resumed host calls see the resume context's provider | Resumed host calls do not inherit the initial provider |
+| `FuelController` | Resumed host calls see the resume context's controller when one is supplied | Resumed host calls do not inherit the initial controller |
+| `FuelObserver` | No additional resumed-segment callbacks are currently emitted | Same behavior: no additional resumed-segment callbacks |
+| `Snapshotter` | Not currently re-injected for resumed host calls | Same behavior: resumed host calls have no snapshotter |
+
 ### Import resolution
 
 - `ImportResolverConfig::acl` is evaluated before any resolver or store lookup.
