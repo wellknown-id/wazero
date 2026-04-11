@@ -3241,6 +3241,7 @@ int main(void) {
         let module = Module {
             type_section: vec![function_type(&[], &[ValueType::I32])],
             import_section: vec![Import::function("env", "hook", 0)],
+            import_function_count: 1,
             function_section: vec![0],
             code_section: vec![Code {
                 body: vec![0x41, 0x05, 0x0b],
@@ -3298,6 +3299,62 @@ int main(void) {
             err.to_string(),
             "aot metadata: invalid import function type index"
         );
+    }
+
+    #[test]
+    fn packaged_module_sidecar_rejects_corrupted_export_index() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![0x41, 0x05, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let metadata = compile_module_metadata(&module);
+        assert_eq!(metadata.exports.len(), 1);
+        assert_eq!(metadata.exports[0].index, 0);
+
+        let mut sidecar = serialize_aot_metadata(&metadata);
+        let export = &metadata.exports[0];
+        let mut export_pattern = Vec::new();
+        export_pattern.extend_from_slice(&(metadata.exports.len() as u32).to_le_bytes());
+        export_pattern.push(export.ty.0);
+        export_pattern.extend_from_slice(&(export.name.len() as u32).to_le_bytes());
+        export_pattern.extend_from_slice(export.name.as_bytes());
+        export_pattern.extend_from_slice(&export.index.to_le_bytes());
+
+        let matches = sidecar
+            .windows(export_pattern.len())
+            .enumerate()
+            .filter_map(|(offset, window)| (window == export_pattern.as_slice()).then_some(offset))
+            .collect::<Vec<_>>();
+        assert_eq!(1, matches.len());
+        let export_index_offset = matches[0] + export_pattern.len() - 4;
+        sidecar[export_index_offset] = 1;
+        sidecar[export_index_offset + 1] = 0;
+        sidecar[export_index_offset + 2] = 0;
+        sidecar[export_index_offset + 3] = 0;
+
+        let encoded = serialize_native_package_metadata_bundle(&NativePackageMetadataBundle {
+            modules: vec![NativePackageMetadataEntry {
+                module_name: "guest".to_string(),
+                metadata_sidecar_bytes: sidecar,
+            }],
+            host_imports: Vec::new(),
+        });
+
+        let decoded = deserialize_native_package_metadata_bundle(&encoded).unwrap();
+        let err = crate::aot::deserialize_aot_metadata(&decoded.modules[0].metadata_sidecar_bytes)
+            .unwrap_err();
+        assert_eq!(err.to_string(), "aot metadata: invalid export index");
     }
 
     #[test]
@@ -3752,6 +3809,7 @@ int main(void) {
         let module = Module {
             type_section: vec![function_type(&[], &[ValueType::I32])],
             import_section: vec![Import::function("env", "hook", 0)],
+            import_function_count: 1,
             function_section: vec![0],
             code_section: vec![Code {
                 body: vec![0x41, 0x05, 0x0b],

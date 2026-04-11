@@ -1532,6 +1532,35 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
             "aot metadata: invalid import function type index".to_string(),
         ));
     }
+    let total_function_count = module_shape
+        .import_function_count
+        .checked_add(module_shape.local_function_count)
+        .ok_or_else(|| {
+            AotMetadataError::InvalidHeader("aot metadata: invalid function count".to_string())
+        })?;
+    let total_global_count = module_shape
+        .import_global_count
+        .checked_add(module_shape.local_global_count)
+        .ok_or_else(|| {
+            AotMetadataError::InvalidHeader("aot metadata: invalid global count".to_string())
+        })?;
+    let total_memory_count = module_shape
+        .import_memory_count
+        .checked_add(u32::from(module_shape.has_local_memory))
+        .ok_or_else(|| {
+            AotMetadataError::InvalidHeader("aot metadata: invalid memory count".to_string())
+        })?;
+    if exports.iter().any(|export| match export.ty {
+        ExternType::FUNC => export.index >= total_function_count,
+        ExternType::TABLE => export.index >= total_table_count,
+        ExternType::MEMORY => export.index >= total_memory_count,
+        ExternType::GLOBAL => export.index >= total_global_count,
+        _ => true,
+    }) {
+        return Err(AotMetadataError::InvalidHeader(
+            "aot metadata: invalid export index".to_string(),
+        ));
+    }
 
     Ok(AotCompiledMetadata {
         target: AotTarget {
