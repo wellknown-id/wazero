@@ -374,6 +374,24 @@ fn host_call_policy_request_param_and_result_types_round_trip_through_public_sur
 }
 
 #[test]
+fn host_call_policy_request_param_and_result_names_round_trip_through_public_surface() {
+    let function = FunctionDefinition::new("test")
+        .with_parameter_names(vec!["a".to_string(), "b".to_string()])
+        .with_result_names(vec!["result".to_string()]);
+    let request = HostCallPolicyRequest::new().with_function(function);
+
+    assert_eq!(
+        Some(&["a".to_string(), "b".to_string()][..]),
+        request.param_names()
+    );
+    assert_eq!(Some(&["result".to_string()][..]), request.result_names());
+
+    let empty_request = HostCallPolicyRequest::new();
+    assert_eq!(None, empty_request.param_names());
+    assert_eq!(None, empty_request.result_names());
+}
+
+#[test]
 fn function_listener_factory_round_trips_through_public_surface() {
     let ctx = with_function_listener_factory(
         &Context::default(),
