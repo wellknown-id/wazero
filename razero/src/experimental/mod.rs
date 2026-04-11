@@ -16,6 +16,7 @@ pub mod table;
 pub mod time_provider;
 pub mod trap;
 pub mod r#yield;
+pub mod yield_observer;
 pub mod yield_policy;
 pub mod yield_policy_observer;
 
@@ -67,6 +68,9 @@ pub use table::Table;
 pub use time_provider::{get_time_provider, with_time_provider, IntoTimeProvider, TimeProvider};
 pub use trap::{
     get_trap_observer, trap_cause_of, with_trap_observer, TrapCause, TrapObservation, TrapObserver,
+};
+pub use yield_observer::{
+    get_yield_observer, with_yield_observer, YieldEvent, YieldObservation, YieldObserver,
 };
 pub use yield_policy::{
     get_yield_policy, with_yield_policy, IntoYieldPolicy, YieldPolicy, YieldPolicyRequest,
