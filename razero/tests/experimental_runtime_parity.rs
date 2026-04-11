@@ -156,6 +156,10 @@ fn deny_async_work_host_call(_ctx: &Context, request: &HostCallPolicyRequest) ->
     request.name() != Some("async_work")
 }
 
+fn deny_async_work_impl_host_call(_ctx: &Context, request: &HostCallPolicyRequest) -> bool {
+    request.name() != Some("async_work_impl")
+}
+
 fn deny_inc_host_call(_ctx: &Context, request: &HostCallPolicyRequest) -> bool {
     request.name() != Some("inc")
 }
@@ -907,6 +911,90 @@ fn host_call_policy_observer_reports_direct_host_export_denial_before_trap() {
             .lock()
             .expect("trap observations poisoned")
     );
+}
+
+#[test]
+fn denied_host_call_policy_short_circuits_yield_policy_and_yield_observers() {
+    let runtime = Runtime::new();
+    let host_call_observations = Arc::new(Mutex::new(Vec::new()));
+    let trap_observations = Arc::new(Mutex::new(Vec::new()));
+    let yield_policy_observations = Arc::new(Mutex::new(Vec::new()));
+    let yield_observations = Arc::new(Mutex::new(Vec::new()));
+    let module = runtime
+        .new_host_module_builder("example")
+        .new_function_builder()
+        .with_func(
+            |ctx, _module, _params| {
+                get_yielder(&ctx)
+                    .expect("yielder should be injected")
+                    .r#yield();
+                Ok(vec![0])
+            },
+            &[],
+            &[ValueType::I32],
+        )
+        .with_name("async_work_impl")
+        .export("async_work")
+        .instantiate(&Context::default())
+        .unwrap();
+
+    let base = Context::default();
+    let yielding = with_yielder(&base);
+    let host_policy = with_host_call_policy(&yielding, deny_async_work_impl_host_call);
+    let host_observer = with_host_call_policy_observer(
+        &host_policy,
+        record_host_call_policy_observations(host_call_observations.clone()),
+    );
+    let yield_policy = with_yield_policy(&host_observer, allow_all_yields);
+    let yield_policy_observer = with_yield_policy_observer(
+        &yield_policy,
+        record_yield_policy_observations(yield_policy_observations.clone()),
+    );
+    let yield_observer = with_yield_observer(
+        &yield_policy_observer,
+        record_yield_observations(yield_observations.clone()),
+    );
+    let ctx = with_trap_observer(
+        &yield_observer,
+        record_trap_observations(trap_observations.clone()),
+    );
+
+    let err = module
+        .exported_function("async_work")
+        .unwrap()
+        .call_with_context(&ctx, &[])
+        .unwrap_err();
+
+    assert_eq!("policy denied: host call", err.to_string());
+    assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+    assert_eq!(
+        vec![(
+            Some("example".to_string()),
+            Some("async_work_impl".to_string()),
+            Some("example".to_string()),
+            HostCallPolicyDecision::Denied,
+        )],
+        *host_call_observations
+            .lock()
+            .expect("host call policy observations poisoned")
+    );
+    assert_eq!(
+        vec![(
+            TrapCause::PolicyDenied,
+            "policy denied: host call".to_string()
+        )],
+        *trap_observations
+            .lock()
+            .expect("trap observations poisoned")
+    );
+    assert!(yield_policy_observations
+        .lock()
+        .expect("yield policy observations poisoned")
+        .is_empty());
+    assert!(yield_observations
+        .lock()
+        .expect("yield observations poisoned")
+        .is_empty());
 }
 
 #[test]

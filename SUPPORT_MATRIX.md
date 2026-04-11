@@ -89,7 +89,9 @@ These rules cover the currently shipped observer/policy/config surfaces:
   3. if `experimental::with_yielder` was enabled, expose a `Yielder` to the
      host function.
 - `HostCallPolicy` therefore runs before the host function executes and before
-  any yield attempt. If it denies the call, `YieldPolicy` is never consulted.
+  any yield attempt. If it denies the call, `YieldPolicy` is never consulted and
+  the runtime does not emit `YieldPolicyObserver` or `YieldObserver` callbacks
+  for that denied call.
 - `HostCallPolicyObserver`, when present, reports the allow/deny decision with
   the current guest-import metadata shape before any resulting `TrapObserver`
   notification for denied host calls.
