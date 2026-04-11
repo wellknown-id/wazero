@@ -6325,6 +6325,7 @@ fn f64_lt(lhs: f64, rhs: f64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::panic::AssertUnwindSafe;
     use std::sync::{
         atomic::{AtomicI64, Ordering},
         Arc,
@@ -6838,5 +6839,285 @@ mod tests {
         });
 
         assert_eq!("boom", interpreter.call(0, &[]).unwrap_err().message());
+    }
+
+    // ---------------------------------------------------------------
+    // Fuel metering: nested-call and resume validation
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn nested_calls_accumulate_fuel() {
+        // fn0 -> fn1 -> fn2 (each native entry costs 1 fuel)
+        // With budget 3, all three entries succeed; budget 2 should fail.
+        let leaf = Function::new_native(
+            Signature::new(vec![ValueType::I32], vec![ValueType::I32]),
+            vec![Instruction::br(Label::new(LabelKind::Return, 0))],
+        )
+        .unwrap();
+        let middle = Function::new_native(
+            Signature::new(vec![ValueType::I32], vec![ValueType::I32]),
+            vec![
+                Instruction::call(2),
+                Instruction::br(Label::new(LabelKind::Return, 0)),
+            ],
+        )
+        .unwrap();
+        let root = Function::new_native(
+            Signature::new(vec![ValueType::I32], vec![ValueType::I32]),
+            vec![
+                Instruction::call(1),
+                Instruction::br(Label::new(LabelKind::Return, 0)),
+            ],
+        )
+        .unwrap();
+        let mut interpreter = Interpreter::new(Module {
+            functions: vec![root, middle, leaf],
+            ..Module::default()
+        });
+
+        // Budget 3: exactly enough for three function entries
+        let fuel = Arc::new(AtomicI64::new(3));
+        let results =
+            with_active_fuel_remaining(Some(fuel.clone()), || interpreter.call(0, &[99])).unwrap();
+        assert_eq!(vec![99], results);
+        assert_eq!(0, fuel.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn nested_calls_exhaust_fuel_at_correct_depth() {
+        // Same chain fn0 -> fn1 -> fn2, but budget only 2.
+        // fn0 entry costs 1, fn1 entry costs 1 (budget now 0),
+        // fn2 entry would go negative -> "fuel exhausted".
+        let leaf = Function::new_native(
+            Signature::new(vec![ValueType::I32], vec![ValueType::I32]),
+            vec![Instruction::br(Label::new(LabelKind::Return, 0))],
+        )
+        .unwrap();
+        let middle = Function::new_native(
+            Signature::new(vec![ValueType::I32], vec![ValueType::I32]),
+            vec![
+                Instruction::call(2),
+                Instruction::br(Label::new(LabelKind::Return, 0)),
+            ],
+        )
+        .unwrap();
+        let root = Function::new_native(
+            Signature::new(vec![ValueType::I32], vec![ValueType::I32]),
+            vec![
+                Instruction::call(1),
+                Instruction::br(Label::new(LabelKind::Return, 0)),
+            ],
+        )
+        .unwrap();
+        let mut interpreter = Interpreter::new(Module {
+            functions: vec![root, middle, leaf],
+            ..Module::default()
+        });
+
+        let fuel = Arc::new(AtomicI64::new(2));
+        let err =
+            with_active_fuel_remaining(Some(fuel.clone()), || interpreter.call(0, &[99]))
+                .unwrap_err();
+        assert_eq!("fuel exhausted", err.message());
+    }
+
+    #[test]
+    fn fuel_preserved_across_yield_and_resume() {
+        // fn0 calls host fn1 which yields. After resume, the remaining fuel
+        // should reflect exactly what was consumed before the yield.
+        use std::panic;
+
+        // fn0: call fn1 (host), then return its result
+        let entry = Function::new_native(
+            Signature::new(vec![ValueType::I32], vec![ValueType::I32]),
+            vec![
+                Instruction::call(1),
+                Instruction::br(Label::new(LabelKind::Return, 0)),
+            ],
+        )
+        .unwrap();
+        let yielding_host = Function::new_host(
+            Signature::new(vec![ValueType::I32], vec![ValueType::I32]),
+            host_function(|_, _| {
+                panic::panic_any(super::YieldSuspend);
+            }),
+        );
+        let mut interpreter = Interpreter::new(Module {
+            functions: vec![entry, yielding_host],
+            ..Module::default()
+        });
+
+        let fuel = Arc::new(AtomicI64::new(10));
+        // First call will yield: fn0 entry consumes 1 fuel -> 9 remaining.
+        let suspend_result = panic::catch_unwind(AssertUnwindSafe(|| {
+            with_active_fuel_remaining(Some(fuel.clone()), || interpreter.call(0, &[42]))
+        }));
+        // Should have panicked with InterpreterSuspend
+        let suspend = suspend_result
+            .unwrap_err()
+            .downcast::<super::InterpreterSuspend>()
+            .expect("should be InterpreterSuspend");
+
+        // After fn0 entry: 10 - 1 = 9 remaining
+        assert_eq!(9, fuel.load(Ordering::SeqCst));
+
+        // Resume with result, fuel continues from where it left off
+        let results = with_active_fuel_remaining(Some(fuel.clone()), || {
+            interpreter.resume(suspend.suspended_call, &[100])
+        })
+        .unwrap();
+        assert_eq!(vec![100], results);
+        // No additional native function entries on resume, fuel should still be 9
+        assert_eq!(9, fuel.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn forward_branch_does_not_consume_fuel() {
+        // A forward br (i.e., to a label ahead of the current PC) should
+        // NOT debit fuel — only backward branches do.
+        //
+        // Wasm:  (func (result i32)
+        //          (block (br 0))     ;; forward jump to end of block
+        //          (i32.const 42))
+        let lowered = Compiler
+            .lower_with_config(CompileConfig {
+                body: &[
+                    0x02, 0x40, // block void
+                    0x0c, 0x00, // br 0 (forward, to end of block)
+                    0x0b, // end (block)
+                    0x41, 0x2a, // i32.const 42
+                    0x0b, // end (function)
+                ],
+                signature: FunctionType::new(vec![], vec![ValueType::I32]),
+                ..CompileConfig::new(&[])
+            })
+            .expect("forward branch body should lower");
+        let mut interpreter = Interpreter::new(Module {
+            functions: vec![
+                Function::new_native(
+                    Signature::new(vec![], vec![ValueType::I32]),
+                    lowered.operations,
+                )
+                .unwrap(),
+            ],
+            ..Module::default()
+        });
+        let fuel = Arc::new(AtomicI64::new(1));
+
+        // Budget 1: function entry costs 1, forward br costs 0 -> succeeds
+        let results =
+            with_active_fuel_remaining(Some(fuel.clone()), || interpreter.call(0, &[])).unwrap();
+        assert_eq!(vec![42], results);
+        assert_eq!(0, fuel.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn no_fuel_configured_allows_unlimited_nested_calls() {
+        // Without fuel, deeply nested call chains should run without limit.
+        // fn0 -> fn1 -> fn2 -> fn3, no fuel budget.
+        let fns: Vec<Function> = (0..4u32)
+            .map(|i| {
+                if i < 3 {
+                    Function::new_native(
+                        Signature::new(vec![ValueType::I32], vec![ValueType::I32]),
+                        vec![
+                            Instruction::call(i + 1),
+                            Instruction::br(Label::new(LabelKind::Return, 0)),
+                        ],
+                    )
+                    .unwrap()
+                } else {
+                    Function::new_native(
+                        Signature::new(vec![ValueType::I32], vec![ValueType::I32]),
+                        vec![Instruction::br(Label::new(LabelKind::Return, 0))],
+                    )
+                    .unwrap()
+                }
+            })
+            .collect();
+        let mut interpreter = Interpreter::new(Module {
+            functions: fns,
+            ..Module::default()
+        });
+
+        // No fuel at all — should succeed
+        let results = interpreter.call(0, &[7]).unwrap();
+        assert_eq!(vec![7], results);
+    }
+
+    #[test]
+    fn nested_call_with_host_in_middle_preserves_fuel() {
+        // fn0 (native, costs 1) -> fn1 (host, costs 0) -> fn2 (native, costs 1)
+        // Budget of 2 should suffice: fn0 entry + fn2 entry = 2.
+        let leaf = Function::new_native(
+            Signature::new(vec![ValueType::I32], vec![ValueType::I32]),
+            vec![Instruction::br(Label::new(LabelKind::Return, 0))],
+        )
+        .unwrap();
+        let host_middle = Function::new_host(
+            Signature::new(vec![ValueType::I32], vec![ValueType::I32]),
+            host_function(|module, stack| {
+                // Manually dispatch to function 2 (the leaf) through the interpreter.
+                // In real usage the host would do async work, but here we just pass through.
+                // Note: the host itself does NOT consume fuel.
+                let _ = module;
+                stack[0] = stack[0].wrapping_add(10);
+                Ok(())
+            }),
+        );
+        let root = Function::new_native(
+            Signature::new(vec![ValueType::I32], vec![ValueType::I32]),
+            vec![
+                // Call host fn1, then call native fn2 with the result
+                Instruction::call(1), // host: adds 10
+                Instruction::call(2), // native leaf: pass-through
+                Instruction::br(Label::new(LabelKind::Return, 0)),
+            ],
+        )
+        .unwrap();
+        let mut interpreter = Interpreter::new(Module {
+            functions: vec![root, host_middle, leaf],
+            ..Module::default()
+        });
+
+        let fuel = Arc::new(AtomicI64::new(2));
+        let results =
+            with_active_fuel_remaining(Some(fuel.clone()), || interpreter.call(0, &[5])).unwrap();
+        assert_eq!(vec![15], results);
+        assert_eq!(0, fuel.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn backward_branch_in_nested_call_exhausts_shared_fuel() {
+        // Root calls a function that has an infinite loop.
+        // The shared fuel counter should be exhausted by the inner loop's
+        // backward branches even though the exhaustion happens in a nested frame.
+        let looper_body = Compiler
+            .lower_with_config(CompileConfig {
+                body: &[0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b], // (loop (br 0))
+                signature: FunctionType::default(),
+                ..CompileConfig::new(&[])
+            })
+            .expect("loop body should lower");
+        let looper = Function::new_native(Signature::default(), looper_body.operations).unwrap();
+        let root = Function::new_native(
+            Signature::default(),
+            vec![
+                Instruction::call(1),
+                Instruction::br(Label::new(LabelKind::Return, 0)),
+            ],
+        )
+        .unwrap();
+        let mut interpreter = Interpreter::new(Module {
+            functions: vec![root, looper],
+            ..Module::default()
+        });
+
+        // Budget 5: fn0 entry (1), fn1 entry (1), three backward branches (3) -> exhausted on 4th
+        let fuel = Arc::new(AtomicI64::new(5));
+        let err = with_active_fuel_remaining(Some(fuel.clone()), || interpreter.call(0, &[]))
+            .unwrap_err();
+        assert_eq!("fuel exhausted", err.message());
+        assert!(fuel.load(Ordering::SeqCst) < 0);
     }
 }

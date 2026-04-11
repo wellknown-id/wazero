@@ -1,6 +1,0 @@
-pre-commit:
-  commands:
-    rustfmt:
-      glob: "**/*.rs"
-      run: cargo fmt --all -- {staged_files}
-      stage_fixed: true

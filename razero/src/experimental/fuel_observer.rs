@@ -121,4 +121,82 @@ mod tests {
             *events.lock().expect("observer events poisoned")
         );
     }
+
+    #[test]
+    fn fuel_observer_receives_consumed_event() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let ctx = with_fuel_observer(&Context::default(), {
+            let events = events.clone();
+            move |_ctx: &Context, observation: FuelObservation| {
+                events
+                    .lock()
+                    .expect("observer events poisoned")
+                    .push(observation.event);
+            }
+        });
+
+        let observer = get_fuel_observer(&ctx).expect("observer should exist");
+        let runtime = Runtime::new();
+        let compiled = runtime
+            .compile(&[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
+                0x00,
+            ])
+            .unwrap();
+        let module = runtime
+            .instantiate(&compiled, ModuleConfig::new().with_name("metered"))
+            .unwrap();
+        observer.observe_fuel(
+            &ctx,
+            FuelObservation {
+                module: module.clone(),
+                event: FuelEvent::Consumed,
+                budget: 100,
+                consumed: 10,
+                remaining: 90,
+                delta: 10,
+            },
+        );
+        observer.observe_fuel(
+            &ctx,
+            FuelObservation {
+                module,
+                event: FuelEvent::Exhausted,
+                budget: 100,
+                consumed: 100,
+                remaining: 0,
+                delta: 90,
+            },
+        );
+
+        let captured = events.lock().expect("events poisoned");
+        assert_eq!(vec![FuelEvent::Consumed, FuelEvent::Exhausted], *captured);
+    }
+
+    #[test]
+    fn fuel_observer_absent_does_not_panic() {
+        // notify_fuel_observer should be a no-op when no observer is set.
+        let runtime = Runtime::new();
+        let compiled = runtime
+            .compile(&[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
+                0x00,
+            ])
+            .unwrap();
+        let module = runtime
+            .instantiate(&compiled, ModuleConfig::new())
+            .unwrap();
+
+        // This should not panic even without an observer set
+        super::notify_fuel_observer(
+            &Context::default(),
+            &module,
+            FuelEvent::Consumed,
+            100,
+            10,
+            90,
+            10,
+        );
+    }
 }
+

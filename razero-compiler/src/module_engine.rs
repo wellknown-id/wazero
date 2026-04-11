@@ -689,4 +689,93 @@ mod tests {
 
         assert_eq!(handle.exec_ctx.fuel, 7);
     }
+
+    #[test]
+    fn imported_function_does_not_receive_parent_fuel() {
+        // The fuel budget is a per-invocation property set on the local call engine.
+        // Imported call engines must NOT inherit the parent's fuel because the imported
+        // function's own call engine should not carry fuel from the caller.
+        let host = stack_host_func(|stack| {
+            stack[0] = stack[0].wrapping_add(1);
+            Ok(())
+        });
+        let mut ty = FunctionType::default();
+        ty.params = vec![ValueType::I64];
+        ty.results = vec![ValueType::I64];
+        ty.cache_num_in_u64();
+
+        let imported_module = Module {
+            is_host_module: true,
+            type_section: vec![ty.clone()],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body_kind: CodeBody::Host,
+                host_func: Some(host),
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+        let imported_parent = Arc::new(CompiledModule {
+            executables: Executables::from_executable_bytes(vec![0; 64]),
+            function_offsets: vec![16],
+            module: imported_module.clone(),
+            offsets: ModuleContextOffsetData::new(&imported_module, false),
+            aot: AotCompiledMetadata::default(),
+            shared_functions: Arc::new(SharedFunctions::default()),
+            ensure_termination: false,
+            fuel_enabled: false,
+            fuel: 0,
+            memory_isolation_enabled: false,
+            source_map: SourceMap::default(),
+        });
+        let mut imported_instance = ModuleInstance::default();
+        imported_instance.source = imported_module;
+        let mut imported_engine =
+            CompilerModuleEngine::new(imported_parent.clone(), imported_instance);
+        imported_engine.init_opaque();
+
+        let module = Module {
+            import_function_count: 1,
+            import_section: vec![razero_wasm::module::Import::function("env", "host", 0)],
+            type_section: vec![ty],
+            ..Module::default()
+        };
+        let mut parent = (*compiled_module_for(&module)).clone();
+        parent.fuel_enabled = true;
+        parent.fuel = 42;
+        let parent = Arc::new(parent);
+        let mut instance = ModuleInstance::default();
+        instance.source = module;
+        let mut engine = CompilerModuleEngine::new(parent, instance);
+        engine.init_opaque();
+        engine.resolve_imported_function(0, 0, 0, &imported_engine);
+
+        // Imported function call engine should have exec_ctx.fuel = 0.
+        let handle = engine.new_compiler_function(0);
+        assert_eq!(handle.exec_ctx.fuel, 0);
+    }
+
+    #[test]
+    fn local_function_fuel_zero_when_disabled() {
+        // When fuel_enabled is false, even if fuel field is non-zero (stale),
+        // the call engine should have fuel=0 because the enable check is false.
+        let module = Module {
+            type_section: vec![FunctionType::default()],
+            function_section: vec![0],
+            code_section: vec![Code::default()],
+            ..Module::default()
+        };
+        let mut parent = (*compiled_module_for(&module)).clone();
+        parent.fuel_enabled = false;
+        parent.fuel = 999; // stale value, should be ignored
+        let parent = Arc::new(parent);
+        let mut instance = ModuleInstance::default();
+        instance.source = module;
+        let mut engine = CompilerModuleEngine::new(parent, instance);
+        engine.init_opaque();
+
+        let handle = engine.new_compiler_function(0);
+        assert_eq!(handle.exec_ctx.fuel, 0);
+    }
 }
+

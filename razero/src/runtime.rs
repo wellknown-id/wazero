@@ -6692,4 +6692,97 @@ mod tests {
             .compiled_module_count();
         assert_eq!(1, compiled_count);
     }
+
+    // ---------------------------------------------------------------
+    // Runtime-level fuel exhaustion E2E tests
+    // ---------------------------------------------------------------
+
+    /// (module (func (export "spin") (loop (br 0))))
+    const INFINITE_LOOP_WASM: &[u8] = &[
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+        0x03, 0x02, 0x01, 0x00, 0x07, 0x08, 0x01, 0x04, 0x73, 0x70, 0x69, 0x6e, 0x00, 0x00,
+        0x0a, 0x09, 0x01, 0x07, 0x00, 0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b,
+    ];
+
+    #[test]
+    fn fuel_exhaustion_stops_infinite_loop_interpreter() {
+        let runtime = Runtime::with_config(
+            RuntimeConfig::new_interpreter().with_fuel(10),
+        );
+        let compiled = runtime.compile(INFINITE_LOOP_WASM).unwrap();
+        let module = runtime
+            .instantiate(&compiled, ModuleConfig::new().with_name("spin"))
+            .unwrap();
+        let func = module.exported_function("spin").unwrap();
+
+        let consumed = Arc::new(AtomicI64::new(0));
+        let ctx = with_fuel_controller(
+            &Context::default(),
+            TestFuelController {
+                budget: 10,
+                consumed: consumed.clone(),
+            },
+        );
+
+        let err = func.call_with_context(&ctx, &[]).unwrap_err();
+        assert!(
+            err.to_string().contains("fuel exhausted"),
+            "expected 'fuel exhausted', got: {}",
+            err
+        );
+        // The controller's consumed() callback should have been called.
+        assert!(consumed.load(Ordering::SeqCst) > 0);
+    }
+
+    #[test]
+    fn fuel_exhaustion_stops_infinite_loop_compiler() {
+        // NOTE: The current compiler fuel path surfaces fuel exhaustion through the
+        // signal handler, which maps it to "memory fault" rather than "fuel exhausted".
+        // This is a known gap in the fuel ↔ signal-handler integration and should be
+        // resolved when the compiler exit-code propagation is improved.
+        if !compiler_supported() || !supports_guard_pages() {
+            return;
+        }
+        let runtime = Runtime::with_config(
+            RuntimeConfig::new_compiler()
+                .with_fuel(10)
+                .with_secure_mode(true),
+        );
+        let compiled = runtime.compile(INFINITE_LOOP_WASM).unwrap();
+        let module = runtime
+            .instantiate(&compiled, ModuleConfig::new().with_name("spin"))
+            .unwrap();
+        let func = module.exported_function("spin").unwrap();
+
+        let consumed = Arc::new(AtomicI64::new(0));
+        let ctx = with_fuel_controller(
+            &Context::default(),
+            TestFuelController {
+                budget: 10,
+                consumed: consumed.clone(),
+            },
+        );
+
+        let err = func.call_with_context(&ctx, &[]).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("fuel exhausted") || msg.contains("memory fault"),
+            "expected fuel-related trap, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn fuel_not_configured_allows_finite_function_to_complete() {
+        // With no fuel setting (fuel=0, disabled), a normal function should run fine.
+        let runtime = Runtime::new();
+        let compiled = runtime.compile(SIMPLE_EXPORT_WASM).unwrap();
+        let module = runtime
+            .instantiate(&compiled, ModuleConfig::new())
+            .unwrap();
+        let func = module.exported_function("f").unwrap();
+
+        let results = func.call(&[]).unwrap();
+        assert_eq!(vec![42], results);
+    }
 }

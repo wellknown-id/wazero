@@ -1,6 +1,6 @@
 # razero roadmap
 
-`razero` is an rust based experimental fork of go based wazero focused on running untrusted WebAssembly workloads in multi-tenant environments with stronger isolation and more deterministic resource controls.
+`razero` is a Rust-based WebAssembly runtime focused on running untrusted workloads in multi-tenant environments with stronger isolation and more deterministic resource controls. It is an experimental fork of the Go-based wazero, fully ported to Rust.
 
 This document turns the rough specification into an initial roadmap. It is intentionally ambitious and should be treated as a staged research and implementation plan, not a promise of short-term delivery.
 
@@ -8,53 +8,44 @@ Note: this roadmap encompasses work commencing from commit 7f2e5f44e791c45714ab2
 
 ## Goals
 
-- Preserve wazero's core strengths: pure Go, easy embedding, no mandatory CGO, and cross-compilation friendliness.
+- Easy embedding, no mandatory C dependencies, and cross-compilation friendliness.
 - Improve safety for untrusted and multi-tenant workloads.
 - Prefer fail-closed behavior when the runtime cannot safely support a feature on a target platform.
 - Introduce security features incrementally so each stage can be validated independently.
 
 ## Non-goals for the first phase
 
-- Full feature parity across every operating system and architecture supported by upstream wazero.
+- Full feature parity across every operating system and architecture.
 - Replacing all existing software safety checks immediately.
 - Delivering production-ready multi-tenant isolation in a single release.
 
 ## Design constraints
 
-- Prefer standard library `syscall` and existing `golang.org/x/sys` usage over CGO.
 - Keep Linux `amd64` and `arm64` as the primary initial target for security-sensitive features.
 - Preserve a clear fallback story when hardware trapping or other platform behavior is unavailable or inconsistent.
 - Keep security policy decisions explicit and host-controlled.
 
 ## Workstreams
 
-### Track view
+### Status overview
 
-Use this table as the quick side-by-side status board. The detailed workstream
-sections below remain the canonical item lists and should continue to carry the
-commit-backed progress markers for each track.
-
-| Workstream                                          | Go track                                                                                                                                             | Rust track                                                                                                                    |
-| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| 1. Foundation and threat model                      | [95%:bbe2d375] Threat model and trap taxonomy are largely defined; support matrix and benchmark baselines still need more work.                      | [30%:763f642b] Rust has runtime/error scaffolding plus secure-mode, fuel, and yield surfaces, but still lacks Rust-specific threat/support docs and benchmark baselines. |
-| 2. Hardware-assisted memory sandboxing              | [100%:dedf9a6c] Virtual memory reservation and `mmap` guard-page prototype are in place; portability/fallback work remains.                          | [99%:472db265] Guarded allocation and Linux-first reserved-memory paths exist in Rust, secure-mode compiler codegen now honors memory isolation, guarded-memory SIGSEGV handling reports `MEMORY_FAULT`, compiler-backed trap observation now distinguishes secure-mode memory faults from software OOB traps on supported targets, the live store path now falls back to plain memory on unsupported guard-page platforms, including explicit compiler-engine secure-mode requests on unsupported non-Linux targets, guarded allocations now reserve-to-max while committing/growing only live pages, both public and compiler-backed post-grow OOB accesses still trap on the expected path, secure-mode imported host callbacks now reject OOB writes while compiler-backed OOB reads return `None` and writes fail through the public memory API, including typed `read_u32_le`/`write_u32_le`, `read_u64_le`/`write_u64_le`, `read_f32_le`/`write_f32_le`, and `read_f64_le`/`write_f64_le` bounds validation, public `pages()` accessor ratio validation, `grow()` return-value plus maximum-pages boundary validation, and both `LinearMemory::is_guard_page_backed()` and public `Memory::is_guard_page_backed()` observability for plain-vs-guarded allocator backing, compiler lowering validation now covers full-word `i32.load`, `i64.load`, `f32.load`, `f64.load`, `i32.store`, `i64.store`, `f32.store`, and `f64.store` plus subword `i32.load8_s`, `i32.load8_u`, `i32.load16_s`, `i32.load16_u`, `i32.store8`, `i32.store16`, `i64.load8_s`, `i64.load8_u`, `i64.load16_s`, `i64.load16_u`, `i64.load32_s`, `i64.load32_u`, `i64.store8`, `i64.store16`, and `i64.store32`, with both local bounds-check and memory-isolation validation now covering the remaining i32 and i64 subword paths, entrypoint glue validation checking both primary and after-go entry symbols plus non-native rejection stubs on ARM64 and AMD64, and signal-handler assembly validation now checking fault-return trampoline labels, execution-context offsets, and platform register/ucontext/sigcontext constants on both primary Linux backends; wider platform hardening and deeper native arm64 validation still lag. |
-| 3. Deterministic CPU metering ("fuel")              | [90%:dedf9a6c] Compiler-side fuel metering and exhaustion traps are in place; host fuel APIs and validation depth still need work.                   | [60%:3a506bff] Fuel controllers, host fuel APIs, exhaustion handling, and compiler function-entry plus loop-header metering now exist in Rust and are wired through the production compiler path; interpreter execution now also debits native function entry and backward branches while preserving shared fuel state for guest-call/resume host access, but basic-block injection and deeper nested-call/resume validation remain incomplete. |
-| 4. Async yield and resume                           | [90%:dedf9a6c] Yield protocol, suspension, resume semantics, and broad Go validation are in place; suspension invariants still need tightening.      | [78%:4888107a] Yield/resume protocol, resumers, cancellation, and cross-thread resume work in Rust runtime tests, the runtime now exposes `YieldPolicy`, wires it through runtime config/context, enforces it at cooperative-yield boundaries, and covers context overrides plus direct host-export denial, and public resumer/module state now rejects suspended-module reentry, stale/spent resumers, and wrong host-result arity while validating fresh resumer handoff across re-yield; deeper compiler-native suspend/restore validation still remains. |
-| 5. Zero-trust host interface                        | [65%:dedf9a6c] Direction is set, but the Go core engine is not yet fully stripped of system/OS coupling.                                             | [93%:881c6ab6] Rust core crates keep WASI/system behavior outside the runtime and imports embedder-owned, and now have import ACLs, fail-closed resolution, observer/audit events that distinguish resolver attempts from plain fallback, plus `HostCallPolicy` and `YieldPolicy` surfaces with host-function and caller-module metadata, signature-based and caller-aware enforcement coverage at guest and direct host-call boundaries including cooperative-yield context, and end-to-end ACL + host-call + yield-policy composition, with caller-module metadata now flowing through direct host-export HostCallPolicy enforcement alongside imported-function calls, both policy request types exposing function identity, caller-module identity, signature/import metadata accessors, and memory-definition metadata accessors for direct policy checks, with runtime wiring now carrying guest memory metadata into both imported-function HostCallPolicy checks and cooperative-yield policy decisions, function, memory, global, and table definitions now exposing module-name/import and export metadata across public instantiated-`Module` accessors, enabling direct inspection of imported and exported core resource shapes, import-resolver config/ACL public-surface parity now preserves installed resolvers and `fail_closed` mode, and both host-call and yield policy decisions now emitting explicit allow/deny observations across direct host boundaries and guest callbacks, including direct public-surface observer parity for denied decisions, while import-resolver observer public-surface parity now covers denied `AclDenied`, allowed `AclAllowed`, `ResolverAttempted`, successful `ResolverResolved`, and fail-closed `FailClosedDenied` lifecycle events in addition to fallback observations, `FuelObserver` public observations now include budget, consumed, remaining, and delta state for direct host-call fuel tracking and now emit recharged, consumed, and exhausted lifecycle notifications on real recharge, completion, yield-suspend, error, and fuel-depletion paths, a `TimeProvider` surface exposes host-controlled `walltime`, `nanotime`, and `nanosleep` callbacks for deterministic time control, and `YieldObserver` runtime wiring now emits yielded/resumed lifecycle observations across real suspend/resume execution paths; broader observer composition and remaining lifecycle coverage still remain. |
-| 6. Validation, hardening, and operational readiness | [85%:16b42271] Extensive Go `experimental/` coverage now exists for memory faults, fuel exhaustion, async resumption, trap causes, and policy flows. | [99%:5db9ff2c] Rust has parity/spec/smoke tests, listener surfaces, benches, packaging ABI docs, stronger policy/fault-path coverage including `HostCallPolicy`/`YieldPolicy` runtime-config and context override cases plus direct host-export and cooperative-yield denial paths, compiler-backed secure-mode OOB validation across scalar and subword load/store paths, an experimental trap observer API with compiler-backed trap notifications plus public policy-denied notifications across direct host-call and yield/resume paths, interpreter trap-observer coverage for genuine unaligned-atomic traps and compiler trap-observer parity for secure-mode OOB memory-fault notifications, and public surface parity coverage across host-call, yield, trap, import-resolver, close-notifier, snapshotter, time-provider, fuel-controller, yielder, and memory-allocator context wiring plus getter parity for function listener factories, `benchmark_function_listener`, `new_stack_iterator` / `StackFrame` accessors, `trap_cause_of()`, `SimpleFuelController::total_consumed()`, `AggregatingFuelController::total_consumed()`, `LinearMemory::bytes()`, `LinearMemory::bytes_mut()`, `LinearMemory::free()`, `LinearMemory::reallocate()`, `LinearMemory::len()`, `LinearMemory::is_empty()`, `YieldError::resumer()`, and imported/exported function/memory/global/table definition accessors, plus `HostCallPolicyRequest` and `YieldPolicyRequest` builder, param/result type, param/result name, export-name accessor, default-empty-metadata, and memory-metadata round-trips, including public snapshotter, time-provider, yielder, and fuel-observer `FuelEvent::Recharged` parity that exercises real `add_fuel()` notifications during active invocations, import-resolver config/ACL round-trip coverage that preserves installed resolvers, distinct supported-target secure-mode `MEMORY_FAULT` classification, and broader real AMD64 codegen coverage including scalar float comparison, arithmetic, `sqrt`, scalar rounding (`ceil`/`floor`/`trunc`/`nearest`), scalar `min/max` with NaN/signed-zero handling, scalar `abs`/`neg`/`copysign`, scalar reinterpret/bitcast (`i32<->f32`, `i64<->f64`), signed and unsigned `i32/i64 -> f32/f64` conversion, signed and unsigned `i32 <- f32/f64` truncation plus signed and unsigned `i64 <- f32/f64` truncation with invalid-conversion and overflow trap exits, `i32.wrap_i64`, signed and unsigned `i64.extend_i32`, signed `i32.extend8/16_s`, signed `i64.extend8/16/32_s`, and float promotion/demotion, general integer comparisons, signed and unsigned `div/rem` with zero-divisor and overflow handling, direct and conditional trap exits, address-path `UExtend`, integer select, partial-load extension, unary bit ops, bitwise ops, and shift/rotate lowering, but broader hardening depth and fallback breadth still remain behind Go. |
-| 7. Rust-port AOT packaging and native distribution  | —                                                                                                                                                    | [99%:931c751e] Strong Linux ELF/AOT packaging path exists, and package-bundle deserialization now has core negative coverage for invalid magic, truncated headers, numeric fields, module names, module-name-length and module-name-bytes, invalid UTF-8 in module names, guest module names, import modules, import names, and host symbol names, empty module names, empty guest module names, empty import modules, empty import names, empty host symbol names, positive max function-index and type-index round-trip coverage including mixed boundary indices across multiple modules/imports, three-module heterogeneous sidecar round-trips, four-import boundary-mix round-trips, real runtime-state AOT sidecar round-trips that preserve packaged memory/table/global/data/element metadata including varied memory configurations, multiple tables with mixed max-flag semantics, multiple active/passive data-segment shapes, mixed mutable/immutable global metadata, and mixed active/passive/declarative element-segment modes, and packaged sidecars now reject corrupted start-function-index bytes, corrupted export-index bytes, corrupted import-count bytes, corrupted import-function type-index bytes, corrupted element-segment table-index bytes, corrupted element-segment ref-type bytes, corrupted element-segment mode bytes, corrupted table max-flag bytes, corrupted global-initializer-count bytes, corrupted global-count bytes, corrupted local-table-count bytes, corrupted data-segment-count bytes, corrupted element-segment-count bytes, corrupted local-function-count bytes, invalid imported table ref-type bytes, invalid global mutable-flag bytes, invalid data-segment passive-flag bytes, invalid memory shared-flag bytes, invalid start-metadata flag bytes, invalid helper exit-code flag bytes, invalid export type bytes, invalid import descriptor tag bytes, active data segments without memory, passive data segments with offset expressions, active data segments without offset expressions, active element-segment ref types that do not match their target tables, passive/declarative element segments with offset expressions, passive/declarative element segments with non-zero table indices, active element segments without offset expressions, corrupted local-memory and any-memory module-shape flag mismatches, empty element init-expression lists, and empty individual element init-expression bytevectors during AOT metadata deserialization, with zero-length module sidecars plus truncated module sidecars and sidecar-length fields, truncated host-import count, guest-module-name-length and guest-module-name-bytes, function-index (full and partial), type-index (full and partial), symbol-name-length and symbol-name-bytes, import-module-name-length and import-module-name-bytes, and import-name-length and import-name-bytes fields, and unexpected trailing bytes; broader runtime-state packaging hardening still remains. |
-
-**Tracking rule:** use the Go column for Go-runtime progress, the Rust column
-for Rust-port progress, and leave a column as `—` until that track has been
-explicitly assessed for the corresponding workstream.
+| Workstream | Progress | Summary |
+| --- | --- | --- |
+| 1. Foundation and threat model | [30%:763f642b] | Runtime/error scaffolding plus secure-mode, fuel, and yield surfaces exist, but Rust-specific threat/support docs and benchmark baselines are still needed. |
+| 2. Hardware-assisted memory sandboxing | [99%:472db265] | Guarded allocation, Linux-first reserved-memory, compiler codegen memory isolation, SIGSEGV handling, typed bounds validation, compiler lowering validation for all scalar and subword load/store paths, entrypoint glue and signal-handler assembly validation on both Linux backends. Wider platform hardening and deeper native arm64 validation still lag. |
+| 3. Deterministic CPU metering ("fuel") | [78%:d89465d1] | Fuel controllers, host fuel APIs, exhaustion handling, and compiler function-entry plus loop-header metering are wired through the production compiler path; interpreter debits native function entry and backward branches with nested-call, yield/resume, and host-interleaved validation. Config-level fuel clamping/round-trip, module-engine fuel initialization (local vs imported), fuel observer lifecycle (Consumed/Exhausted/absent), and full E2E runtime fuel exhaustion (interpreter + compiler/secure-mode) are now verified. Known gap: compiler fuel exit code maps through SIGSEGV as "memory fault" rather than "fuel exhausted" — signal-handler integration needed. Basic-block injection still remains incomplete. |
+| 4. Async yield and resume | [78%:4888107a] | Yield/resume protocol, resumers, cancellation, cross-thread resume, `YieldPolicy` wiring, context overrides, direct host-export denial, suspended-module reentry rejection, stale/spent resumers, and host-result arity validation across re-yield. Deeper compiler-native suspend/restore validation still remains. |
+| 5. Zero-trust host interface | [93%:881c6ab6] | Core crates keep WASI/system behavior outside the runtime. Import ACLs, fail-closed resolution, observer/audit events, `HostCallPolicy`/`YieldPolicy` surfaces with full caller-module metadata, signature-based enforcement, import-resolver observer lifecycle events, `FuelObserver` lifecycle notifications, `TimeProvider` surface, and `YieldObserver` wiring. Broader observer composition and remaining lifecycle coverage still remain. |
+| 6. Validation, hardening, and operational readiness | [99%:5db9ff2c] | Parity/spec/smoke tests, listener surfaces, benches, packaging ABI docs, policy/fault-path coverage, compiler-backed secure-mode OOB validation, trap observer API, interpreter and compiler trap-observer coverage, full public surface parity, import-resolver config/ACL round-trips, and broad AMD64 codegen coverage. Broader hardening depth and fallback breadth still remain. |
+| 7. AOT packaging and native distribution | [99%:931c751e] | Strong Linux ELF/AOT packaging path with extensive negative coverage for malformed metadata, truncation, and corruption across all sidecar fields. Broader runtime-state packaging hardening still remains. |
 
 ### 1. Foundation and threat model
 
 Establish the baseline needed to evaluate all later work.
 
 - [95%:dedf9a6c] Document the threat model for untrusted tenant code, host functions, and shared infrastructure.
-- [83%:2a1cfbcf] Define supported and unsupported security properties for each runtime mode and platform, with cached and uncached wazevo secure-mode compile paths now sharing the same memory-isolation capability gate on unsupported targets, the Rust runtime now routing secure-mode guard-page allocation through one explicit helper, and secure-mode runtime configuration explicitly tested to propagate into internal secure-memory store state.
-- [85%:dedf9a6c] Identify the wazero subsystems that will change first: memory management, compiler backends, and trap handling.
+- [83%:2a1cfbcf] Define supported and unsupported security properties for each runtime mode and platform, with cached and uncached secure-mode compile paths now sharing the same memory-isolation capability gate on unsupported targets, the runtime now routing secure-mode guard-page allocation through one explicit helper, and secure-mode runtime configuration explicitly tested to propagate into internal secure-memory store state.
+- [85%:dedf9a6c] Identify the razero subsystems that will change first: memory management, compiler backends, and trap handling.
 - [97%:156dfeb5] Define new error and trap categories for memory faults, fuel exhaustion, policy denials, and async yield/resume transitions.
 - [80%:dedf9a6c] Add benchmark and regression baselines for compile time, execution time, memory growth, and trap overhead.
 
@@ -64,7 +55,7 @@ Shift linear memory protection toward OS-backed virtual memory primitives.
 
 - [100%:dedf9a6c] Introduce an abstraction for reserving large virtual address ranges for Wasm linear memory.
 - [100%:dedf9a6c] Prototype `mmap`-backed memory reservation with committed active pages and inaccessible guard pages.
-- [90%:156dfeb5] Translate page faults caused by out-of-bounds access into recoverable Wasm traps using Go runtime fault recovery facilities where supported.
+- [90%:156dfeb5] Translate page faults caused by out-of-bounds access into recoverable Wasm traps using signal handling where supported.
 - [95%:dedf9a6c] Keep software bounds checks or other safe fallbacks where hardware trapping is not yet reliable.
 - [75%:dedf9a6c] Start with Linux `amd64` and `arm64`, then evaluate portability gaps before expanding platform support.
 
@@ -79,14 +70,14 @@ Add deterministic execution budgeting to compiled and interpreted execution path
 
 - [35%:dedf9a6c] Define a cost model for Wasm instructions that is simple enough to reason about and stable enough to expose to embedders.
 - [90%:dedf9a6c] Inject fuel accounting at function entries, loop headers, and other control-flow boundaries chosen for acceptable overhead.
-- [90%:dedf9a6c] Add a trap path for resource exhaustion that does not depend on wall-clock deadlines.
-- [70%:dedf9a6c] Expose safe host APIs to inspect, add, and subtract fuel for a running instance.
-- [45%:dedf9a6c] Validate that compiler overhead, execution overhead, and accounting accuracy are acceptable for the experiment.
+- [95%:d89465d1] Add a trap path for resource exhaustion that does not depend on wall-clock deadlines. Interpreter path fully validated E2E; compiler/secure-mode path stops infinite loops but surfaces "memory fault" instead of "fuel exhausted".
+- [85%:d89465d1] Expose safe host APIs to inspect, add, and subtract fuel for a running instance. Config validation, controller round-trips, observer lifecycle notifications (Budgeted/Consumed/Recharged/Exhausted), and absent-observer safety now covered.
+- [55%:d89465d1] Validate that compiler overhead, execution overhead, and accounting accuracy are acceptable for the experiment. Module-engine fuel initialization correctness validated (local gets fuel, imported does not, disabled skips stale values).
 
 **Exit criteria**
 
-- [80%:dedf9a6c] Long-running or infinite Wasm execution can be stopped deterministically through fuel exhaustion.
-- [65%:dedf9a6c] Hosts can safely recharge or debit fuel during execution without breaking isolation guarantees.
+- [90%:d89465d1] Long-running or infinite Wasm execution can be stopped deterministically through fuel exhaustion. Full E2E verified for interpreter; compiler/secure-mode verified with known signal-handler mapping gap.
+- [80%:d89465d1] Hosts can safely recharge or debit fuel during execution without breaking isolation guarantees. Add/remaining/overdraw/recharge observer notification coverage complete.
 
 ### 4. Async yield and resume
 
@@ -101,13 +92,13 @@ Introduce cooperative suspension for Wasm execution that waits on host-side asyn
 **Exit criteria**
 
 - [85%:dedf9a6c] A module can yield on supported async host calls and later resume without restarting execution.
-- [80%:dedf9a6c] Suspended modules do not require a permanently blocked Go thread per waiting tenant.
+- [80%:dedf9a6c] Suspended modules do not require a permanently blocked thread per waiting tenant.
 
 ### 5. Zero-trust host interface
 
 Harden the runtime by remaining completely unopinionated about system functionality.
 
-- [65%:dedf9a6c] Remove all WASI implementation code, OS dependencies, and system-level `Context` structures from the core engine.
+- [65%:dedf9a6c] Remove all WASI implementation code, OS dependencies, and system-level structures from the core engine.
 - [65%:dedf9a6c] Establish an architecture where embedders are strictly responsible for providing any required host interfaces, including filesystems, network egress policies, and clock resolution controls.
 - [40%:dedf9a6c] Explicitly fail-closed by removing platform-specific adapter layers and system wrappers that bypass host application policies.
 
@@ -126,39 +117,37 @@ Turn prototypes into an experimental runtime that can be evaluated seriously.
 - [70%:16b42271] Add observability hooks for trap causes, fuel usage, yield counts, and policy denials.
 - [95%:dedf9a6c] Keep the secure mode opt-in until behavior and compatibility are well understood.
 
-### 7. Rust-port AOT packaging and native distribution
+### 7. AOT packaging and native distribution
 
-Track the Rust port as a first-class deliverable, not as an afterthought to the
-Go runtime. The goal is to keep the core runtime small, keep WASI out of core
-crates, preserve interpreter availability for no-JIT environments, and support
-native packaging for embedders that want a fully linked executable.
+Keep the core runtime small, keep WASI out of core crates, preserve interpreter
+availability for no-JIT environments, and support native packaging for embedders
+that want a fully linked executable.
 
 #### Current implemented state
 
-- [100%:04af62a8] The Rust runtime already supports explicit **interpreter** and **compiler**
-  modes.
-- [100%:04af62a8] `razero` now supports **precompiled artifacts** through
+- [100%:04af62a8] The runtime supports explicit **interpreter** and **compiler** modes.
+- [100%:04af62a8] `razero` supports **precompiled artifacts** through
   `build_precompiled_artifact`, `compile_precompiled_artifact`, and
   `instantiate_precompiled_artifact`, so `.wasm` can be AOT-prepared and later
   loaded without recompiling at runtime.
-- [100%:04af62a8] `razero-compiler` now preserves a richer **AOT metadata** sidecar describing:
+- [100%:04af62a8] `razero-compiler` preserves a richer **AOT metadata** sidecar describing:
   target, function metadata, relocations, function signatures, module shape,
   import descriptors, memory/table/global metadata, module-context layout, and
   execution-context/helper ABI details.
-- [100%:04af62a8] `CompiledModule::emit_relocatable_object()` now emits
+- [100%:04af62a8] `CompiledModule::emit_relocatable_object()` emits
   **Linux ELF relocatable objects** plus Razero metadata sidecar.
 - [100%:04af62a8] `razero_compiler::runtime_support::LinkedModule` provides a
   metadata-driven linked startup/call surface for Linux ELF AOT modules with the
   supported runtime-state slice.
-- [95%:04af62a8] `razero_compiler::linker::link_native_executable(...)` now packages one or
+- [95%:04af62a8] `razero_compiler::linker::link_native_executable(...)` packages one or
   more relocatable Wasm objects into a native executable for the current C ABI-first
   surface.
-- [100%:ea77dc43] `razero_compiler::linker::link_hello_host_executable(...)` now provides a
+- [100%:ea77dc43] `razero_compiler::linker::link_hello_host_executable(...)` provides a
   **specialized** native-link flow for the existing `hello-host` example,
   including its single explicit `(i32, i32) -> ()` host import and local memory
   setup.
 - [100%:04af62a8] The current packaging flow emits a package metadata bundle alongside the
-  executable (`.razero-package`) and is covered by end-to-end Rust tests.
+  executable (`.razero-package`) and is covered by end-to-end tests.
 
 #### Product shape we should preserve
 
@@ -241,7 +230,7 @@ native packaging for embedders that want a fully linked executable.
 2. Hardware-assisted memory sandboxing prototype
 3. Deterministic CPU metering
 4. Pure core engine (WASI decoupling)
-5. Rust AOT metadata, precompiled artifacts, and Linux/ELF packaging hardening
+5. AOT metadata, precompiled artifacts, and Linux/ELF packaging hardening
 6. Async yield and resume
 7. Broader validation and platform expansion
 
@@ -253,7 +242,6 @@ This order prioritizes containment and deterministic limits before more invasive
 
 ## Main risks and tradeoffs
 
-- [75%:04af62a8] Go runtime fault handling is platform-sensitive and may limit portability.
 - [70%:04af62a8] Large virtual memory reservations and guard-page strategies may behave differently across kernels and operating systems.
 - [30%:04af62a8] Fuel injection and async stack handling will increase compiler complexity, compile time, and runtime overhead.
 - [65%:04af62a8] Strict uncoupling from system APIs means embedders must meticulously provide their own WASI or host functionality.
@@ -265,6 +253,6 @@ This order prioritizes containment and deterministic limits before more invasive
 - [90%:04af62a8] A Linux-first memory sandboxing prototype.
 - [80%:04af62a8] A compiler prototype with fuel metering and resource exhaustion traps.
 - [45%:04af62a8] A minimalist, pure WebAssembly core engine completely decoupled from system, OS, and WASI dependencies.
-- [100%:04af62a8] A Linux-first Rust AOT/native-packaging path with documented ABI limits, plus
+- [100%:04af62a8] A Linux-first AOT/native-packaging path with documented ABI limits, plus
   a concrete plan to generalize host-import and runtime-state packaging.
 - [90%:04af62a8] An experimental status report describing what is safe, what is incomplete, and what remains research.

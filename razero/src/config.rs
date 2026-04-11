@@ -337,4 +337,37 @@ mod tests {
 
         assert!(policy.allow_yield(&Context::default(), &YieldPolicyRequest::new()));
     }
+
+    #[test]
+    fn runtime_config_fuel_defaults_to_zero() {
+        assert_eq!(0, RuntimeConfig::new().fuel());
+    }
+
+    #[test]
+    fn runtime_config_with_fuel_round_trips_positive() {
+        let config = RuntimeConfig::new().with_fuel(100);
+        assert_eq!(100, config.fuel());
+    }
+
+    #[test]
+    fn runtime_config_with_fuel_clamps_negative_to_zero() {
+        let config = RuntimeConfig::new().with_fuel(-999);
+        assert_eq!(0, config.fuel());
+    }
+
+    #[test]
+    fn runtime_config_with_fuel_zero_remains_zero() {
+        let config = RuntimeConfig::new().with_fuel(0);
+        assert_eq!(0, config.fuel());
+    }
+
+    #[test]
+    fn runtime_config_fuel_chains_with_other_config() {
+        let config = RuntimeConfig::new_compiler()
+            .with_fuel(50)
+            .with_secure_mode(true);
+        assert_eq!(50, config.fuel());
+        assert!(config.secure_mode());
+        assert_eq!(RuntimeEngineKind::Compiler, config.engine_kind());
+    }
 }
