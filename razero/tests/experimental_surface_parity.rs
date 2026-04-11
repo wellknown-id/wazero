@@ -4,16 +4,17 @@ use std::sync::{
 };
 
 use razero::{
-    get_close_notifier, get_compilation_workers, get_function_listener_factory,
+    get_close_notifier, get_compilation_workers, get_fuel_controller, get_function_listener_factory,
     get_host_call_policy, get_host_call_policy_observer, get_import_resolver,
     get_import_resolver_observer, get_snapshotter, get_trap_observer, get_yield_policy,
     get_yield_policy_observer,
-    with_close_notifier, with_compilation_workers, with_function_listener_factory,
+    with_close_notifier, with_compilation_workers, with_fuel_controller, with_function_listener_factory,
     with_host_call_policy, with_host_call_policy_observer, with_import_resolver,
     with_import_resolver_observer, with_snapshotter, with_trap_observer, with_yield_policy,
     with_yield_policy_observer, Context, HostCallPolicyDecision, HostCallPolicyObservation,
-    ImportResolverEvent, ImportResolverObservation, ModuleConfig, Runtime, RuntimeConfig, ValueType,
-    TrapCause, TrapObservation, YieldPolicyDecision, YieldPolicyObservation,
+    ImportResolverEvent, ImportResolverObservation, ModuleConfig, Runtime, RuntimeConfig,
+    SimpleFuelController, TrapCause, TrapObservation, ValueType, YieldPolicyDecision,
+    YieldPolicyObservation,
 };
 
 const SIMPLE_EXPORT_WASM: &[u8] = &[
@@ -112,6 +113,14 @@ fn snapshotter_public_surface_enables_runtime_injection() {
             .call_with_context(&with_snapshotter(&Context::default()), &[])
             .unwrap()
     );
+}
+
+#[test]
+fn fuel_controller_round_trips_through_public_surface() {
+    let ctx = with_fuel_controller(&Context::default(), SimpleFuelController::new(42));
+    let controller = get_fuel_controller(&ctx).expect("controller should be present");
+
+    assert_eq!(42, controller.budget());
 }
 
 #[test]
