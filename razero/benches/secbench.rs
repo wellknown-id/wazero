@@ -14,6 +14,14 @@ const OOB_LOAD_WASM: &[u8] = include_bytes!("../../testdata/oob_load.wasm");
 const MEMORY_PAGE_SIZE: usize = 65_536;
 const FAC_BENCH_ARG: u64 = 20;
 const OOB_TRAP_TEXT: &str = "out of bounds memory access";
+const GROUP_COMPILE_TIME: &str = "secbench/compile_time";
+const GROUP_EXECUTION_BASELINE: &str = "secbench/execution_baseline";
+const GROUP_TRAP_OVERHEAD: &str = "secbench/trap_overhead";
+const GROUP_MEMORY_GROW: &str = "secbench/memory_grow";
+const GROUP_MEMORY_ALLOCATE: &str = "secbench/memory_allocate";
+const GROUP_GUARD_PAGE_ALLOCATOR_GROW: &str = "secbench/guard_page_allocator_grow";
+const GROUP_FUEL_OVERHEAD: &str = "secbench/fuel_overhead";
+const GROUP_FUEL_CONTROLLER_OVERHEAD: &str = "secbench/fuel_controller_overhead";
 
 static FAC_EXECUTION_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
@@ -39,8 +47,14 @@ fn fac_execution_available() -> bool {
     })
 }
 
+fn skip_fac_dependent_group(group_name: &str) {
+    eprintln!(
+        "skipping {group_name}: requires fac-ssa to execute successfully in the current runtime"
+    );
+}
+
 fn benchmark_compile_time(c: &mut Criterion) {
-    let mut group = c.benchmark_group("secbench/compile_time");
+    let mut group = c.benchmark_group(GROUP_COMPILE_TIME);
 
     for (name, secure_mode) in [("standard", false), ("secure", true)] {
         group.bench_function(name, |b| {
@@ -62,13 +76,11 @@ fn benchmark_compile_time(c: &mut Criterion) {
 
 fn benchmark_execution_baseline(c: &mut Criterion) {
     if !fac_execution_available() {
-        eprintln!(
-            "skipping secbench/execution_baseline: fac-ssa currently aborts in the Rust runtime"
-        );
+        skip_fac_dependent_group(GROUP_EXECUTION_BASELINE);
         return;
     }
 
-    let mut group = c.benchmark_group("secbench/execution_baseline");
+    let mut group = c.benchmark_group(GROUP_EXECUTION_BASELINE);
 
     for (name, secure_mode) in [("standard", false), ("secure", true)] {
         let ctx = Context::default();
@@ -95,7 +107,7 @@ fn benchmark_execution_baseline(c: &mut Criterion) {
 }
 
 fn benchmark_trap_overhead(c: &mut Criterion) {
-    let mut group = c.benchmark_group("secbench/trap_overhead");
+    let mut group = c.benchmark_group(GROUP_TRAP_OVERHEAD);
 
     for (name, secure_mode) in [("standard", false), ("secure", true)] {
         let ctx = Context::default();
@@ -128,7 +140,7 @@ fn benchmark_trap_overhead(c: &mut Criterion) {
 }
 
 fn benchmark_memory_allocate(c: &mut Criterion) {
-    let mut group = c.benchmark_group("secbench/memory_allocate");
+    let mut group = c.benchmark_group(GROUP_MEMORY_ALLOCATE);
     let cap_bytes = MEMORY_PAGE_SIZE;
     let max_bytes = 256 * MEMORY_PAGE_SIZE;
 
@@ -154,7 +166,7 @@ fn benchmark_memory_allocate(c: &mut Criterion) {
 }
 
 fn benchmark_memory_grow(c: &mut Criterion) {
-    let mut group = c.benchmark_group("secbench/memory_grow");
+    let mut group = c.benchmark_group(GROUP_MEMORY_GROW);
 
     for (name, secure_mode) in [("standard", false), ("secure", true)] {
         group.bench_function(name, |b| {
@@ -171,7 +183,7 @@ fn benchmark_memory_grow(c: &mut Criterion) {
 }
 
 fn benchmark_guard_page_allocator_grow(c: &mut Criterion) {
-    let mut group = c.benchmark_group("secbench/guard_page_allocator_grow");
+    let mut group = c.benchmark_group(GROUP_GUARD_PAGE_ALLOCATOR_GROW);
     let max_bytes = 1024 * MEMORY_PAGE_SIZE;
 
     group.bench_function("grow", |b| {
@@ -195,11 +207,11 @@ fn benchmark_guard_page_allocator_grow(c: &mut Criterion) {
 
 fn benchmark_fuel_overhead(c: &mut Criterion) {
     if !fac_execution_available() {
-        eprintln!("skipping secbench/fuel_overhead: fac-ssa currently aborts in the Rust runtime");
+        skip_fac_dependent_group(GROUP_FUEL_OVERHEAD);
         return;
     }
 
-    let mut group = c.benchmark_group("secbench/fuel_overhead");
+    let mut group = c.benchmark_group(GROUP_FUEL_OVERHEAD);
 
     for (name, fuel) in [
         ("no_fuel", 0),
@@ -231,11 +243,11 @@ fn benchmark_fuel_overhead(c: &mut Criterion) {
 
 fn benchmark_fuel_controller_overhead(c: &mut Criterion) {
     if !fac_execution_available() {
-        eprintln!("skipping secbench/fuel_controller_overhead: fac-ssa currently aborts in the Rust runtime");
+        skip_fac_dependent_group(GROUP_FUEL_CONTROLLER_OVERHEAD);
         return;
     }
 
-    let mut group = c.benchmark_group("secbench/fuel_controller_overhead");
+    let mut group = c.benchmark_group(GROUP_FUEL_CONTROLLER_OVERHEAD);
     let ctx = Context::default();
     let runtime = Runtime::with_config(runtime_config().with_fuel(1));
     let module = runtime
@@ -298,11 +310,17 @@ fn main() {
     }
 
     let mut criterion = Criterion::default().configure_from_args();
+
+    // These groups map directly to the Workstream 1 benchmark baseline item in
+    // SE-ROADMAP.md.
     benchmark_compile_time(&mut criterion);
     benchmark_execution_baseline(&mut criterion);
     benchmark_trap_overhead(&mut criterion);
-    benchmark_memory_allocate(&mut criterion);
     benchmark_memory_grow(&mut criterion);
+
+    // These groups remain useful diagnostic measurements, but they are not the
+    // canonical roadmap baseline set.
+    benchmark_memory_allocate(&mut criterion);
     benchmark_guard_page_allocator_grow(&mut criterion);
     benchmark_fuel_overhead(&mut criterion);
     benchmark_fuel_controller_overhead(&mut criterion);

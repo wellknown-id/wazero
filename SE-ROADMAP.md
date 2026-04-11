@@ -31,12 +31,12 @@ Note: this roadmap encompasses work commencing from commit 7f2e5f44e791c45714ab2
 
 | Workstream | Progress | Summary |
 | --- | --- | --- |
-| 1. Foundation and threat model | [30%:763f642b] | Runtime/error scaffolding plus secure-mode, fuel, and yield surfaces exist, but Rust-specific threat/support docs and benchmark baselines are still needed. |
+| 1. Foundation and threat model | [35%:763f642b] | Runtime/error scaffolding plus secure-mode, fuel, and yield surfaces exist, and the `secbench` manual benchmark workflow now identifies the core baseline groups for roadmap tracking. Rust-specific threat/support docs and broader baseline practice still remain. |
 | 2. Hardware-assisted memory sandboxing | [99%:472db265] | Guarded allocation, Linux-first reserved-memory, compiler codegen memory isolation, SIGSEGV handling, typed bounds validation, compiler lowering validation for all scalar and subword load/store paths, entrypoint glue and signal-handler assembly validation on both Linux backends. Wider platform hardening and deeper native arm64 validation still lag. |
 | 3. Deterministic CPU metering ("fuel") | [78%:d89465d1] | Fuel controllers, host fuel APIs, exhaustion handling, and compiler function-entry plus loop-header metering are wired through the production compiler path; interpreter debits native function entry and backward branches with nested-call, yield/resume, and host-interleaved validation. Config-level fuel clamping/round-trip, module-engine fuel initialization (local vs imported), fuel observer lifecycle (Consumed/Exhausted/absent), and full E2E runtime fuel exhaustion (interpreter + compiler/secure-mode) are now verified. Known gap: compiler fuel exit code maps through SIGSEGV as "memory fault" rather than "fuel exhausted" — signal-handler integration needed. Basic-block injection still remains incomplete. |
 | 4. Async yield and resume | [78%:4888107a] | Yield/resume protocol, resumers, cancellation, cross-thread resume, `YieldPolicy` wiring, context overrides, direct host-export denial, suspended-module reentry rejection, stale/spent resumers, and host-result arity validation across re-yield. Deeper compiler-native suspend/restore validation still remains. |
 | 5. Zero-trust host interface | [93%:881c6ab6] | Core crates keep WASI/system behavior outside the runtime. Import ACLs, fail-closed resolution, observer/audit events, `HostCallPolicy`/`YieldPolicy` surfaces with full caller-module metadata, signature-based enforcement, import-resolver observer lifecycle events, `FuelObserver` lifecycle notifications, `TimeProvider` surface, and `YieldObserver` wiring. Broader observer composition and remaining lifecycle coverage still remain. |
-| 6. Validation, hardening, and operational readiness | [99%:5db9ff2c] | Parity/spec/smoke tests, listener surfaces, benches, packaging ABI docs, policy/fault-path coverage, compiler-backed secure-mode OOB validation, trap observer API, interpreter and compiler trap-observer coverage, full public surface parity, import-resolver config/ACL round-trips, and broad AMD64 codegen coverage. Broader hardening depth and fallback breadth still remain. |
+| 6. Validation, hardening, and operational readiness | [99%:5db9ff2c] | Parity/spec/smoke tests, listener surfaces, benches, packaging ABI docs, policy/fault-path coverage, compiler-backed secure-mode OOB validation, trap observer API, interpreter and compiler trap-observer coverage, full public surface parity, import-resolver config/ACL round-trips, and broad AMD64 codegen coverage. Broader hardening depth and fallback breadth still remain; the next planned slice is expanding the existing fuzz workspace with policy-denied / trap-observer negative-path coverage and replay support. |
 | 7. AOT packaging and native distribution | [99%:931c751e] | Strong Linux ELF/AOT packaging path with extensive negative coverage for malformed metadata, truncation, and corruption across all sidecar fields. Broader runtime-state packaging hardening still remains. |
 
 ### 1. Foundation and threat model
@@ -47,7 +47,7 @@ Establish the baseline needed to evaluate all later work.
 - [83%:2a1cfbcf] Define supported and unsupported security properties for each runtime mode and platform, with cached and uncached secure-mode compile paths now sharing the same memory-isolation capability gate on unsupported targets, the runtime now routing secure-mode guard-page allocation through one explicit helper, and secure-mode runtime configuration explicitly tested to propagate into internal secure-memory store state.
 - [85%:dedf9a6c] Identify the razero subsystems that will change first: memory management, compiler backends, and trap handling.
 - [97%:156dfeb5] Define new error and trap categories for memory faults, fuel exhaustion, policy denials, and async yield/resume transitions.
-- [80%:dedf9a6c] Add benchmark and regression baselines for compile time, execution time, memory growth, and trap overhead.
+- [88%:dedf9a6c] Add benchmark and regression baselines for compile time, execution time, memory growth, and trap overhead, using the documented `cargo bench -p razero --bench secbench` manual workflow and its core baseline groups.
 
 ### 2. Hardware-assisted memory sandboxing
 
@@ -112,7 +112,7 @@ Harden the runtime by remaining completely unopinionated about system functional
 Turn prototypes into an experimental runtime that can be evaluated seriously.
 
 - [85%:16b42271] Add targeted tests for memory fault recovery, fuel exhaustion, async resumption, and policy enforcement.
-- [10%:dedf9a6c] Expand fuzzing and negative testing around host interfaces and trap paths.
+- [10%:dedf9a6c] Expand fuzzing and negative testing around host interfaces and trap paths, starting with a planned negative-path fuzz slice for policy denial and trap-observer behavior in the existing `internal/integration_test/fuzz` workspace.
 - [75%:1baa1d65] Document platform limitations, performance tradeoffs, and security assumptions.
 - [70%:16b42271] Add observability hooks for trap causes, fuel usage, yield counts, and policy denials.
 - [95%:dedf9a6c] Keep the secure mode opt-in until behavior and compatibility are well understood.
@@ -239,6 +239,16 @@ This order prioritizes containment and deterministic limits before more invasive
 ### Future optimizations
 
 - [45%:04af62a8] **SSA `ExitIfTrue` instruction for fuel checks**: Consider adding a first-class `ExitIfTrue(cond, exitCode)` SSA opcode to replace the current branch-to-exit-block pattern used by fuel metering at function entries and loop back-edges. A dedicated opcode would allow the SSA optimizer to reason about fuel check elimination at compile time (e.g., coalescing consecutive checks, hoisting checks out of inner loops with bounded iteration counts). This is not urgent since the current `insertFuelCheck` pattern (load/sub/store/cmp/branch-to-exit) is ~5 native instructions and already efficient, but the optimization would reduce code size and improve instruction cache utilization in fuel-heavy workloads.
+
+### Near-term planning follow-on
+
+After the negative-path fuzzing slice above, the next planning target should be
+Workstream 1 benchmark and regression baselines. The repository already has a
+substantial `razero/benches/secbench.rs` surface covering compile time,
+execution, trap overhead, memory allocation/growth, and fuel-related overhead,
+so the remaining work is best framed as turning that existing bench surface into
+explicit baseline and regression-tracking coverage rather than inventing a new
+benchmark harness.
 
 ## Main risks and tradeoffs
 

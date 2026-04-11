@@ -8,6 +8,30 @@ We welcome contributions from the community. Please read the following guideline
 - Install hooks with `lefthook install` to auto-format staged Rust files on `git commit`.
 - Run the workspace test suite with `cargo test --workspace`.
 
+## Benchmarks
+
+The manual benchmark workflow for Workstream 1 is anchored on
+`razero/benches/secbench.rs`.
+
+- Build or run the benchmark target with:
+  - `cargo bench -p razero --bench secbench`
+- The canonical roadmap baseline groups are:
+  - `secbench/compile_time`
+  - `secbench/execution_baseline`
+  - `secbench/trap_overhead`
+  - `secbench/memory_grow`
+- Other `secbench/*` groups are still useful diagnostics, but they are
+  supplemental to the roadmap baseline set.
+- Some groups depend on the `fac-ssa` workload executing successfully in the
+  current runtime. When that prerequisite is not met, the benchmark prints a
+  skip message instead of reporting misleading numbers.
+- To focus on one group while iterating, pass a Criterion filter after `--`, for
+  example:
+  - `cargo bench -p razero --bench secbench -- secbench/compile_time`
+- For meaningful comparisons, run the same command on similar hardware and under
+  comparable system load. Treat the results as comparative signals across
+  revisions, not absolute pass/fail thresholds.
+
 ## DCO
 
 We require DCO signoff line in every commit to this repo.
