@@ -1265,8 +1265,19 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
             )?;
             let mut exports = Vec::with_capacity(export_len);
             for _ in 0..export_len {
+                let ty = match read_u8(&mut cursor)? {
+                    0 => ExternType::FUNC,
+                    1 => ExternType::TABLE,
+                    2 => ExternType::MEMORY,
+                    3 => ExternType::GLOBAL,
+                    _ => {
+                        return Err(AotMetadataError::InvalidHeader(
+                            "aot metadata: invalid export type".to_string(),
+                        ))
+                    }
+                };
                 exports.push(AotExportMetadata {
-                    ty: ExternType(read_u8(&mut cursor)?),
+                    ty,
                     name: read_string(&mut cursor, "export name")?,
                     index: read_u32(&mut cursor)?,
                 });

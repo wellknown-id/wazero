@@ -3533,6 +3533,79 @@ int main(void) {
     }
 
     #[test]
+    fn packaged_module_sidecar_rejects_corrupted_export_type_byte() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            function_section: vec![0],
+            memory_section: Some(razero_wasm::module::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                ..razero_wasm::module::Memory::default()
+            }),
+            code_section: vec![Code {
+                body: vec![0x41, 0x05, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![
+                Export {
+                    ty: ExternType::FUNC,
+                    name: "run".to_string(),
+                    index: 0,
+                },
+                Export {
+                    ty: ExternType::MEMORY,
+                    name: "memory".to_string(),
+                    index: 0,
+                },
+            ],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let metadata = compile_module_metadata(&module);
+
+        let mut sidecar = serialize_aot_metadata(&metadata);
+        let export_pattern = [
+            ExternType::MEMORY.0,
+            6,
+            0,
+            0,
+            0,
+            b'm',
+            b'e',
+            b'm',
+            b'o',
+            b'r',
+            b'y',
+            0,
+            0,
+            0,
+            0,
+        ];
+        let matches = sidecar
+            .windows(export_pattern.len())
+            .enumerate()
+            .filter_map(|(offset, window)| (window == export_pattern).then_some(offset))
+            .collect::<Vec<_>>();
+        assert_eq!(1, matches.len());
+        sidecar[matches[0]] = 0xff;
+
+        let encoded = serialize_native_package_metadata_bundle(&NativePackageMetadataBundle {
+            modules: vec![NativePackageMetadataEntry {
+                module_name: "guest".to_string(),
+                metadata_sidecar_bytes: sidecar,
+            }],
+            host_imports: Vec::new(),
+        });
+
+        let decoded = deserialize_native_package_metadata_bundle(&encoded).unwrap();
+        let err = crate::aot::deserialize_aot_metadata(&decoded.modules[0].metadata_sidecar_bytes)
+            .unwrap_err();
+        assert_eq!(err.to_string(), "aot metadata: invalid export type");
+    }
+
+    #[test]
     fn package_metadata_bundle_round_trips_with_memory_config_variants() {
         let modules = [
             (
