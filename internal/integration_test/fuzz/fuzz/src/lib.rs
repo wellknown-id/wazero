@@ -120,6 +120,20 @@ pub fn replay_native_trap_parity(wasm: &[u8], export_name: &str) {
     );
 }
 
+pub fn replay_initial_policy_trap_parity() {
+    replay_policy_trap_parity(PolicyTrapInput {
+        scenario: PolicyTrapScenario::InitialDeny,
+        resume_value: 0,
+    });
+}
+
+pub fn replay_resume_policy_trap_parity(resume_value: u64) {
+    replay_policy_trap_parity(PolicyTrapInput {
+        scenario: PolicyTrapScenario::ResumeDeny,
+        resume_value,
+    });
+}
+
 pub fn run_policy_trap_parity(data: &[u8]) -> Result<()> {
     let mut u = Unstructured::new(data);
     let input = PolicyTrapInput::arbitrary(&mut u)?;
