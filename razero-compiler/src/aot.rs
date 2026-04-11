@@ -1583,6 +1583,11 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
             "aot metadata: table count mismatch".to_string(),
         ));
     }
+    if module_shape.data_segment_count as usize != data_segments.len() {
+        return Err(AotMetadataError::InvalidHeader(
+            "aot metadata: data segment count mismatch".to_string(),
+        ));
+    }
 
     Ok(AotCompiledMetadata {
         target: AotTarget {
@@ -2049,7 +2054,7 @@ mod tests {
                 has_local_memory: true,
                 has_any_memory: true,
                 has_start_section: true,
-                data_segment_count: 2,
+                data_segment_count: 1,
                 element_segment_count: 1,
                 is_host_module: false,
             },
