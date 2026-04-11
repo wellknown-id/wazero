@@ -3055,6 +3055,69 @@ fn listener_abort_runs_without_after_on_host_error() {
 }
 
 #[test]
+fn fuel_observer_budgeted_and_consumed_wrap_guest_listener_callbacks() {
+    let runtime = Runtime::new();
+    runtime
+        .new_host_module_builder("env")
+        .new_function_builder()
+        .with_func(
+            |_ctx, _module, params| Ok(vec![params[0] + 1]),
+            &[ValueType::I32],
+            &[ValueType::I32],
+        )
+        .with_name("inc")
+        .export("inc")
+        .instantiate(&Context::default())
+        .unwrap();
+    let guest = runtime
+        .instantiate_binary(
+            GUEST_IMPORT_INC_WASM,
+            ModuleConfig::new().with_name("guest"),
+        )
+        .unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let base_ctx = with_function_listener_factory(
+        &Context::default(),
+        AbortRecordingFactory {
+            events: events.clone(),
+        },
+    );
+    let controller_ctx = with_fuel_controller(
+        &base_ctx,
+        TrackingFuelController {
+            budget: 16,
+            consumed: Arc::new(AtomicI64::new(0)),
+        },
+    );
+    let call_ctx = with_fuel_observer(&controller_ctx, {
+        let events = events.clone();
+        move |_ctx: &Context, observation: FuelObservation| {
+            events
+                .lock()
+                .expect("events poisoned")
+                .push(format!("fuel:{:?}", observation.event));
+        }
+    });
+
+    let results = guest
+        .exported_function("run")
+        .unwrap()
+        .call_with_context(&call_ctx, &[41])
+        .unwrap();
+
+    assert_eq!(vec![42], results);
+    assert_eq!(
+        vec![
+            "fuel:Budgeted".to_string(),
+            "before:run".to_string(),
+            "after:run".to_string(),
+            "fuel:Consumed".to_string(),
+        ],
+        *events.lock().expect("events poisoned")
+    );
+}
+
+#[test]
 fn host_panic_does_not_emit_trap_observer_event() {
     let runtime = Runtime::new();
     let observations = Arc::new(Mutex::new(Vec::new()));
