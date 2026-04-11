@@ -4,19 +4,19 @@ use std::sync::{
 };
 
 use razero::{
-    get_close_notifier, get_compilation_workers, get_fuel_controller, get_function_listener_factory,
-    get_host_call_policy, get_host_call_policy_observer, get_import_resolver,
-    get_import_resolver_config, get_import_resolver_observer, get_memory_allocator,
-    get_snapshotter, get_trap_observer, get_yield_policy, get_yielder,
-    get_yield_policy_observer,
-    with_close_notifier, with_compilation_workers, with_fuel_controller, with_function_listener_factory,
-    with_host_call_policy, with_host_call_policy_observer, with_import_resolver,
-    with_import_resolver_acl, with_import_resolver_config, with_import_resolver_observer,
-    with_memory_allocator, with_snapshotter, with_trap_observer, with_yield_policy,
-    with_yield_policy_observer, with_yielder, Context, HostCallPolicyDecision,
+    benchmark_function_listener, get_close_notifier, get_compilation_workers, get_fuel_controller,
+    get_function_listener_factory, get_host_call_policy, get_host_call_policy_observer,
+    get_import_resolver, get_import_resolver_config, get_import_resolver_observer,
+    get_memory_allocator, get_snapshotter, get_trap_observer, get_yield_policy,
+    get_yield_policy_observer, get_yielder, with_close_notifier, with_compilation_workers,
+    with_fuel_controller, with_function_listener_factory, with_host_call_policy,
+    with_host_call_policy_observer, with_import_resolver, with_import_resolver_acl,
+    with_import_resolver_config, with_import_resolver_observer, with_memory_allocator,
+    with_snapshotter, with_trap_observer, with_yield_policy, with_yield_policy_observer,
+    with_yielder, Context, FunctionDefinition, FunctionListenerFn, HostCallPolicyDecision,
     HostCallPolicyObservation, ImportACL, ImportResolverConfig, ImportResolverEvent,
     ImportResolverObservation, LinearMemory, ModuleConfig, Runtime, RuntimeConfig,
-    SimpleFuelController, TrapCause, TrapObservation, ValueType, YieldPolicyDecision,
+    SimpleFuelController, StackFrame, TrapCause, TrapObservation, ValueType, YieldPolicyDecision,
     YieldPolicyObservation,
 };
 
@@ -168,7 +168,9 @@ fn memory_allocator_round_trips_through_public_surface() {
         Some(LinearMemory::new(cap, max))
     });
     let allocator = get_memory_allocator(&ctx).expect("allocator should be present");
-    let memory = allocator.allocate(8, 16).expect("allocation should succeed");
+    let memory = allocator
+        .allocate(8, 16)
+        .expect("allocation should succeed");
 
     assert_eq!(8, memory.len());
 }
@@ -187,20 +189,55 @@ fn host_call_policy_round_trips_through_public_surface() {
 
 #[test]
 fn function_listener_factory_round_trips_through_public_surface() {
-    let ctx = with_function_listener_factory(&Context::default(), |_definition: &razero::FunctionDefinition| {
-        Some(Arc::new(
-            |_ctx: &Context,
-             _module: &razero::Module,
-             _definition: &razero::FunctionDefinition,
-             _params: &[u64],
-             _stack: &mut dyn razero::StackIterator| {},
-        ) as Arc<dyn razero::FunctionListener>)
-    });
+    let ctx = with_function_listener_factory(
+        &Context::default(),
+        |_definition: &razero::FunctionDefinition| {
+            Some(Arc::new(
+                |_ctx: &Context,
+                 _module: &razero::Module,
+                 _definition: &razero::FunctionDefinition,
+                 _params: &[u64],
+                 _stack: &mut dyn razero::StackIterator| {},
+            ) as Arc<dyn razero::FunctionListener>)
+        },
+    );
     let factory = get_function_listener_factory(&ctx).expect("factory should be present");
 
     assert!(factory
         .new_listener(&razero::FunctionDefinition::new("demo"))
         .is_some());
+}
+
+#[test]
+fn benchmark_function_listener_runs_through_public_surface() {
+    let runtime = Runtime::new();
+    let module = runtime
+        .instantiate_binary(SIMPLE_EXPORT_WASM, ModuleConfig::new())
+        .unwrap();
+    let calls = Arc::new(AtomicU32::new(0));
+    let listener = FunctionListenerFn::new({
+        let calls = calls.clone();
+        move |_ctx: &Context,
+              _module: &razero::Module,
+              definition: &FunctionDefinition,
+              _params: &[u64],
+              stack: &mut dyn razero::StackIterator| {
+            assert_eq!("f", definition.name());
+            while stack.next() {}
+            calls.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let stack = [StackFrame::new(
+        FunctionDefinition::new("f"),
+        vec![1],
+        vec![2],
+        3,
+        5,
+    )];
+
+    benchmark_function_listener(2, &module, &stack, &listener);
+
+    assert_eq!(2, calls.load(Ordering::SeqCst));
 }
 
 #[test]
