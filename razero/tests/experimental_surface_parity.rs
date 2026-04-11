@@ -5,11 +5,13 @@ use std::sync::{
 
 use razero::{
     get_compilation_workers, get_host_call_policy, get_host_call_policy_observer,
-    get_import_resolver, get_trap_observer, get_yield_policy, get_yield_policy_observer,
-    with_compilation_workers, with_host_call_policy, with_host_call_policy_observer,
-    with_import_resolver, with_trap_observer, with_yield_policy, with_yield_policy_observer,
-    Context, HostCallPolicyDecision, HostCallPolicyObservation, ModuleConfig, Runtime,
-    RuntimeConfig, TrapCause, TrapObservation, YieldPolicyDecision, YieldPolicyObservation,
+    get_import_resolver, get_import_resolver_observer, get_trap_observer, get_yield_policy,
+    get_yield_policy_observer, with_compilation_workers, with_host_call_policy,
+    with_host_call_policy_observer, with_import_resolver, with_import_resolver_observer,
+    with_trap_observer, with_yield_policy, with_yield_policy_observer, Context,
+    HostCallPolicyDecision, HostCallPolicyObservation, ImportResolverEvent,
+    ImportResolverObservation, ModuleConfig, Runtime, RuntimeConfig, TrapCause, TrapObservation,
+    YieldPolicyDecision, YieldPolicyObservation,
 };
 
 const SIMPLE_EXPORT_WASM: &[u8] = &[
@@ -167,6 +169,30 @@ fn trap_observer_round_trips_through_public_surface() {
             module,
             cause: TrapCause::MemoryFault,
             err: razero::RuntimeError::new("memory fault"),
+        },
+    );
+
+    assert_eq!(1, observed.load(Ordering::SeqCst));
+}
+
+#[test]
+fn import_resolver_observer_round_trips_through_public_surface() {
+    let observed = Arc::new(AtomicU32::new(0));
+    let ctx = with_import_resolver_observer(&Context::default(), {
+        let observed = observed.clone();
+        move |_ctx: &Context, observation: ImportResolverObservation| {
+            assert_eq!(ImportResolverEvent::StoreFallback, observation.event);
+            observed.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let observer = get_import_resolver_observer(&ctx).expect("observer should be present");
+    observer.observe_import_resolution(
+        &ctx,
+        ImportResolverObservation {
+            module_name: "guest".to_string(),
+            import_module: "env".to_string(),
+            resolved_module: None,
+            event: ImportResolverEvent::StoreFallback,
         },
     );
 
