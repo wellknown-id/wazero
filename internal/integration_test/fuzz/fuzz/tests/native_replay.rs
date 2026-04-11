@@ -1,9 +1,9 @@
 use std::{env, fs};
 
 use wazero_fuzz_fuzz::{
-    replay_initial_policy_trap_parity, replay_native_parity, replay_native_trap_parity,
-    replay_resume_policy_trap_parity, replay_validation, run_native_parity,
-    run_policy_trap_parity, run_validation, ParityOptions,
+    replay_host_call_policy_trap_parity, replay_initial_policy_trap_parity,
+    replay_native_parity, replay_native_trap_parity, replay_resume_policy_trap_parity,
+    replay_validation, run_native_parity, run_policy_trap_parity, run_validation, ParityOptions,
 };
 
 const FAC_WASM: &[u8] = include_bytes!("../../../../../testdata/fac.wasm");
@@ -45,6 +45,7 @@ fn known_trap_fixture_replays_with_observer_capture() {
 fn known_policy_cases_replay_under_negative_path_helpers() {
     replay_initial_policy_trap_parity();
     replay_resume_policy_trap_parity(40);
+    replay_host_call_policy_trap_parity();
 }
 
 #[test]

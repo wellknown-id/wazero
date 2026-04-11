@@ -3,15 +3,21 @@ use std::sync::{Arc, Mutex};
 use arbitrary::Arbitrary;
 use libfuzzer_sys::arbitrary::{Result, Unstructured};
 use razero::{
-    logging, trap_cause_of, with_function_listener_factory, with_trap_observer,
-    with_yield_policy, with_yielder, Context, CoreFeatures, FunctionDefinition, FunctionListener,
-    FunctionListenerFactory, Module, ModuleConfig, Runtime, RuntimeConfig, RuntimeError,
-    TrapCause, TrapObservation, ValueType, YieldPolicyRequest, CORE_FEATURES_TAIL_CALL,
-    CORE_FEATURES_THREADS,
+    logging, trap_cause_of, with_function_listener_factory, with_host_call_policy,
+    with_trap_observer, with_yield_policy, with_yielder, Context, CoreFeatures,
+    FunctionDefinition, FunctionListener, FunctionListenerFactory, Module, ModuleConfig, Runtime,
+    RuntimeConfig, RuntimeError, TrapCause, TrapObservation, ValueType, YieldPolicyRequest,
+    CORE_FEATURES_TAIL_CALL, CORE_FEATURES_THREADS,
 };
 use wasm_smith::Config;
 
 const YIELD_WASM: &[u8] = include_bytes!("../../../../../experimental/testdata/yield.wasm");
+const GUEST_IMPORT_INC_WASM: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01,
+    0x7f, 0x02, 0x0b, 0x01, 0x03, b'e', b'n', b'v', 0x03, b'i', b'n', b'c', 0x00, 0x00, 0x03,
+    0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x01, 0x0a, 0x08, 0x01,
+    0x06, 0x00, 0x20, 0x00, 0x10, 0x00, 0x0b,
+];
 
 #[derive(Clone, Copy)]
 pub struct ParityOptions {
@@ -61,6 +67,7 @@ struct TrapSnapshot {
 enum PolicyTrapScenario {
     InitialDeny,
     ResumeDeny,
+    HostCallDeny,
 }
 
 #[derive(Arbitrary, Clone, Copy, Debug)]
@@ -83,6 +90,7 @@ struct CaptureOptions {
     capture_traps: bool,
     attach_yielder: bool,
     deny_yields: bool,
+    deny_host_calls: bool,
     export_name: Option<String>,
 }
 
@@ -131,6 +139,13 @@ pub fn replay_resume_policy_trap_parity(resume_value: u64) {
     replay_policy_trap_parity(PolicyTrapInput {
         scenario: PolicyTrapScenario::ResumeDeny,
         resume_value,
+    });
+}
+
+pub fn replay_host_call_policy_trap_parity() {
+    replay_policy_trap_parity(PolicyTrapInput {
+        scenario: PolicyTrapScenario::HostCallDeny,
+        resume_value: 0,
     });
 }
 
@@ -207,21 +222,28 @@ fn generate_execution_module(data: &[u8], check_logging: bool) -> Result<Vec<u8>
 fn capture_execution(wasm: &[u8], secure_mode: bool, options: &CaptureOptions) -> ExecutionSnapshot {
     let ctx = Context::default();
     let runtime = Runtime::with_config(runtime_config(secure_mode));
+    let outcome = capture_execution_with_runtime(&runtime, &ctx, wasm, options);
+    runtime.close(&ctx).expect("runtime close should succeed");
+    outcome
+}
+
+fn capture_execution_with_runtime(
+    runtime: &Runtime,
+    _ctx: &Context,
+    wasm: &[u8],
+    options: &CaptureOptions,
+) -> ExecutionSnapshot {
     let compiled = match runtime.compile(wasm) {
         Ok(compiled) => compiled,
         Err(err) => {
-            let outcome = ExecutionSnapshot::CompileError(err.to_string());
-            runtime.close(&ctx).expect("runtime close should succeed");
-            return outcome;
+            return ExecutionSnapshot::CompileError(err.to_string());
         }
     };
 
     let module = match runtime.instantiate(&compiled, ModuleConfig::new()) {
         Ok(module) => module,
         Err(err) => {
-            let outcome = ExecutionSnapshot::InstantiateError(err.to_string());
-            runtime.close(&ctx).expect("runtime close should succeed");
-            return outcome;
+            return ExecutionSnapshot::InstantiateError(err.to_string());
         }
     };
 
@@ -235,11 +257,7 @@ fn capture_execution(wasm: &[u8], secure_mode: bool, options: &CaptureOptions) -
 
     let exports = match selected_exports(&module, options) {
         Ok(exports) => exports,
-        Err(err) => {
-            let outcome = ExecutionSnapshot::SetupError(err);
-            runtime.close(&ctx).expect("runtime close should succeed");
-            return outcome;
-        }
+        Err(err) => return ExecutionSnapshot::SetupError(err),
     };
 
     let mut functions = Vec::new();
@@ -270,7 +288,6 @@ fn capture_execution(wasm: &[u8], secure_mode: bool, options: &CaptureOptions) -
         logs,
         trap_observations,
     };
-    runtime.close(&ctx).expect("runtime close should succeed");
     outcome
 }
 
@@ -297,6 +314,14 @@ fn replay_policy_trap_parity(input: PolicyTrapInput) {
             assert_eq!(
                 standard, secure,
                 "resume-path policy denial mismatch between standard and secure mode"
+            );
+        }
+        PolicyTrapScenario::HostCallDeny => {
+            let standard = capture_host_call_policy_denial(false);
+            let secure = capture_host_call_policy_denial(true);
+            assert_eq!(
+                standard, secure,
+                "host-call policy denial mismatch between standard and secure mode"
             );
         }
     }
@@ -358,6 +383,21 @@ fn capture_resume_policy_denial(secure_mode: bool, resume_value: u64) -> ResumeS
     snapshot
 }
 
+fn capture_host_call_policy_denial(secure_mode: bool) -> ExecutionSnapshot {
+    let ctx = Context::default();
+    let runtime = Runtime::with_config(runtime_config(secure_mode));
+    install_inc_host(&runtime);
+    let options = CaptureOptions {
+        capture_traps: true,
+        deny_host_calls: true,
+        export_name: Some("run".to_string()),
+        ..CaptureOptions::default()
+    };
+    let snapshot = capture_execution_with_runtime(&runtime, &ctx, GUEST_IMPORT_INC_WASM, &options);
+    runtime.close(&ctx).expect("runtime close should succeed");
+    snapshot
+}
+
 fn build_call_context(
     options: &CaptureOptions,
     logs: Option<Arc<Mutex<Vec<String>>>>,
@@ -370,6 +410,9 @@ fn build_call_context(
     }
     if options.deny_yields {
         ctx = with_yield_policy(&ctx, deny_all_yields);
+    }
+    if options.deny_host_calls {
+        ctx = with_host_call_policy(&ctx, deny_all_host_calls);
     }
     if let Some(events) = logs {
         ctx = with_function_listener_factory(
@@ -415,6 +458,17 @@ fn install_yield_host(runtime: &Runtime) {
         .expect("yield host should instantiate");
 }
 
+fn install_inc_host(runtime: &Runtime) {
+    runtime
+        .new_host_module_builder("env")
+        .new_function_builder()
+        .with_func(|_ctx, _module, params| Ok(vec![params[0] + 1]), &[ValueType::I32], &[ValueType::I32])
+        .with_name("inc")
+        .export("inc")
+        .instantiate(&Context::default())
+        .expect("increment host should instantiate");
+}
+
 fn selected_exports(module: &Module, options: &CaptureOptions) -> std::result::Result<Vec<String>, String> {
     if let Some(export_name) = &options.export_name {
         let definitions = module.exported_function_definitions();
@@ -440,6 +494,10 @@ fn selected_exports(module: &Module, options: &CaptureOptions) -> std::result::R
 }
 
 fn deny_all_yields(_ctx: &Context, _request: &YieldPolicyRequest) -> bool {
+    false
+}
+
+fn deny_all_host_calls(_ctx: &Context, _request: &razero::HostCallPolicyRequest) -> bool {
     false
 }
 
