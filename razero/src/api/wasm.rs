@@ -1075,6 +1075,18 @@ impl Function {
                 if fuel_remaining.as_ref().is_some_and(|remaining| {
                     remaining.load(std::sync::atomic::Ordering::SeqCst) < 0
                 }) {
+                    if let Some(remaining) = &fuel_remaining {
+                        let remaining = remaining.load(std::sync::atomic::Ordering::SeqCst);
+                        notify_fuel_observer(
+                            &ctx,
+                            &module,
+                            FuelEvent::Exhausted,
+                            budget,
+                            budget - remaining,
+                            remaining,
+                            0,
+                        );
+                    }
                     snapshot_active.store(false, std::sync::atomic::Ordering::SeqCst);
                     return Err(RuntimeError::new("fuel exhausted"));
                 }

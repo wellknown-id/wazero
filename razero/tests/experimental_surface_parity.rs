@@ -4,22 +4,23 @@ use std::sync::{
 };
 
 use razero::{
-    benchmark_function_listener, get_close_notifier, get_compilation_workers, get_fuel_controller,
-    get_fuel_observer, get_function_listener_factory, get_host_call_policy,
+    add_fuel, benchmark_function_listener, get_close_notifier, get_compilation_workers,
+    get_fuel_controller, get_fuel_observer, get_function_listener_factory, get_host_call_policy,
     get_host_call_policy_observer, get_import_resolver, get_import_resolver_config,
     get_import_resolver_observer, get_memory_allocator, get_snapshotter, get_trap_observer,
-    get_yield_policy, get_yield_policy_observer, get_yielder, new_stack_iterator, trap_cause_of,
-    with_close_notifier, with_compilation_workers, with_fuel_controller, with_fuel_observer,
-    with_function_listener_factory, with_host_call_policy, with_host_call_policy_observer,
-    with_import_resolver, with_import_resolver_acl, with_import_resolver_config,
-    with_import_resolver_observer, with_memory_allocator, with_snapshotter, with_trap_observer,
-    with_yield_observer, with_yield_policy, with_yield_policy_observer, with_yielder,
-    AggregatingFuelController, Context, FuelEvent, FuelObservation, FunctionDefinition,
-    FunctionListenerFn, HostCallPolicyDecision, HostCallPolicyObservation, HostCallPolicyRequest,
-    ImportACL, ImportResolverConfig, ImportResolverEvent, ImportResolverObservation, LinearMemory,
-    MemoryDefinition, ModuleConfig, Runtime, RuntimeConfig, RuntimeError, SimpleFuelController,
-    StackFrame, StackIterator, TrapCause, TrapObservation, ValueType, YieldEvent, YieldObservation,
-    YieldPolicyDecision, YieldPolicyObservation,
+    get_yield_policy, get_yield_policy_observer, get_yielder, new_stack_iterator, remaining_fuel,
+    trap_cause_of, with_close_notifier, with_compilation_workers, with_fuel_controller,
+    with_fuel_observer, with_function_listener_factory, with_host_call_policy,
+    with_host_call_policy_observer, with_import_resolver, with_import_resolver_acl,
+    with_import_resolver_config, with_import_resolver_observer, with_memory_allocator,
+    with_snapshotter, with_trap_observer, with_yield_observer, with_yield_policy,
+    with_yield_policy_observer, with_yielder, AggregatingFuelController, Context, FuelEvent,
+    FuelObservation, FunctionDefinition, FunctionListenerFn, HostCallPolicyDecision,
+    HostCallPolicyObservation, HostCallPolicyRequest, ImportACL, ImportResolverConfig,
+    ImportResolverEvent, ImportResolverObservation, LinearMemory, MemoryDefinition, ModuleConfig,
+    Runtime, RuntimeConfig, RuntimeError, SimpleFuelController, StackFrame, StackIterator,
+    TrapCause, TrapObservation, ValueType, YieldEvent, YieldObservation, YieldPolicyDecision,
+    YieldPolicyObservation,
 };
 
 const SIMPLE_EXPORT_WASM: &[u8] = &[
@@ -197,6 +198,60 @@ fn fuel_observer_public_surface_emits_budgeted_notifications() {
     );
     assert_eq!(
         vec![(Some("example".to_string()), FuelEvent::Budgeted, 5, 0, 5, 0)],
+        *observations.lock().expect("fuel observations poisoned")
+    );
+}
+
+#[test]
+fn fuel_observer_public_surface_emits_exhausted_notifications() {
+    let runtime = Runtime::new();
+    let module = runtime
+        .new_host_module_builder("env")
+        .new_function_builder()
+        .with_func(
+            |ctx, _module, _params| {
+                assert_eq!(0, remaining_fuel(&ctx).unwrap());
+                add_fuel(&ctx, -2).unwrap();
+                Ok(vec![1])
+            },
+            &[],
+            &[ValueType::I32],
+        )
+        .with_name("burn")
+        .export("burn")
+        .instantiate(&Context::default())
+        .unwrap();
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let ctx = with_fuel_observer(
+        &with_fuel_controller(&Context::default(), SimpleFuelController::new(1)),
+        {
+            let observations = observations.clone();
+            move |_ctx: &Context, observation: FuelObservation| {
+                observations
+                    .lock()
+                    .expect("fuel observations poisoned")
+                    .push((
+                        observation.event,
+                        observation.budget,
+                        observation.consumed,
+                        observation.remaining,
+                    ));
+            }
+        },
+    );
+
+    let err = module
+        .exported_function("burn")
+        .unwrap()
+        .call_with_context(&ctx, &[])
+        .unwrap_err();
+
+    assert_eq!("fuel exhausted", err.to_string());
+    assert_eq!(
+        vec![
+            (FuelEvent::Budgeted, 1, 0, 1),
+            (FuelEvent::Exhausted, 1, 3, -2),
+        ],
         *observations.lock().expect("fuel observations poisoned")
     );
 }
