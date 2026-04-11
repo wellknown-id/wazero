@@ -3864,6 +3864,101 @@ int main(void) {
     }
 
     #[test]
+    fn packaged_module_sidecar_rejects_corrupted_active_data_segment_without_memory() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            function_section: vec![0],
+            memory_section: Some(razero_wasm::module::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                ..razero_wasm::module::Memory::default()
+            }),
+            code_section: vec![Code {
+                body: vec![0x41, 0x05, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![
+                Export {
+                    ty: ExternType::FUNC,
+                    name: "run".to_string(),
+                    index: 0,
+                },
+                Export {
+                    ty: ExternType::MEMORY,
+                    name: "memory".to_string(),
+                    index: 0,
+                },
+            ],
+            data_section: vec![DataSegment {
+                offset_expression: ConstExpr::from_i32(0),
+                init: vec![0xaa],
+                passive: false,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let metadata = compile_module_metadata(&module);
+        assert!(metadata.module_shape.has_any_memory);
+        assert_eq!(1, metadata.data_segments.len());
+        assert!(!metadata.data_segments[0].passive);
+
+        let mut sidecar = serialize_aot_metadata(&metadata);
+        let mut module_shape_pattern = Vec::new();
+        module_shape_pattern
+            .extend_from_slice(&metadata.module_shape.enabled_features.to_le_bytes());
+        module_shape_pattern
+            .extend_from_slice(&metadata.module_shape.import_function_count.to_le_bytes());
+        module_shape_pattern
+            .extend_from_slice(&metadata.module_shape.import_global_count.to_le_bytes());
+        module_shape_pattern
+            .extend_from_slice(&metadata.module_shape.import_memory_count.to_le_bytes());
+        module_shape_pattern
+            .extend_from_slice(&metadata.module_shape.import_table_count.to_le_bytes());
+        module_shape_pattern
+            .extend_from_slice(&metadata.module_shape.local_function_count.to_le_bytes());
+        module_shape_pattern
+            .extend_from_slice(&metadata.module_shape.local_global_count.to_le_bytes());
+        module_shape_pattern
+            .extend_from_slice(&metadata.module_shape.local_table_count.to_le_bytes());
+        module_shape_pattern.push(u8::from(metadata.module_shape.has_local_memory));
+        module_shape_pattern.push(u8::from(metadata.module_shape.has_any_memory));
+        module_shape_pattern.push(u8::from(metadata.module_shape.has_start_section));
+        module_shape_pattern
+            .extend_from_slice(&metadata.module_shape.data_segment_count.to_le_bytes());
+        module_shape_pattern
+            .extend_from_slice(&metadata.module_shape.element_segment_count.to_le_bytes());
+        module_shape_pattern.push(u8::from(metadata.module_shape.is_host_module));
+
+        let matches = sidecar
+            .windows(module_shape_pattern.len())
+            .enumerate()
+            .filter_map(|(offset, window)| {
+                (window == module_shape_pattern.as_slice()).then_some(offset)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(1, matches.len());
+        sidecar[matches[0] + 37] = 0;
+
+        let encoded = serialize_native_package_metadata_bundle(&NativePackageMetadataBundle {
+            modules: vec![NativePackageMetadataEntry {
+                module_name: "guest".to_string(),
+                metadata_sidecar_bytes: sidecar,
+            }],
+            host_imports: Vec::new(),
+        });
+
+        let decoded = deserialize_native_package_metadata_bundle(&encoded).unwrap();
+        let err = crate::aot::deserialize_aot_metadata(&decoded.modules[0].metadata_sidecar_bytes)
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "aot metadata: active data segment requires memory"
+        );
+    }
+
+    #[test]
     fn packaged_module_sidecar_rejects_corrupted_element_segment_count_mismatch() {
         let module = Module {
             type_section: vec![function_type(&[], &[ValueType::I32])],

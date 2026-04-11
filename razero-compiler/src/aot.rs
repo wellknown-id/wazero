@@ -1601,6 +1601,14 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
             "aot metadata: data segment count mismatch".to_string(),
         ));
     }
+    if data_segments
+        .iter()
+        .any(|segment| !segment.passive && !module_shape.has_any_memory)
+    {
+        return Err(AotMetadataError::InvalidHeader(
+            "aot metadata: active data segment requires memory".to_string(),
+        ));
+    }
     if module_shape.element_segment_count as usize != element_segments.len() {
         return Err(AotMetadataError::InvalidHeader(
             "aot metadata: element segment count mismatch".to_string(),
