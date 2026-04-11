@@ -1578,6 +1578,11 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
             "aot metadata: global count mismatch".to_string(),
         ));
     }
+    if module_shape.local_table_count as usize != tables.len() {
+        return Err(AotMetadataError::InvalidHeader(
+            "aot metadata: table count mismatch".to_string(),
+        ));
+    }
 
     Ok(AotCompiledMetadata {
         target: AotTarget {
