@@ -692,6 +692,31 @@ fn yield_policy_round_trips_through_public_surface() {
 }
 
 #[test]
+fn yield_policy_request_builders_round_trip_through_public_surface() {
+    let function = FunctionDefinition::new("test_fn")
+        .with_module_name(Some("guest".to_string()))
+        .with_export_name("test")
+        .with_signature(vec![ValueType::I32], vec![ValueType::I64])
+        .with_import("env", "call");
+    let memory = MemoryDefinition::new(1, Some(2))
+        .with_module_name(Some("guest".to_string()))
+        .with_export_name("memory")
+        .with_import("env", "memory");
+    let request = razero::YieldPolicyRequest::new()
+        .with_function(function)
+        .with_memory(memory.clone())
+        .with_caller_module_name("caller");
+
+    assert_eq!(Some("caller"), request.caller_module_name());
+    assert_eq!(Some(&memory), request.memory());
+    assert_eq!(Some("test_fn"), request.name());
+    assert_eq!(Some("guest"), request.module_name());
+    assert_eq!(Some(("env", "call")), request.import());
+    assert_eq!(1, request.param_count());
+    assert_eq!(1, request.result_count());
+}
+
+#[test]
 fn yield_policy_observer_round_trips_through_public_surface() {
     let observed = Arc::new(AtomicU32::new(0));
     let ctx = with_yield_policy_observer(&Context::default(), {
