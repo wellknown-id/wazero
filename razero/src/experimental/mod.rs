@@ -4,6 +4,7 @@ pub mod compilation_workers;
 pub mod experimental;
 pub mod features;
 pub mod fuel;
+pub mod fuel_observer;
 pub mod host_call_policy;
 pub mod host_call_policy_observer;
 pub mod import_resolver;
@@ -27,6 +28,9 @@ pub use features::{CORE_FEATURES_EXTENDED_CONST, CORE_FEATURES_TAIL_CALL, CORE_F
 pub use fuel::{
     add_fuel, get_fuel_controller, remaining_fuel, with_fuel_controller, AggregatingFuelController,
     FuelController, IntoFuelController, SimpleFuelController,
+};
+pub use fuel_observer::{
+    get_fuel_observer, with_fuel_observer, FuelEvent, FuelObservation, FuelObserver,
 };
 pub use host_call_policy::{
     get_host_call_policy, with_host_call_policy, HostCallPolicy, HostCallPolicyRequest,

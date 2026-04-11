@@ -12,6 +12,7 @@ use crate::api::wasm::FunctionDefinition;
 use crate::experimental::{
     close_notifier::CloseNotifier,
     fuel::FuelController,
+    fuel_observer::FuelObserver,
     host_call_policy::HostCallPolicy,
     listener::FunctionListenerFactory,
     listener::{FunctionListener, StackFrame},
@@ -51,6 +52,7 @@ pub struct Context {
     lifecycle: Option<ContextLifecycle>,
     pub(crate) compilation_workers: Option<isize>,
     pub(crate) fuel_controller: Option<Arc<dyn FuelController>>,
+    pub(crate) fuel_observer: Option<Arc<dyn FuelObserver>>,
     pub(crate) function_listener_factory: Option<Arc<dyn FunctionListenerFactory>>,
     pub(crate) snapshotter_enabled: bool,
     pub(crate) yielder_enabled: bool,

@@ -17,6 +17,7 @@ use crate::{
     experimental::{
         close_notifier::CloseNotifier,
         fuel::FuelController,
+        fuel_observer::{notify_fuel_observer, FuelEvent},
         host_call_policy::HostCallPolicyRequest,
         host_call_policy_observer::{notify_host_call_policy_observer, HostCallPolicyDecision},
         listener::{new_stack_iterator, FunctionListener, StackFrame},
@@ -938,6 +939,9 @@ impl Function {
             .max(0);
         let fuel_remaining =
             (budget > 0).then(|| Arc::new(std::sync::atomic::AtomicI64::new(budget)));
+        if fuel_remaining.is_some() {
+            notify_fuel_observer(&ctx, &module, FuelEvent::Budgeted, budget, budget);
+        }
         if self.inner.is_host {
             if let Some(remaining) = &fuel_remaining {
                 remaining.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
