@@ -1064,7 +1064,7 @@ fn instantiate_memory(
     let allocator: Arc<dyn MemoryAllocator> = if let Some(allocator) = ctx.memory_allocator.clone()
     {
         allocator
-    } else if config.secure_mode() && supports_guard_pages() {
+    } else if secure_mode_uses_guard_pages(config) {
         Arc::new(GuardPageMemoryAllocator)
     } else {
         Arc::new(DefaultMemoryAllocator)
@@ -1077,6 +1077,10 @@ fn instantiate_memory(
         .allocate(definition.minimum_pages() as usize * 65_536, max_bytes)
         .ok_or_else(|| RuntimeError::new("memory allocation failed"))?;
     Ok(Some(Memory::new(definition, linear_memory)))
+}
+
+fn secure_mode_uses_guard_pages(config: &RuntimeConfig) -> bool {
+    config.secure_mode() && supports_guard_pages()
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1906,7 +1910,7 @@ mod tests {
     };
     use std::{collections::HashMap, thread};
 
-    use super::Runtime;
+    use super::{secure_mode_uses_guard_pages, Runtime};
     use crate::{
         api::{
             error::{RuntimeError, EXIT_CODE_CONTEXT_CANCELED, EXIT_CODE_DEADLINE_EXCEEDED},
@@ -2422,6 +2426,15 @@ mod tests {
                 .expect_err("out-of-bounds load should trap");
             assert!(err.to_string().contains("out of bounds memory access"));
         }
+    }
+
+    #[test]
+    fn secure_mode_uses_guard_pages_matches_platform_capability() {
+        assert!(!secure_mode_uses_guard_pages(&RuntimeConfig::new().with_secure_mode(false)));
+        assert_eq!(
+            supports_guard_pages(),
+            secure_mode_uses_guard_pages(&RuntimeConfig::new().with_secure_mode(true))
+        );
     }
 
     #[cfg(not(target_os = "linux"))]
