@@ -45,10 +45,24 @@ const IMPORTED_TABLE_GUEST_WASM: &[u8] = &[
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x02, 0x10, 0x01, 0x03, b'e', b'n', b'v', 0x05,
     b't', b'a', b'b', b'l', b'e', 0x01, 0x70, 0x01, 0x01, 0x02,
 ];
+const IMPORTED_MEMORY_HOST_WASM: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x0a, 0x01,
+    0x06, b'm', b'e', b'm', b'o', b'r', b'y', 0x02, 0x00,
+];
+const IMPORTED_MEMORY_GUEST_WASM: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x02, 0x0f,
+    0x01, 0x03, b'e', b'n', b'v', 0x06, b'm', b'e', b'm', b'o', b'r', b'y', 0x02, 0x00, 0x01, 0x03,
+    0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x00, 0x0a, 0x04, 0x01, 0x02,
+    0x00, 0x0b,
+];
 const EXPORTED_GLOBAL_WASM: &[u8] = &[
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x06, 0x06, 0x01, 0x7e, 0x01, 0x42, 0x2a, 0x0b,
     0x07, 0x13, 0x02, 0x07, b'c', b'o', b'u', b'n', b't', b'e', b'r', 0x03, 0x00, 0x05, b'a', b'l',
     b'i', b'a', b's', 0x03, 0x00,
+];
+const EXPORTED_MEMORY_WASM: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x0a, 0x01,
+    0x06, b'm', b'e', b'm', b'o', b'r', b'y', 0x02, 0x00,
 ];
 const EXPORTED_TABLE_WASM: &[u8] = &[
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x04, 0x05, 0x01, 0x70, 0x01, 0x01, 0x02, 0x07,
@@ -568,6 +582,49 @@ fn module_imported_function_definitions_round_trip_through_public_surface() {
     assert_eq!(Some(("env", "hook")), definition.import());
     assert_eq!(&[ValueType::I32], definition.param_types());
     assert_eq!(&[ValueType::I32], definition.result_types());
+}
+
+#[test]
+fn module_imported_memory_definitions_round_trip_through_public_surface() {
+    let runtime = Runtime::new();
+    runtime
+        .instantiate_binary(
+            IMPORTED_MEMORY_HOST_WASM,
+            ModuleConfig::new().with_name("env"),
+        )
+        .unwrap();
+
+    let guest = runtime
+        .instantiate_binary(
+            IMPORTED_MEMORY_GUEST_WASM,
+            ModuleConfig::new().with_name("guest"),
+        )
+        .unwrap();
+
+    let imported = guest.imported_memory_definitions();
+    assert_eq!(1, imported.len());
+    let definition = &imported[0];
+    assert_eq!(None, definition.module_name());
+    assert_eq!(Some(("env", "memory")), definition.import());
+    assert_eq!(1, definition.minimum_pages());
+    assert_eq!(None, definition.maximum_pages());
+}
+
+#[test]
+fn module_exported_memory_definitions_round_trip_through_public_surface() {
+    let runtime = Runtime::new();
+    let guest = runtime
+        .instantiate_binary(EXPORTED_MEMORY_WASM, ModuleConfig::new().with_name("guest"))
+        .unwrap();
+
+    let exported = guest.exported_memory_definitions();
+    assert_eq!(1, exported.len());
+    let definition = exported.get("memory").unwrap();
+    assert_eq!(None, definition.module_name());
+    assert_eq!(1, definition.minimum_pages());
+    assert_eq!(None, definition.maximum_pages());
+    assert_eq!(None, definition.import());
+    assert_eq!(&["memory".to_string()], definition.export_names());
 }
 
 #[test]
