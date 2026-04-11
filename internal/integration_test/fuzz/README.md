@@ -14,7 +14,7 @@ Currently, we have the following fuzzing targets:
 - `no_diff`: generates terminating Wasm modules and compares native Rust execution outcomes between standard and secure mode.
 - `memory_no_diff`: same as `no_diff`, and also compares the final guest memory snapshot between modes.
 - `logging_no_diff`: same as `no_diff`, and also compares listener/log formatting output between modes.
-- `policy_no_diff`: replays fixed cooperative-yield and imported-host-call guest scenarios and compares policy-denied / trap-observer behavior between standard and secure mode.
+- `policy_no_diff`: replays fixed cooperative-yield and imported-host-call guest scenarios and compares policy-denied behavior, trap-observer output, and relevant yield / host-call policy observer event streams between standard and secure mode.
 - `validation`: compiles maybe-invalid Wasm module binaries with the native Rust runtime to ensure validation and compilation do not panic.
 
 `cargo test` in this workspace also runs deterministic replay coverage for
