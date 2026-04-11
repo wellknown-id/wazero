@@ -55,6 +55,30 @@ example:
 For exact platform/runtime support details, see
 [SUPPORT_MATRIX.md](SUPPORT_MATRIX.md).
 
+## Zero-trust host interface model
+
+`razero` keeps the core runtime intentionally small and unopinionated about
+system functionality:
+
+- there is **no built-in runtime-owned WASI layer** in the core crates;
+- filesystem, network, clock, random, and similar capabilities only exist if
+  the embedder explicitly supplies host imports for them;
+- import ACLs / resolver configuration are the main built-in way to keep module
+  imports fail-closed at instantiation time;
+- host policy remains the embedder's responsibility, so sandboxing stories for
+  files, egress, timers, or other system surfaces live outside the core engine.
+
+A practical embedding pattern is:
+
+1. configure the runtime for execution policy (`secure_mode`, fuel, yield, and
+   related controls);
+2. instantiate guests with an explicit import resolver / ACL policy;
+3. provide only the host modules and capabilities each guest should actually
+   reach.
+
+See [THREAT_MODEL.md](THREAT_MODEL.md) and [SUPPORT_MATRIX.md](SUPPORT_MATRIX.md)
+for the current security boundaries and support caveats.
+
 ## Repository guide
 
 - [examples/README.md](examples/README.md) - example and fixture overview
