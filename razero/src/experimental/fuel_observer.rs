@@ -17,7 +17,9 @@ pub struct FuelObservation {
     pub module: Module,
     pub event: FuelEvent,
     pub budget: i64,
+    pub consumed: i64,
     pub remaining: i64,
+    pub delta: i64,
 }
 
 pub trait FuelObserver: Send + Sync {
@@ -48,7 +50,9 @@ pub(crate) fn notify_fuel_observer(
     module: &Module,
     event: FuelEvent,
     budget: i64,
+    consumed: i64,
     remaining: i64,
+    delta: i64,
 ) {
     let Some(observer) = get_fuel_observer(ctx) else {
         return;
@@ -59,7 +63,9 @@ pub(crate) fn notify_fuel_observer(
             module: module.clone(),
             event,
             budget,
+            consumed,
             remaining,
+            delta,
         },
     );
 }
@@ -81,7 +87,9 @@ mod tests {
                     observation.module.name().map(str::to_string),
                     observation.event,
                     observation.budget,
+                    observation.consumed,
                     observation.remaining,
+                    observation.delta,
                 ));
             }
         });
@@ -102,12 +110,14 @@ mod tests {
                 module,
                 event: FuelEvent::Budgeted,
                 budget: 7,
+                consumed: 0,
                 remaining: 7,
+                delta: 0,
             },
         );
 
         assert_eq!(
-            vec![(Some("guest".to_string()), FuelEvent::Budgeted, 7, 7)],
+            vec![(Some("guest".to_string()), FuelEvent::Budgeted, 7, 0, 7, 0)],
             *events.lock().expect("observer events poisoned")
         );
     }

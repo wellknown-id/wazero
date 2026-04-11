@@ -152,7 +152,9 @@ fn fuel_observer_public_surface_emits_budgeted_notifications() {
                         observation.module.name().map(str::to_string),
                         observation.event,
                         observation.budget,
+                        observation.consumed,
                         observation.remaining,
+                        observation.delta,
                     ));
             }
         },
@@ -169,7 +171,7 @@ fn fuel_observer_public_surface_emits_budgeted_notifications() {
             .unwrap()
     );
     assert_eq!(
-        vec![(Some("example".to_string()), FuelEvent::Budgeted, 5, 5)],
+        vec![(Some("example".to_string()), FuelEvent::Budgeted, 5, 0, 5, 0)],
         *observations.lock().expect("fuel observations poisoned")
     );
 }

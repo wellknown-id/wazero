@@ -940,7 +940,7 @@ impl Function {
         let fuel_remaining =
             (budget > 0).then(|| Arc::new(std::sync::atomic::AtomicI64::new(budget)));
         if fuel_remaining.is_some() {
-            notify_fuel_observer(&ctx, &module, FuelEvent::Budgeted, budget, budget);
+            notify_fuel_observer(&ctx, &module, FuelEvent::Budgeted, budget, 0, budget, 0);
         }
         if self.inner.is_host {
             if let Some(remaining) = &fuel_remaining {
