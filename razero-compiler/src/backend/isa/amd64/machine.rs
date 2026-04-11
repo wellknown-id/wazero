@@ -1778,6 +1778,8 @@ impl BackendMachine for Amd64Machine {
                     ));
                 self.lower_call_results(instruction, &abi);
             }
+            Opcode::Jump => self.lower_single_branch(instruction),
+            Opcode::Brz | Opcode::Brnz => self.lower_conditional_branch(instruction),
             _ => panic!("unhandled amd64 opcode lowering: {:?}", instruction.opcode),
         }
     }
