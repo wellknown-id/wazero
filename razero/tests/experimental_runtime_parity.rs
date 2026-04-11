@@ -11,10 +11,11 @@ use std::{
 use razero::{
     add_fuel, get_fuel_controller, get_import_resolver, get_snapshotter, get_yielder,
     remaining_fuel, trap_cause_of, with_fuel_controller, with_function_listener_factory,
-    with_import_resolver, with_snapshotter, with_trap_observer, with_yield_policy, with_yielder,
-    Context, CoreFeatures, FunctionDefinition, FunctionListener, FunctionListenerFactory, Module,
-    ModuleConfig, Runtime, RuntimeConfig, RuntimeError, Snapshot, TrapCause, ValueType, YieldError,
-    CORE_FEATURES_THREADS, ERR_YIELDED,
+    with_import_resolver, with_import_resolver_config, with_import_resolver_observer,
+    with_snapshotter, with_trap_observer, with_yield_policy, with_yielder, Context, CoreFeatures,
+    FunctionDefinition, FunctionListener, FunctionListenerFactory, ImportACL, ImportResolverConfig,
+    ImportResolverEvent, ImportResolverObservation, Module, ModuleConfig, Runtime, RuntimeConfig,
+    RuntimeError, Snapshot, TrapCause, ValueType, YieldError, CORE_FEATURES_THREADS, ERR_YIELDED,
 };
 
 const YIELD_WASM: &[u8] = include_bytes!("../../experimental/testdata/yield.wasm");
@@ -1185,6 +1186,351 @@ fn import_resolver_resolves_runtime_imports_for_anonymous_modules() {
             .unwrap();
         assert_eq!(1, call_count.load(Ordering::SeqCst));
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ImportObserverRecord {
+    import_module: String,
+    event: ImportResolverEvent,
+    resolved: bool,
+}
+
+#[test]
+fn import_resolver_observer_reports_acl_allow_then_store_fallback() {
+    let runtime = Runtime::new();
+    runtime
+        .new_host_module_builder("env")
+        .new_function_builder()
+        .with_func(
+            |_ctx, _module, params| Ok(vec![params[0] + 1]),
+            &[ValueType::I32],
+            &[ValueType::I32],
+        )
+        .with_name("inc")
+        .export("inc")
+        .instantiate(&Context::default())
+        .unwrap();
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let ctx = with_import_resolver_observer(
+        &with_import_resolver_config(
+            &Context::default(),
+            ImportResolverConfig {
+                acl: Some(ImportACL::new().allow_modules(["env"])),
+                ..ImportResolverConfig::default()
+            },
+        ),
+        {
+            let events = events.clone();
+            move |_ctx: &Context, observation: ImportResolverObservation| {
+                events
+                    .lock()
+                    .expect("import observer events poisoned")
+                    .push(ImportObserverRecord {
+                        import_module: observation.import_module,
+                        event: observation.event,
+                        resolved: observation.resolved_module.is_some(),
+                    });
+            }
+        },
+    );
+
+    let guest = runtime
+        .instantiate_with_context(
+            &ctx,
+            &runtime.compile(GUEST_IMPORT_INC_WASM).unwrap(),
+            ModuleConfig::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        vec![42],
+        guest.exported_function("run").unwrap().call(&[41]).unwrap()
+    );
+    assert_eq!(
+        vec![
+            ImportObserverRecord {
+                import_module: "env".to_string(),
+                event: ImportResolverEvent::AclAllowed,
+                resolved: false,
+            },
+            ImportObserverRecord {
+                import_module: "env".to_string(),
+                event: ImportResolverEvent::StoreFallback,
+                resolved: false,
+            },
+        ],
+        *events.lock().expect("import observer events poisoned")
+    );
+}
+
+#[test]
+fn import_resolver_observer_reports_acl_denied() {
+    let runtime = Runtime::new();
+    runtime
+        .new_host_module_builder("env")
+        .new_function_builder()
+        .with_func(
+            |_ctx, _module, params| Ok(vec![params[0] + 1]),
+            &[ValueType::I32],
+            &[ValueType::I32],
+        )
+        .with_name("inc")
+        .export("inc")
+        .instantiate(&Context::default())
+        .unwrap();
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let ctx = with_import_resolver_observer(
+        &with_import_resolver_config(
+            &Context::default(),
+            ImportResolverConfig {
+                acl: Some(ImportACL::new().deny_modules(["env"])),
+                ..ImportResolverConfig::default()
+            },
+        ),
+        {
+            let events = events.clone();
+            move |_ctx: &Context, observation: ImportResolverObservation| {
+                events
+                    .lock()
+                    .expect("import observer events poisoned")
+                    .push(ImportObserverRecord {
+                        import_module: observation.import_module,
+                        event: observation.event,
+                        resolved: observation.resolved_module.is_some(),
+                    });
+            }
+        },
+    );
+
+    let err = runtime
+        .instantiate_with_context(
+            &ctx,
+            &runtime.compile(GUEST_IMPORT_INC_WASM).unwrap(),
+            ModuleConfig::new(),
+        )
+        .err()
+        .expect("ACL-denied import instantiation should fail");
+    assert!(err.to_string().contains("denied by import ACL"));
+    assert_eq!(
+        vec![ImportObserverRecord {
+            import_module: "env".to_string(),
+            event: ImportResolverEvent::AclDenied,
+            resolved: false,
+        }],
+        *events.lock().expect("import observer events poisoned")
+    );
+}
+
+#[test]
+fn import_resolver_observer_reports_resolver_attempt_before_resolution() {
+    let runtime = Runtime::new();
+    let compiled_host = runtime
+        .new_host_module_builder("env0")
+        .new_function_builder()
+        .with_func(
+            |_ctx, _module, params| Ok(vec![params[0] + 1]),
+            &[ValueType::I32],
+            &[ValueType::I32],
+        )
+        .with_name("inc")
+        .export("inc")
+        .compile(&Context::default())
+        .unwrap();
+    let anonymous_import = runtime
+        .instantiate_with_context(
+            &Context::default(),
+            &compiled_host,
+            ModuleConfig::new().with_name(""),
+        )
+        .unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let ctx = with_import_resolver_observer(
+        &with_import_resolver_config(
+            &Context::default(),
+            ImportResolverConfig {
+                resolver: Some(Arc::new(move |name| {
+                    (name == "env").then_some(anonymous_import.clone())
+                })),
+                ..ImportResolverConfig::default()
+            },
+        ),
+        {
+            let events = events.clone();
+            move |_ctx: &Context, observation: ImportResolverObservation| {
+                events
+                    .lock()
+                    .expect("import observer events poisoned")
+                    .push(ImportObserverRecord {
+                        import_module: observation.import_module,
+                        event: observation.event,
+                        resolved: observation.resolved_module.is_some(),
+                    });
+            }
+        },
+    );
+
+    let guest = runtime
+        .instantiate_with_context(
+            &ctx,
+            &runtime.compile(GUEST_IMPORT_INC_WASM).unwrap(),
+            ModuleConfig::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        vec![42],
+        guest.exported_function("run").unwrap().call(&[41]).unwrap()
+    );
+    assert_eq!(
+        vec![
+            ImportObserverRecord {
+                import_module: "env".to_string(),
+                event: ImportResolverEvent::ResolverAttempted,
+                resolved: false,
+            },
+            ImportObserverRecord {
+                import_module: "env".to_string(),
+                event: ImportResolverEvent::ResolverResolved,
+                resolved: true,
+            },
+        ],
+        *events.lock().expect("import observer events poisoned")
+    );
+}
+
+#[test]
+fn import_resolver_observer_reports_fail_closed_denial() {
+    let runtime = Runtime::new();
+    runtime
+        .new_host_module_builder("env")
+        .new_function_builder()
+        .with_func(
+            |_ctx, _module, params| Ok(vec![params[0] + 1]),
+            &[ValueType::I32],
+            &[ValueType::I32],
+        )
+        .with_name("inc")
+        .export("inc")
+        .instantiate(&Context::default())
+        .unwrap();
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let ctx = with_import_resolver_observer(
+        &with_import_resolver_config(
+            &Context::default(),
+            ImportResolverConfig {
+                acl: Some(ImportACL::new().allow_modules(["env"])),
+                fail_closed: true,
+                ..ImportResolverConfig::default()
+            },
+        ),
+        {
+            let events = events.clone();
+            move |_ctx: &Context, observation: ImportResolverObservation| {
+                events
+                    .lock()
+                    .expect("import observer events poisoned")
+                    .push(ImportObserverRecord {
+                        import_module: observation.import_module,
+                        event: observation.event,
+                        resolved: observation.resolved_module.is_some(),
+                    });
+            }
+        },
+    );
+
+    let err = runtime
+        .instantiate_with_context(
+            &ctx,
+            &runtime.compile(GUEST_IMPORT_INC_WASM).unwrap(),
+            ModuleConfig::new(),
+        )
+        .err()
+        .expect("fail-closed import instantiation should fail");
+    assert!(err.to_string().contains("unresolved by import resolver"));
+    assert_eq!(
+        vec![
+            ImportObserverRecord {
+                import_module: "env".to_string(),
+                event: ImportResolverEvent::AclAllowed,
+                resolved: false,
+            },
+            ImportObserverRecord {
+                import_module: "env".to_string(),
+                event: ImportResolverEvent::FailClosedDenied,
+                resolved: false,
+            },
+        ],
+        *events.lock().expect("import observer events poisoned")
+    );
+}
+
+#[test]
+fn import_resolver_observer_reports_resolver_attempt_before_store_fallback() {
+    let runtime = Runtime::new();
+    runtime
+        .new_host_module_builder("env")
+        .new_function_builder()
+        .with_func(
+            |_ctx, _module, params| Ok(vec![params[0] + 1]),
+            &[ValueType::I32],
+            &[ValueType::I32],
+        )
+        .with_name("inc")
+        .export("inc")
+        .instantiate(&Context::default())
+        .unwrap();
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let ctx = with_import_resolver_observer(
+        &with_import_resolver_config(
+            &Context::default(),
+            ImportResolverConfig {
+                resolver: Some(Arc::new(|_| None)),
+                ..ImportResolverConfig::default()
+            },
+        ),
+        {
+            let events = events.clone();
+            move |_ctx: &Context, observation: ImportResolverObservation| {
+                events
+                    .lock()
+                    .expect("import observer events poisoned")
+                    .push(ImportObserverRecord {
+                        import_module: observation.import_module,
+                        event: observation.event,
+                        resolved: observation.resolved_module.is_some(),
+                    });
+            }
+        },
+    );
+
+    let guest = runtime
+        .instantiate_with_context(
+            &ctx,
+            &runtime.compile(GUEST_IMPORT_INC_WASM).unwrap(),
+            ModuleConfig::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        vec![42],
+        guest.exported_function("run").unwrap().call(&[41]).unwrap()
+    );
+    assert_eq!(
+        vec![
+            ImportObserverRecord {
+                import_module: "env".to_string(),
+                event: ImportResolverEvent::ResolverAttempted,
+                resolved: false,
+            },
+            ImportObserverRecord {
+                import_module: "env".to_string(),
+                event: ImportResolverEvent::StoreFallback,
+                resolved: false,
+            },
+        ],
+        *events.lock().expect("import observer events poisoned")
+    );
 }
 
 struct AbortRecordingListener {
