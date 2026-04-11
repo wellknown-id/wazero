@@ -8,16 +8,16 @@ use razero::{
     get_function_listener_factory, get_host_call_policy, get_host_call_policy_observer,
     get_import_resolver, get_import_resolver_config, get_import_resolver_observer,
     get_memory_allocator, get_snapshotter, get_trap_observer, get_yield_policy,
-    get_yield_policy_observer, get_yielder, with_close_notifier, with_compilation_workers,
-    with_fuel_controller, with_function_listener_factory, with_host_call_policy,
-    with_host_call_policy_observer, with_import_resolver, with_import_resolver_acl,
-    with_import_resolver_config, with_import_resolver_observer, with_memory_allocator,
-    with_snapshotter, with_trap_observer, with_yield_policy, with_yield_policy_observer,
-    with_yielder, Context, FunctionDefinition, FunctionListenerFn, HostCallPolicyDecision,
-    HostCallPolicyObservation, ImportACL, ImportResolverConfig, ImportResolverEvent,
-    ImportResolverObservation, LinearMemory, ModuleConfig, Runtime, RuntimeConfig,
-    SimpleFuelController, StackFrame, TrapCause, TrapObservation, ValueType, YieldPolicyDecision,
-    YieldPolicyObservation,
+    get_yield_policy_observer, get_yielder, new_stack_iterator, with_close_notifier,
+    with_compilation_workers, with_fuel_controller, with_function_listener_factory,
+    with_host_call_policy, with_host_call_policy_observer, with_import_resolver,
+    with_import_resolver_acl, with_import_resolver_config, with_import_resolver_observer,
+    with_memory_allocator, with_snapshotter, with_trap_observer, with_yield_policy,
+    with_yield_policy_observer, with_yielder, Context, FunctionDefinition, FunctionListenerFn,
+    HostCallPolicyDecision, HostCallPolicyObservation, ImportACL, ImportResolverConfig,
+    ImportResolverEvent, ImportResolverObservation, LinearMemory, ModuleConfig, Runtime,
+    RuntimeConfig, SimpleFuelController, StackFrame, StackIterator, TrapCause, TrapObservation,
+    ValueType, YieldPolicyDecision, YieldPolicyObservation,
 };
 
 const SIMPLE_EXPORT_WASM: &[u8] = &[
@@ -238,6 +238,26 @@ fn benchmark_function_listener_runs_through_public_surface() {
     benchmark_function_listener(2, &module, &stack, &listener);
 
     assert_eq!(2, calls.load(Ordering::SeqCst));
+}
+
+#[test]
+fn new_stack_iterator_round_trips_through_public_surface() {
+    let frame = StackFrame::new(
+        FunctionDefinition::new("test_fn"),
+        vec![1, 2, 3],
+        vec![4, 5],
+        42,
+        99,
+    );
+    let mut iterator = new_stack_iterator(std::slice::from_ref(&frame));
+
+    assert_eq!("test_fn", frame.definition().name());
+    assert_eq!(&[1, 2, 3], frame.params());
+    assert_eq!(&[4, 5], frame.results());
+    assert_eq!(42, frame.program_counter());
+    assert_eq!(99, frame.source_offset());
+    assert!(iterator.next());
+    assert!(!iterator.next());
 }
 
 #[test]
