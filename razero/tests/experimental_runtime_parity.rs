@@ -12,10 +12,11 @@ use razero::{
     add_fuel, get_fuel_controller, get_import_resolver, get_snapshotter, get_yielder,
     remaining_fuel, trap_cause_of, with_fuel_controller, with_function_listener_factory,
     with_import_resolver, with_import_resolver_config, with_import_resolver_observer,
-    with_snapshotter, with_trap_observer, with_yield_policy, with_yielder, Context, CoreFeatures,
-    FunctionDefinition, FunctionListener, FunctionListenerFactory, ImportACL, ImportResolverConfig,
-    ImportResolverEvent, ImportResolverObservation, Module, ModuleConfig, Runtime, RuntimeConfig,
-    RuntimeError, Snapshot, TrapCause, ValueType, YieldError, CORE_FEATURES_THREADS, ERR_YIELDED,
+    with_snapshotter, with_trap_observer, with_yield_observer, with_yield_policy, with_yielder,
+    Context, CoreFeatures, FunctionDefinition, FunctionListener, FunctionListenerFactory,
+    ImportACL, ImportResolverConfig, ImportResolverEvent, ImportResolverObservation, Module,
+    ModuleConfig, Runtime, RuntimeConfig, RuntimeError, Snapshot, TrapCause, ValueType, YieldError,
+    YieldEvent, YieldObservation, CORE_FEATURES_THREADS, ERR_YIELDED,
 };
 
 const YIELD_WASM: &[u8] = include_bytes!("../../experimental/testdata/yield.wasm");
@@ -130,6 +131,21 @@ fn record_trap_observations(
             .lock()
             .expect("trap observations poisoned")
             .push((observation.cause, observation.err.to_string()));
+    }
+}
+
+fn record_yield_observations(
+    observations: Arc<Mutex<Vec<(YieldEvent, u64, i32)>>>,
+) -> impl Fn(&Context, YieldObservation) + Send + Sync + 'static {
+    move |_ctx: &Context, observation: YieldObservation| {
+        observations
+            .lock()
+            .expect("yield observations poisoned")
+            .push((
+                observation.event,
+                observation.yield_count,
+                observation.expected_host_results,
+            ));
     }
 }
 
@@ -460,6 +476,170 @@ fn yield_cancel_is_idempotent_and_blocks_resume() {
         .resume(&with_yielder(&Context::default()), &[42])
         .unwrap_err();
     assert!(err.to_string().contains("cancelled"));
+}
+
+#[test]
+fn yield_observer_tracks_yield_and_resume_events_when_installed_on_both_contexts() {
+    let (_runtime, guest) = setup_yield_runtime();
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let initial_ctx = with_yield_observer(
+        &with_yielder(&Context::default()),
+        record_yield_observations(observations.clone()),
+    );
+
+    let err = guest
+        .exported_function("run")
+        .unwrap()
+        .call_with_context(&initial_ctx, &[])
+        .unwrap_err();
+    let resumed_ctx = with_yield_observer(
+        &with_yielder(&Context::default()),
+        record_yield_observations(observations.clone()),
+    );
+    let results = yielded(err)
+        .resumer()
+        .expect("resumer should be present")
+        .resume(&resumed_ctx, &[42])
+        .unwrap();
+
+    assert_eq!(vec![142], results);
+    assert_eq!(
+        vec![(YieldEvent::Yielded, 1, 1), (YieldEvent::Resumed, 1, 1)],
+        *observations.lock().expect("yield observations poisoned")
+    );
+}
+
+#[test]
+fn yield_observer_resume_context_receives_subsequent_resume_events() {
+    let (_runtime, guest) = setup_yield_runtime();
+    let initial_observations = Arc::new(Mutex::new(Vec::new()));
+    let resumed_observations = Arc::new(Mutex::new(Vec::new()));
+    let initial_ctx = with_yield_observer(
+        &with_yielder(&Context::default()),
+        record_yield_observations(initial_observations.clone()),
+    );
+
+    let err = guest
+        .exported_function("run_twice")
+        .unwrap()
+        .call_with_context(&initial_ctx, &[])
+        .unwrap_err();
+    let first_resumer = yielded(err).resumer().expect("resumer should be present");
+    let resumed_ctx = with_yield_observer(
+        &with_yielder(&Context::default()),
+        record_yield_observations(resumed_observations.clone()),
+    );
+
+    let err = first_resumer.resume(&resumed_ctx, &[40]).unwrap_err();
+    let second_resumer = yielded(err).resumer().expect("resumer should be present");
+    let final_ctx = with_yield_observer(
+        &with_yielder(&Context::default()),
+        record_yield_observations(resumed_observations.clone()),
+    );
+    let results = second_resumer.resume(&final_ctx, &[2]).unwrap();
+
+    assert_eq!(vec![42], results);
+    assert_eq!(
+        vec![(YieldEvent::Yielded, 1, 1)],
+        *initial_observations
+            .lock()
+            .expect("initial yield observations poisoned")
+    );
+    assert_eq!(
+        vec![(YieldEvent::Resumed, 1, 1), (YieldEvent::Resumed, 1, 1)],
+        *resumed_observations
+            .lock()
+            .expect("resumed yield observations poisoned")
+    );
+}
+
+#[test]
+fn yield_observer_does_not_persist_when_resume_context_omits_observer() {
+    let (_runtime, guest) = setup_yield_runtime();
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let initial_ctx = with_yield_observer(
+        &with_yielder(&Context::default()),
+        record_yield_observations(observations.clone()),
+    );
+
+    let err = guest
+        .exported_function("run")
+        .unwrap()
+        .call_with_context(&initial_ctx, &[])
+        .unwrap_err();
+    let results = yielded(err)
+        .resumer()
+        .expect("resumer should be present")
+        .resume(&with_yielder(&Context::default()), &[42])
+        .unwrap();
+
+    assert_eq!(vec![142], results);
+    assert_eq!(
+        vec![(YieldEvent::Yielded, 1, 1)],
+        *observations.lock().expect("yield observations poisoned")
+    );
+}
+
+#[test]
+fn yield_cancel_does_not_emit_additional_yield_observer_event() {
+    let (_runtime, guest) = setup_yield_runtime();
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let ctx = with_yield_observer(
+        &with_yielder(&Context::default()),
+        record_yield_observations(observations.clone()),
+    );
+
+    let err = guest
+        .exported_function("run")
+        .unwrap()
+        .call_with_context(&ctx, &[])
+        .unwrap_err();
+    let resumer = yielded(err).resumer().expect("resumer should be present");
+    resumer.cancel();
+
+    assert_eq!(
+        vec![(YieldEvent::Yielded, 1, 1)],
+        *observations.lock().expect("yield observations poisoned")
+    );
+}
+
+#[test]
+fn yield_resume_validation_error_does_not_emit_resumed_event() {
+    let (_runtime, guest) = setup_yield_runtime();
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let initial_ctx = with_yield_observer(
+        &with_yielder(&Context::default()),
+        record_yield_observations(observations.clone()),
+    );
+
+    let err = guest
+        .exported_function("run")
+        .unwrap()
+        .call_with_context(&initial_ctx, &[])
+        .unwrap_err();
+    let resumer = yielded(err).resumer().expect("resumer should be present");
+
+    let err = resumer
+        .resume(&with_yielder(&Context::default()), &[])
+        .unwrap_err();
+    assert_eq!(
+        "cannot resume: expected 1 host results, but got 0",
+        err.to_string()
+    );
+    assert_eq!(
+        vec![(YieldEvent::Yielded, 1, 1)],
+        *observations.lock().expect("yield observations poisoned")
+    );
+    assert_eq!(
+        vec![142],
+        resumer
+            .resume(&with_yielder(&Context::default()), &[42])
+            .unwrap()
+    );
+    assert_eq!(
+        vec![(YieldEvent::Yielded, 1, 1)],
+        *observations.lock().expect("yield observations poisoned")
+    );
 }
 
 #[test]

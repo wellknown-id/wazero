@@ -122,16 +122,18 @@ allowed host function later calls `Yield()`.
 
 - `YieldObserver` event order is:
   - `yielded` when execution suspends;
-  - `resumed` on a successful `Resume` attempt before re-entry;
-  - `cancelled` on `Cancel`.
+  - `resumed` on a successful `Resume` attempt before re-entry **when the resume
+    context itself installs a `YieldObserver`**.
+- `YieldEvent::Cancelled` exists in the public enum, but the current runtime
+  path does **not** emit a `YieldObserver` callback on `Cancel`.
 - Validation errors before resume starts (for example a missing resume context or
-  wrong host result count) do not emit `resumed` / `cancelled` and do not spend
-  the resumer.
+  wrong host result count) do not emit `resumed` and do not spend the resumer.
 - Resume uses the resume context for subsequent host-call state. That means a
-  resumed execution can swap in a new `TrapObserver`, `YieldObserver`,
-  `HostCallPolicy`, or `YieldPolicy`.
-- If the resume context omits `YieldObserver`, the observer from the suspended
-  execution remains in effect.
+  resumed execution can swap in a new `TrapObserver`, `HostCallPolicy`, or
+  `YieldPolicy`. A `YieldObserver` attached to the resume context receives the
+  `resumed` notification for that resume attempt.
+- If the resume context omits `YieldObserver`, the suspended execution does not
+  currently emit additional yield-observer callbacks for the resumed segment.
 
 ### Import resolution
 
