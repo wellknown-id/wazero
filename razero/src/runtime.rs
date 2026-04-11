@@ -2430,7 +2430,9 @@ mod tests {
 
     #[test]
     fn secure_mode_uses_guard_pages_matches_platform_capability() {
-        assert!(!secure_mode_uses_guard_pages(&RuntimeConfig::new().with_secure_mode(false)));
+        assert!(!secure_mode_uses_guard_pages(
+            &RuntimeConfig::new().with_secure_mode(false)
+        ));
         assert_eq!(
             supports_guard_pages(),
             secure_mode_uses_guard_pages(&RuntimeConfig::new().with_secure_mode(true))
@@ -2450,6 +2452,28 @@ mod tests {
     #[test]
     fn secure_mode_falls_back_to_plain_guest_memory_when_guard_pages_are_unsupported() {
         let runtime = Runtime::with_config(RuntimeConfig::new().with_secure_mode(true));
+        let compiled = runtime
+            .compile(include_bytes!("../../testdata/oob_load.wasm"))
+            .unwrap();
+        let instance = runtime.instantiate(&compiled, ModuleConfig::new()).unwrap();
+        let store = runtime.inner.store.lock().expect("runtime store poisoned");
+        let module_id = instance.store_module_id().expect("guest module id");
+        let memory = store
+            .instance(module_id)
+            .and_then(|module| module.memory_instance.as_ref())
+            .expect("guest memory instance");
+
+        assert!(matches!(memory.bytes, MemoryBytes::Plain(..)));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn compiler_secure_mode_falls_back_to_plain_guest_memory_when_guard_pages_are_unsupported() {
+        if !compiler_supported() {
+            return;
+        }
+
+        let runtime = Runtime::with_config(RuntimeConfig::new_compiler().with_secure_mode(true));
         let compiled = runtime
             .compile(include_bytes!("../../testdata/oob_load.wasm"))
             .unwrap();
