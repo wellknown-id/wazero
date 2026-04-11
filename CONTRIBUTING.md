@@ -8,6 +8,24 @@ We welcome contributions from the community. Please read the following guideline
 - Install hooks with `lefthook install` to auto-format staged Rust files on `git commit`.
 - Run the workspace test suite with `cargo test --workspace`.
 
+## Host-interface guardrails
+
+The core crates are intentionally **not** a runtime-owned system layer.
+Contributions should preserve that boundary:
+
+- do not add built-in WASI shims or runtime-owned filesystem, network, clock,
+  random, or process adapters to the core engine;
+- prefer explicit embedder-supplied host imports and resolver / ACL policy over
+  convenience wrappers that implicitly widen guest capabilities;
+- treat fail-closed import resolution as the expected default posture when
+  adding or extending host-interface surfaces;
+- keep security-sensitive docs in sync when behavior changes:
+  `README.md`, `SUPPORT_MATRIX.md`, and `THREAT_MODEL.md`.
+
+If you need a concrete reference shape, start from
+`examples/hello-host/README.md`, which demonstrates an explicit host import
+without WASI.
+
 ## Benchmarks
 
 The manual benchmark workflow for Workstream 1 is anchored on
