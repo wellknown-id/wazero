@@ -1617,6 +1617,29 @@ fn yield_cancel_is_idempotent_and_blocks_resume() {
 }
 
 #[test]
+fn yield_cancel_does_not_emit_trap_observer_event() {
+    let (_runtime, guest) = setup_yield_runtime();
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let ctx = with_trap_observer(
+        &with_yielder(&Context::default()),
+        record_trap_observations(observations.clone()),
+    );
+
+    let err = guest
+        .exported_function("run")
+        .unwrap()
+        .call_with_context(&ctx, &[])
+        .unwrap_err();
+    let resumer = yielded(err).resumer().expect("resumer should be present");
+    resumer.cancel();
+
+    assert!(observations
+        .lock()
+        .expect("trap observations poisoned")
+        .is_empty());
+}
+
+#[test]
 fn yield_observer_tracks_yield_and_resume_events_when_installed_on_both_contexts() {
     let (_runtime, guest) = setup_yield_runtime();
     let observations = Arc::new(Mutex::new(Vec::new()));
@@ -3029,6 +3052,43 @@ fn listener_abort_runs_without_after_on_host_error() {
         vec!["before:fail".to_string(), "abort:fail:boom".to_string()],
         *events.lock().expect("events poisoned")
     );
+}
+
+#[test]
+fn host_panic_does_not_emit_trap_observer_event() {
+    let runtime = Runtime::new();
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let module = runtime
+        .new_host_module_builder("env")
+        .new_function_builder()
+        .with_func(
+            |_ctx, _module, _params| -> Result<Vec<u64>, RuntimeError> {
+                panic!("boom");
+            },
+            &[],
+            &[],
+        )
+        .with_name("panic")
+        .export("panic")
+        .instantiate(&Context::default())
+        .unwrap();
+    let ctx = with_trap_observer(
+        &Context::default(),
+        record_trap_observations(observations.clone()),
+    );
+
+    let panic = catch_unwind(AssertUnwindSafe(|| {
+        let _ = module
+            .exported_function("panic")
+            .unwrap()
+            .call_with_context(&ctx, &[]);
+    }));
+
+    assert!(panic.is_err());
+    assert!(observations
+        .lock()
+        .expect("trap observations poisoned")
+        .is_empty());
 }
 
 #[test]
