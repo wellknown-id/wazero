@@ -304,6 +304,23 @@ fn host_call_policy_request_builders_round_trip_through_public_surface() {
 }
 
 #[test]
+fn host_call_policy_request_param_and_result_types_round_trip_through_public_surface() {
+    let function = FunctionDefinition::new("test")
+        .with_signature(vec![ValueType::I32, ValueType::I64], vec![ValueType::F64]);
+    let request = HostCallPolicyRequest::new().with_function(function);
+
+    assert_eq!(
+        Some(&[ValueType::I32, ValueType::I64][..]),
+        request.param_types()
+    );
+    assert_eq!(Some(&[ValueType::F64][..]), request.result_types());
+
+    let empty_request = HostCallPolicyRequest::new();
+    assert_eq!(None, empty_request.param_types());
+    assert_eq!(None, empty_request.result_types());
+}
+
+#[test]
 fn function_listener_factory_round_trips_through_public_surface() {
     let ctx = with_function_listener_factory(
         &Context::default(),
