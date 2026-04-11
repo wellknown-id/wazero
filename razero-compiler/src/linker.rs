@@ -4471,6 +4471,89 @@ int main(void) {
     }
 
     #[test]
+    fn packaged_module_sidecar_rejects_corrupted_element_with_empty_init_expression_bytes() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            function_section: vec![0],
+            table_section: vec![Table {
+                min: 1,
+                max: Some(1),
+                ty: RefType::FUNCREF,
+            }],
+            code_section: vec![Code {
+                body: vec![0x41, 0x05, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            element_section: vec![ElementSegment {
+                offset_expr: ConstExpr::from_i32(0),
+                table_index: 0,
+                init: vec![ConstExpr::from_opcode(0xd2, &[0])],
+                ty: RefType::FUNCREF,
+                mode: ElementMode::Active,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let metadata = compile_module_metadata(&module);
+        let element = &metadata.element_segments[0];
+        assert_eq!(1, metadata.element_segments.len());
+        assert_eq!(1, element.init_expressions.len());
+        assert!(!element.init_expressions[0].is_empty());
+
+        let mut sidecar = serialize_aot_metadata(&metadata);
+        let mut element_pattern = Vec::new();
+        element_pattern.extend_from_slice(&(metadata.element_segments.len() as u32).to_le_bytes());
+        element_pattern.extend_from_slice(&(element.offset_expression.len() as u32).to_le_bytes());
+        element_pattern.extend_from_slice(&element.offset_expression);
+        element_pattern.extend_from_slice(&element.table_index.to_le_bytes());
+        element_pattern.push(element.ty.0);
+        element_pattern.push(match element.mode {
+            ElementMode::Active => 0,
+            ElementMode::Passive => 1,
+            ElementMode::Declarative => 2,
+        });
+        element_pattern.extend_from_slice(&(element.init_expressions.len() as u32).to_le_bytes());
+        for init in &element.init_expressions {
+            element_pattern.extend_from_slice(&(init.len() as u32).to_le_bytes());
+            element_pattern.extend_from_slice(init);
+        }
+
+        let matches = sidecar
+            .windows(element_pattern.len())
+            .enumerate()
+            .filter_map(|(offset, window)| (window == element_pattern.as_slice()).then_some(offset))
+            .collect::<Vec<_>>();
+        assert_eq!(1, matches.len());
+        let first_init_len_offset =
+            matches[0] + 4 + 4 + element.offset_expression.len() + 4 + 1 + 1 + 4;
+        sidecar[first_init_len_offset..first_init_len_offset + 4]
+            .copy_from_slice(&0u32.to_le_bytes());
+        let first_init_offset = first_init_len_offset + 4;
+        sidecar.drain(first_init_offset..first_init_offset + element.init_expressions[0].len());
+
+        let encoded = serialize_native_package_metadata_bundle(&NativePackageMetadataBundle {
+            modules: vec![NativePackageMetadataEntry {
+                module_name: "guest".to_string(),
+                metadata_sidecar_bytes: sidecar,
+            }],
+            host_imports: Vec::new(),
+        });
+
+        let decoded = deserialize_native_package_metadata_bundle(&encoded).unwrap();
+        let err = crate::aot::deserialize_aot_metadata(&decoded.modules[0].metadata_sidecar_bytes)
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "aot metadata: element init expression cannot be empty"
+        );
+    }
+
+    #[test]
     fn packaged_module_sidecar_rejects_corrupted_active_element_with_empty_offset() {
         let module = Module {
             type_section: vec![function_type(&[], &[ValueType::I32])],
