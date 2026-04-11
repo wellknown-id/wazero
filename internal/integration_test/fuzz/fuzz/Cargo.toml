@@ -49,3 +49,9 @@ name = "trap_no_diff"
 path = "fuzz_targets/trap_no_diff.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuel_no_diff"
+path = "fuzz_targets/fuel_no_diff.rs"
+test = false
+doc = false

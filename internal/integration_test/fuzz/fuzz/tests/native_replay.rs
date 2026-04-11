@@ -1,10 +1,10 @@
 use std::{env, fs};
 
 use wazero_fuzz_fuzz::{
-    replay_all_fixed_trap_fixtures,
-    replay_host_call_policy_trap_parity, replay_initial_policy_trap_parity,
-    replay_native_parity, replay_native_trap_parity, replay_resume_policy_trap_parity,
-    replay_validation, run_fixed_trap_parity, run_native_parity, run_policy_trap_parity,
+    replay_all_fixed_trap_fixtures, replay_all_fuel_observer_fixtures,
+    replay_host_call_policy_trap_parity, replay_initial_policy_trap_parity, replay_native_parity,
+    replay_native_trap_parity, replay_resume_policy_trap_parity, replay_validation,
+    run_fixed_trap_parity, run_fuel_observer_parity, run_native_parity, run_policy_trap_parity,
     run_validation, ParityOptions,
 };
 
@@ -52,12 +52,18 @@ fn known_policy_cases_replay_under_negative_path_helpers() {
 }
 
 #[test]
+fn known_fuel_observer_cases_replay_under_negative_path_helpers() {
+    replay_all_fuel_observer_fixtures();
+}
+
+#[test]
 fn seeded_generated_modules_cover_native_targets() {
     let mut parity_hits = 0;
     let mut memory_hits = 0;
     let mut logging_hits = 0;
     let mut policy_hits = 0;
     let mut trap_hits = 0;
+    let mut fuel_hits = 0;
     let mut validation_hits = 0;
 
     for seed in seeded_inputs() {
@@ -66,6 +72,7 @@ fn seeded_generated_modules_cover_native_targets() {
         logging_hits += usize::from(run_native_parity(&seed, false, true).is_ok());
         policy_hits += usize::from(run_policy_trap_parity(&seed).is_ok());
         trap_hits += usize::from(run_fixed_trap_parity(&seed).is_ok());
+        fuel_hits += usize::from(run_fuel_observer_parity(&seed).is_ok());
         validation_hits += usize::from(run_validation(&seed).is_ok());
     }
 
@@ -88,6 +95,10 @@ fn seeded_generated_modules_cover_native_targets() {
     assert!(
         trap_hits > 0,
         "at least one deterministic seed should exercise native fixed-trap parity"
+    );
+    assert!(
+        fuel_hits > 0,
+        "at least one deterministic seed should exercise fuel observer parity"
     );
     assert!(
         validation_hits > 0,
@@ -135,6 +146,15 @@ fn rerun_failed_native_fixed_trap_case() {
     };
     let input = fs::read(path).expect("failed replay input should be readable");
     run_fixed_trap_parity(&input).expect("saved fixed-trap input should replay");
+}
+
+#[test]
+fn rerun_failed_native_fuel_observer_case() {
+    let Ok(path) = env::var("FUZZ_INPUT_PATH").or_else(|_| env::var("WASM_BINARY_PATH")) else {
+        return;
+    };
+    let input = fs::read(path).expect("failed replay input should be readable");
+    run_fuel_observer_parity(&input).expect("saved fuel observer input should replay");
 }
 
 fn seeded_inputs() -> Vec<Vec<u8>> {

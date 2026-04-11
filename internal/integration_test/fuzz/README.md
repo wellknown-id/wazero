@@ -16,6 +16,7 @@ Currently, we have the following fuzzing targets:
 - `logging_no_diff`: same as `no_diff`, and also compares listener/log formatting output between modes.
 - `policy_no_diff`: replays fixed cooperative-yield and imported-host-call guest scenarios and compares policy-denied behavior, trap-observer output, and relevant yield / host-call policy observer event streams between standard and secure mode.
 - `trap_no_diff`: selects from a deterministic set of fixed trap fixtures (for example out-of-bounds memory access, divide-by-zero, invalid conversion, indirect-call mismatch, and unreachable) and compares trap behavior between standard and secure mode.
+- `fuel_no_diff`: replays fixed interpreter-mode fuel exhaustion scenarios and compares the resulting failure plus captured fuel-observer snapshots between standard and secure mode without relying on the known compiler secure-mode fuel trap-mapping gap.
 - `validation`: compiles maybe-invalid Wasm module binaries with the native Rust runtime to ensure validation and compilation do not panic.
 
 `cargo test` in this workspace also runs deterministic replay coverage for
@@ -59,6 +60,9 @@ $ cargo fuzz run policy_no_diff --sanitizer=none --no-trace-compares -- -max_tot
 
 # Running the `trap_no_diff` target to compare fixed trap fixtures.
 $ cargo fuzz run trap_no_diff --sanitizer=none --no-trace-compares -- -max_total_time=3600 -jobs=4
+
+# Running the `fuel_no_diff` target to compare fixed fuel observer scenarios.
+$ cargo fuzz run fuel_no_diff --sanitizer=none --no-trace-compares -- -max_total_time=3600 -jobs=4
 ```
 
 Note that `--sanitizer=none` and `--no-trace-compares` are always recommended to use because the sanitizer is not useful for our use case plus this will speed up the fuzzing by like multiple times.
@@ -80,6 +84,9 @@ FUZZ_INPUT_PATH=fuzz/artifacts/policy_no_diff/crash-... \
 
 FUZZ_INPUT_PATH=fuzz/artifacts/trap_no_diff/crash-... \
   cargo test --manifest-path internal/integration_test/fuzz/fuzz/Cargo.toml --test native_replay rerun_failed_native_fixed_trap_case -- --exact --nocapture
+
+FUZZ_INPUT_PATH=fuzz/artifacts/fuel_no_diff/crash-... \
+  cargo test --manifest-path internal/integration_test/fuzz/fuzz/Cargo.toml --test native_replay rerun_failed_native_fuel_observer_case -- --exact --nocapture
 ```
 
 `cargo fuzz tmin` still works to minimize the crashing input while preserving the native Rust failure.

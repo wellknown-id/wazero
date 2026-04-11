@@ -3,18 +3,24 @@ use std::sync::{Arc, Mutex};
 use arbitrary::Arbitrary;
 use libfuzzer_sys::arbitrary::{Result, Unstructured};
 use razero::{
-    logging, trap_cause_of, with_function_listener_factory, with_host_call_policy,
-    with_host_call_policy_observer, with_trap_observer, with_yield_observer, with_yield_policy,
-    with_yielder, Context, CoreFeatures, FunctionDefinition, FunctionListener,
-    FunctionListenerFactory, HostCallPolicyDecision, HostCallPolicyObservation, Module,
-    ModuleConfig, Runtime, RuntimeConfig, RuntimeError, TrapCause, TrapObservation, ValueType,
-    YieldEvent, YieldObservation, YieldPolicyRequest, CORE_FEATURES_TAIL_CALL,
+    add_fuel, logging, trap_cause_of, with_function_listener_factory, with_fuel_observer,
+    with_host_call_policy, with_host_call_policy_observer, with_trap_observer,
+    with_yield_observer, with_yield_policy, with_yielder, Context, CoreFeatures, FuelEvent,
+    FuelObservation, FunctionDefinition, FunctionListener, FunctionListenerFactory,
+    HostCallPolicyDecision, HostCallPolicyObservation, Module, ModuleConfig, Runtime,
+    RuntimeConfig, RuntimeError, TrapCause, TrapObservation, ValueType, YieldEvent,
+    YieldObservation, YieldPolicyRequest, CORE_FEATURES_TAIL_CALL,
     CORE_FEATURES_THREADS,
 };
 use wasm_smith::Config;
 
 const YIELD_WASM: &[u8] = include_bytes!("../../../../../experimental/testdata/yield.wasm");
 const OOB_LOAD_WASM: &[u8] = include_bytes!("../../../../../testdata/oob_load.wasm");
+const LOOP_EXPORT_WASM: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03,
+    0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x00, 0x0a, 0x09, 0x01,
+    0x07, 0x00, 0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b,
+];
 const GUEST_HOST_CALL_DENY_WASM: &[u8] = &[
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01,
     0x7f, 0x02, 0x0c, 0x01, 0x03, b'e', b'n', b'v', 0x04, b'h', b'o', b'o', b'k', 0x00, 0x00,
@@ -76,6 +82,7 @@ enum ExecutionSnapshot {
         memory: Option<Vec<u8>>,
         logs: Option<Vec<String>>,
         trap_observations: Option<Vec<TrapSnapshot>>,
+        fuel_observations: Option<Vec<FuelSnapshot>>,
         yield_observations: Option<Vec<YieldSnapshot>>,
         host_call_policy_observations: Option<Vec<HostCallPolicySnapshot>>,
     },
@@ -122,6 +129,16 @@ struct HostCallPolicySnapshot {
     decision: HostCallPolicyDecision,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FuelSnapshot {
+    module_name: Option<String>,
+    event: FuelEvent,
+    budget: i64,
+    consumed: i64,
+    remaining: i64,
+    delta: i64,
+}
+
 #[derive(Arbitrary, Clone, Copy, Debug)]
 enum PolicyTrapScenario {
     InitialDeny,
@@ -147,6 +164,12 @@ enum FixedTrapScenario {
     UnalignedAtomic,
 }
 
+#[derive(Arbitrary, Clone, Copy, Debug)]
+enum FuelObserverScenario {
+    GuestLoopExhaustion,
+    HostDebitExhaustion,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResumeSnapshot {
     initial: FunctionOutcome,
@@ -160,6 +183,7 @@ struct CaptureOptions {
     check_memory: bool,
     check_logging: bool,
     capture_traps: bool,
+    capture_fuel_observations: bool,
     capture_yield_observations: bool,
     capture_host_call_policy_observations: bool,
     attach_yielder: bool,
@@ -177,6 +201,13 @@ fn runtime_config(secure_mode: bool) -> RuntimeConfig {
     RuntimeConfig::new()
         .with_core_features(fuzz_features())
         .with_secure_mode(secure_mode)
+}
+
+fn interpreter_fuel_runtime_config(secure_mode: bool, fuel: i64) -> RuntimeConfig {
+    RuntimeConfig::new_interpreter()
+        .with_core_features(fuzz_features())
+        .with_secure_mode(secure_mode)
+        .with_fuel(fuel)
 }
 
 pub fn replay_native_parity(wasm: &[u8], options: ParityOptions) {
@@ -250,6 +281,22 @@ pub fn replay_all_fixed_trap_fixtures() {
         FixedTrapScenario::UnalignedAtomic,
     ] {
         replay_fixed_trap_parity(scenario);
+    }
+}
+
+pub fn run_fuel_observer_parity(data: &[u8]) -> Result<()> {
+    let mut u = Unstructured::new(data);
+    let scenario = FuelObserverScenario::arbitrary(&mut u)?;
+    replay_fuel_observer_parity(scenario);
+    Ok(())
+}
+
+pub fn replay_all_fuel_observer_fixtures() {
+    for scenario in [
+        FuelObserverScenario::GuestLoopExhaustion,
+        FuelObserverScenario::HostDebitExhaustion,
+    ] {
+        replay_fuel_observer_parity(scenario);
     }
 }
 
@@ -350,6 +397,9 @@ fn capture_execution_with_runtime(
     let trap_observations = options
         .capture_traps
         .then(|| Arc::new(Mutex::new(Vec::new())));
+    let fuel_observations = options
+        .capture_fuel_observations
+        .then(|| Arc::new(Mutex::new(Vec::new())));
     let yield_observations = options
         .capture_yield_observations
         .then(|| Arc::new(Mutex::new(Vec::new())));
@@ -360,6 +410,7 @@ fn capture_execution_with_runtime(
         options,
         logs.clone(),
         trap_observations.clone(),
+        fuel_observations.clone(),
         yield_observations.clone(),
         host_call_policy_observations.clone(),
     );
@@ -391,6 +442,8 @@ fn capture_execution_with_runtime(
     let logs = logs.map(|events| events.lock().expect("log buffer poisoned").clone());
     let trap_observations = trap_observations
         .map(|events| events.lock().expect("trap observations poisoned").clone());
+    let fuel_observations = fuel_observations
+        .map(|events| events.lock().expect("fuel observations poisoned").clone());
     let yield_observations = yield_observations
         .map(|events| events.lock().expect("yield observations poisoned").clone());
     let host_call_policy_observations = host_call_policy_observations.map(|events| {
@@ -405,6 +458,7 @@ fn capture_execution_with_runtime(
         memory,
         logs,
         trap_observations,
+        fuel_observations,
         yield_observations,
         host_call_policy_observations,
     };
@@ -497,6 +551,17 @@ fn replay_fixed_trap_parity(scenario: FixedTrapScenario) {
     );
 }
 
+fn replay_fuel_observer_parity(scenario: FuelObserverScenario) {
+    let standard = capture_fuel_observer_snapshot(scenario, false);
+    let secure = capture_fuel_observer_snapshot(scenario, true);
+    assert_fuel_observer_snapshot(&standard);
+    assert_fuel_observer_snapshot(&secure);
+    assert_eq!(
+        standard, secure,
+        "fuel observer parity mismatch between standard and secure mode"
+    );
+}
+
 fn capture_resume_policy_denial(secure_mode: bool, resume_value: u64) -> ResumeSnapshot {
     let ctx = Context::default();
     let runtime = Runtime::with_config(runtime_config(secure_mode));
@@ -516,6 +581,7 @@ fn capture_resume_policy_denial(secure_mode: bool, resume_value: u64) -> ResumeS
         },
         None,
         Some(trap_observations.clone()),
+        None,
         Some(yield_observations.clone()),
         None,
     );
@@ -540,6 +606,7 @@ fn capture_resume_policy_denial(secure_mode: bool, resume_value: u64) -> ResumeS
         },
         None,
         Some(trap_observations.clone()),
+        None,
         Some(yield_observations.clone()),
         None,
     );
@@ -582,10 +649,44 @@ fn capture_host_call_policy_denial(secure_mode: bool) -> ExecutionSnapshot {
     snapshot
 }
 
+fn capture_fuel_observer_snapshot(
+    scenario: FuelObserverScenario,
+    secure_mode: bool,
+) -> ExecutionSnapshot {
+    let ctx = Context::default();
+    let runtime = Runtime::with_config(interpreter_fuel_runtime_config(secure_mode, 1));
+    let options = CaptureOptions {
+        capture_traps: true,
+        capture_fuel_observations: true,
+        ..CaptureOptions::default()
+    };
+    let snapshot = match scenario {
+        FuelObserverScenario::GuestLoopExhaustion => {
+            let options = CaptureOptions {
+                export_name: Some("run".to_string()),
+                ..options
+            };
+            capture_execution_with_runtime(&runtime, &ctx, LOOP_EXPORT_WASM, &options)
+        }
+        FuelObserverScenario::HostDebitExhaustion => {
+            install_fuel_debit_host(&runtime);
+            let options = CaptureOptions {
+                export_name: Some("run".to_string()),
+                call_params: Some(vec![0]),
+                ..options
+            };
+            capture_execution_with_runtime(&runtime, &ctx, GUEST_HOST_CALL_DENY_WASM, &options)
+        }
+    };
+    runtime.close(&ctx).expect("runtime close should succeed");
+    snapshot
+}
+
 fn build_call_context(
     options: &CaptureOptions,
     logs: Option<Arc<Mutex<Vec<String>>>>,
     trap_observations: Option<Arc<Mutex<Vec<TrapSnapshot>>>>,
+    fuel_observations: Option<Arc<Mutex<Vec<FuelSnapshot>>>>,
     yield_observations: Option<Arc<Mutex<Vec<YieldSnapshot>>>>,
     host_call_policy_observations: Option<Arc<Mutex<Vec<HostCallPolicySnapshot>>>>,
 ) -> Context {
@@ -617,6 +718,21 @@ fn build_call_context(
                     module_name: observation.module.name().map(str::to_string),
                     cause: observation.cause,
                     message: observation.err.to_string(),
+                });
+        });
+    }
+    if let Some(observations) = fuel_observations {
+        ctx = with_fuel_observer(&ctx, move |_ctx: &Context, observation: FuelObservation| {
+            observations
+                .lock()
+                .expect("fuel observations poisoned")
+                .push(FuelSnapshot {
+                    module_name: observation.module.name().map(str::to_string),
+                    event: observation.event,
+                    budget: observation.budget,
+                    consumed: observation.consumed,
+                    remaining: observation.remaining,
+                    delta: observation.delta,
                 });
         });
     }
@@ -685,6 +801,24 @@ fn install_host_call_deny_host(runtime: &Runtime) {
         .export("hook")
         .instantiate(&Context::default())
         .expect("host-call denial fixture should instantiate");
+}
+
+fn install_fuel_debit_host(runtime: &Runtime) {
+    runtime
+        .new_host_module_builder("env")
+        .new_function_builder()
+        .with_func(
+            |ctx, _module, _params| {
+                add_fuel(&ctx, -2).expect("fuel debit should succeed");
+                Ok(vec![7])
+            },
+            &[ValueType::I32],
+            &[ValueType::I32],
+        )
+        .with_name("hook_impl")
+        .export("hook")
+        .instantiate(&Context::default())
+        .expect("fuel debit fixture should instantiate");
 }
 
 fn selected_exports(module: &Module, options: &CaptureOptions) -> std::result::Result<Vec<String>, String> {
@@ -824,6 +958,41 @@ fn assert_trap_snapshot_cause(snapshot: &ExecutionSnapshot, expected_cause: Trap
                 .any(|observation| observation.cause == expected_cause)
         }),
         "fixed trap scenario should record expected trap cause in trap observations"
+    );
+}
+
+fn assert_fuel_observer_snapshot(snapshot: &ExecutionSnapshot) {
+    let ExecutionSnapshot::Executed {
+        functions,
+        fuel_observations,
+        ..
+    } = snapshot
+    else {
+        panic!("fuel observer scenario should execute");
+    };
+    assert!(
+        functions.iter().any(|function| {
+            matches!(
+                &function.outcome,
+                FunctionOutcome::Trapped {
+                    cause: Some(TrapCause::FuelExhausted),
+                    ..
+                }
+            )
+        }),
+        "fuel observer scenario should trap with fuel exhaustion"
+    );
+    let observations = fuel_observations
+        .as_ref()
+        .expect("fuel observer scenario should capture fuel observations");
+    assert!(
+        observations.len() >= 2,
+        "fuel observer scenario should emit budgeted and exhausted events"
+    );
+    assert_eq!(
+        Some(FuelEvent::Budgeted),
+        observations.first().map(|observation| observation.event),
+        "fuel observer scenario should begin with a budgeted event"
     );
 }
 
