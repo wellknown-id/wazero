@@ -129,6 +129,21 @@ fn fuel_controller_round_trips_through_public_surface() {
 }
 
 #[test]
+fn simple_fuel_controller_total_consumed_round_trips_through_public_surface() {
+    let controller = SimpleFuelController::new(1_000);
+    assert_eq!(0, controller.total_consumed());
+
+    razero::FuelController::consumed(&controller, 50);
+    assert_eq!(50, controller.total_consumed());
+
+    razero::FuelController::consumed(&controller, 75);
+    assert_eq!(125, controller.total_consumed());
+
+    razero::FuelController::consumed(&controller, 25);
+    assert_eq!(150, controller.total_consumed());
+}
+
+#[test]
 fn fuel_observer_public_surface_emits_budgeted_notifications() {
     let runtime = Runtime::new();
     let module = runtime
