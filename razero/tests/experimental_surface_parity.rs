@@ -257,6 +257,16 @@ fn linear_memory_is_guard_page_backed_reflects_allocation_type() {
 }
 
 #[test]
+fn linear_memory_is_empty_tracks_length() {
+    let mut memory = LinearMemory::new(8, 16);
+    assert!(!memory.is_empty());
+
+    memory.free();
+    assert!(memory.is_empty());
+    assert_eq!(0, memory.len());
+}
+
+#[test]
 fn host_call_policy_round_trips_through_public_surface() {
     let ctx = with_host_call_policy(&Context::default(), allow_host_calls);
     let policy = get_host_call_policy(&ctx).expect("policy should be present");
