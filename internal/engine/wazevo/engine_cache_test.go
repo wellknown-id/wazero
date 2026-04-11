@@ -15,6 +15,11 @@ import (
 
 var testVersion = "0.0.1"
 
+func TestEnableMemoryIsolation(t *testing.T) {
+	require.Equal(t, signalHandlerSupported(), enableMemoryIsolation(true))
+	require.False(t, enableMemoryIsolation(false))
+}
+
 func crcf(b []byte) []byte {
 	c := crc32.Checksum(b, crc)
 	return u32.LeBytes(c)

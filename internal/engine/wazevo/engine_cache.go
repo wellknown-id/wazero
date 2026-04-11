@@ -56,11 +56,12 @@ func (e *engine) getCompiledModule(module *wasm.Module, listeners []experimental
 	}
 	cm, ok, err = e.getCompiledModuleFromCache(module)
 	if ok {
+		memoryIsolationEnabled := enableMemoryIsolation(secureMode)
 		cm.parent = e
 		cm.module = module
 		cm.sharedFunctions = e.sharedFunctions
 		cm.ensureTermination = ensureTermination
-		cm.memoryIsolationEnabled = secureMode
+		cm.memoryIsolationEnabled = memoryIsolationEnabled
 		cm.offsets = wazevoapi.NewModuleContextOffsetData(module, len(listeners) > 0)
 		if len(listeners) > 0 {
 			cm.listeners = listeners
@@ -77,8 +78,8 @@ func (e *engine) getCompiledModule(module *wasm.Module, listeners []experimental
 		ssaBuilder := ssa.NewBuilder()
 		machine := newMachine()
 		be := backend.NewCompiler(context.Background(), machine, ssaBuilder)
-		cm.executables.compileEntryPreambles(module, machine, be, secureMode)
-		if secureMode && len(cm.executable) > 0 {
+		cm.executables.compileEntryPreambles(module, machine, be, memoryIsolationEnabled)
+		if memoryIsolationEnabled && len(cm.executable) > 0 {
 			codeStart := uintptr(unsafe.Pointer(&cm.executable[0]))
 			RegisterJITCodeRange(codeStart, codeStart+uintptr(len(cm.executable)))
 		}

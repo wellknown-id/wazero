@@ -117,6 +117,10 @@ type sourceMap struct {
 
 var _ wasm.Engine = (*engine)(nil)
 
+func enableMemoryIsolation(secureMode bool) bool {
+	return secureMode && signalHandlerSupported()
+}
+
 // NewEngine returns the implementation of wasm.Engine.
 func NewEngine(ctx context.Context, _ api.CoreFeatures, fc filecache.Cache) wasm.Engine {
 	machine := newMachine()
@@ -135,7 +139,7 @@ func NewEngine(ctx context.Context, _ api.CoreFeatures, fc filecache.Cache) wasm
 
 // CompileModule implements wasm.Engine.
 func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listeners []experimental.FunctionListener, ensureTermination bool, fuel int64, secureMode bool) (err error) {
-	memoryIsolationEnabled := secureMode && signalHandlerSupported()
+	memoryIsolationEnabled := enableMemoryIsolation(secureMode)
 
 	if wazevoapi.PerfMapEnabled {
 		wazevoapi.PerfMap.Lock()
