@@ -395,6 +395,18 @@ fn linear_memory_bytes_returns_allocation_view() {
 }
 
 #[test]
+fn linear_memory_bytes_mut_allows_mutation_of_allocation() {
+    let mut memory = LinearMemory::new(16, 64);
+    let bytes = memory.bytes_mut();
+    bytes[0] = 42;
+
+    assert_eq!(42, memory.bytes()[0]);
+
+    let mut empty = LinearMemory::new(0, 64);
+    assert!(empty.bytes_mut().is_empty());
+}
+
+#[test]
 fn host_call_policy_round_trips_through_public_surface() {
     let ctx = with_host_call_policy(&Context::default(), allow_host_calls);
     let policy = get_host_call_policy(&ctx).expect("policy should be present");
