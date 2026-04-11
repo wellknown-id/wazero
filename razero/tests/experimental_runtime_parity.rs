@@ -10,13 +10,14 @@ use std::{
 
 use razero::{
     add_fuel, get_fuel_controller, get_import_resolver, get_snapshotter, get_yielder,
-    remaining_fuel, trap_cause_of, with_fuel_controller, with_function_listener_factory,
-    with_import_resolver, with_import_resolver_config, with_import_resolver_observer,
-    with_snapshotter, with_trap_observer, with_yield_observer, with_yield_policy, with_yielder,
-    Context, CoreFeatures, FunctionDefinition, FunctionListener, FunctionListenerFactory,
-    ImportACL, ImportResolverConfig, ImportResolverEvent, ImportResolverObservation, Module,
-    ModuleConfig, Runtime, RuntimeConfig, RuntimeError, Snapshot, TrapCause, ValueType, YieldError,
-    YieldEvent, YieldObservation, CORE_FEATURES_THREADS, ERR_YIELDED,
+    remaining_fuel, trap_cause_of, with_fuel_controller, with_fuel_observer,
+    with_function_listener_factory, with_import_resolver, with_import_resolver_config,
+    with_import_resolver_observer, with_snapshotter, with_trap_observer, with_yield_observer,
+    with_yield_policy, with_yielder, Context, CoreFeatures, FuelEvent, FuelObservation,
+    FunctionDefinition, FunctionListener, FunctionListenerFactory, ImportACL, ImportResolverConfig,
+    ImportResolverEvent, ImportResolverObservation, Module, ModuleConfig, Runtime, RuntimeConfig,
+    RuntimeError, Snapshot, TrapCause, ValueType, YieldError, YieldEvent, YieldObservation,
+    CORE_FEATURES_THREADS, ERR_YIELDED,
 };
 
 const YIELD_WASM: &[u8] = include_bytes!("../../experimental/testdata/yield.wasm");
@@ -146,6 +147,17 @@ fn record_yield_observations(
                 observation.yield_count,
                 observation.expected_host_results,
             ));
+    }
+}
+
+fn record_fuel_observations(
+    observations: Arc<Mutex<Vec<FuelEvent>>>,
+) -> impl Fn(&Context, FuelObservation) + Send + Sync + 'static {
+    move |_ctx: &Context, observation: FuelObservation| {
+        observations
+            .lock()
+            .expect("fuel observations poisoned")
+            .push(observation.event);
     }
 }
 
@@ -639,6 +651,90 @@ fn yield_resume_validation_error_does_not_emit_resumed_event() {
     assert_eq!(
         vec![(YieldEvent::Yielded, 1, 1)],
         *observations.lock().expect("yield observations poisoned")
+    );
+}
+
+#[test]
+fn fuel_observer_yielded_call_finishes_observation_before_resume() {
+    let (_runtime, guest) = setup_yield_runtime();
+    let initial_observations = Arc::new(Mutex::new(Vec::new()));
+    let resume_observations = Arc::new(Mutex::new(Vec::new()));
+    let initial_ctx = with_yielder(&with_fuel_observer(
+        &with_fuel_controller(
+            &Context::default(),
+            TrackingFuelController {
+                budget: 64,
+                consumed: Arc::new(AtomicI64::new(0)),
+            },
+        ),
+        record_fuel_observations(initial_observations.clone()),
+    ));
+
+    let err = guest
+        .exported_function("run")
+        .unwrap()
+        .call_with_context(&initial_ctx, &[])
+        .unwrap_err();
+    let resumer = yielded(err).resumer().expect("resumer should be present");
+
+    assert_eq!(
+        vec![FuelEvent::Budgeted, FuelEvent::Consumed],
+        *initial_observations
+            .lock()
+            .expect("initial fuel observations poisoned")
+    );
+
+    let resume_ctx = with_yielder(&with_fuel_observer(
+        &Context::default(),
+        record_fuel_observations(resume_observations.clone()),
+    ));
+    assert_eq!(vec![142], resumer.resume(&resume_ctx, &[42]).unwrap());
+
+    assert_eq!(
+        vec![FuelEvent::Budgeted, FuelEvent::Consumed],
+        *initial_observations
+            .lock()
+            .expect("initial fuel observations poisoned")
+    );
+    assert_eq!(
+        Vec::<FuelEvent>::new(),
+        *resume_observations
+            .lock()
+            .expect("resume fuel observations poisoned")
+    );
+}
+
+#[test]
+fn fuel_observer_resume_without_new_observer_emits_no_additional_callbacks() {
+    let (_runtime, guest) = setup_yield_runtime();
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let ctx = with_yielder(&with_fuel_observer(
+        &with_fuel_controller(
+            &Context::default(),
+            TrackingFuelController {
+                budget: 64,
+                consumed: Arc::new(AtomicI64::new(0)),
+            },
+        ),
+        record_fuel_observations(observations.clone()),
+    ));
+
+    let err = guest
+        .exported_function("run")
+        .unwrap()
+        .call_with_context(&ctx, &[])
+        .unwrap_err();
+    let resumer = yielded(err).resumer().expect("resumer should be present");
+
+    assert_eq!(
+        vec![142],
+        resumer
+            .resume(&with_yielder(&Context::default()), &[42])
+            .unwrap()
+    );
+    assert_eq!(
+        vec![FuelEvent::Budgeted, FuelEvent::Consumed],
+        *observations.lock().expect("fuel observations poisoned")
     );
 }
 

@@ -181,9 +181,11 @@ back to the instantiated-module store.
 - For yielded executions, the fuel controller/budget is chosen when the Wasm
   call starts and is carried through later `Resume` calls for that suspended
   execution.
-- If a resume context provides a new `FuelObserver`, it takes precedence for
-  subsequent events. If it omits one, the suspended execution keeps using the
-  original observer.
+- Current yielded-call observer semantics are narrower than the yield observer
+  surface: the initial yielded call emits its `budgeted` / terminal
+  `consumed` lifecycle before returning the `YieldError`, and later `Resume`
+  calls do not currently emit additional `FuelObserver` callbacks even if the
+  resume context installs a `FuelObserver`.
 - Fuel consumption is reported through `Consumed` on normal completion and on
   trap/error paths.
 
