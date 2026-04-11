@@ -6,9 +6,12 @@ use razero::{
     logging, trap_cause_of, with_function_listener_factory, with_trap_observer,
     with_yield_policy, with_yielder, Context, CoreFeatures, FunctionDefinition, FunctionListener,
     FunctionListenerFactory, Module, ModuleConfig, Runtime, RuntimeConfig, RuntimeError,
-    TrapCause, TrapObservation, YieldPolicyRequest, CORE_FEATURES_TAIL_CALL, CORE_FEATURES_THREADS,
+    TrapCause, TrapObservation, ValueType, YieldPolicyRequest, CORE_FEATURES_TAIL_CALL,
+    CORE_FEATURES_THREADS,
 };
 use wasm_smith::Config;
+
+const YIELD_WASM: &[u8] = include_bytes!("../../../../../experimental/testdata/yield.wasm");
 
 #[derive(Clone, Copy)]
 pub struct ParityOptions {
@@ -38,6 +41,9 @@ struct FunctionSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FunctionOutcome {
     Returned(Vec<u64>),
+    Yielded {
+        message: String,
+    },
     Trapped {
         message: String,
         cause: Option<TrapCause>,
@@ -49,6 +55,25 @@ struct TrapSnapshot {
     module_name: Option<String>,
     cause: TrapCause,
     message: String,
+}
+
+#[derive(Arbitrary, Clone, Copy, Debug)]
+enum PolicyTrapScenario {
+    InitialDeny,
+    ResumeDeny,
+}
+
+#[derive(Arbitrary, Clone, Copy, Debug)]
+struct PolicyTrapInput {
+    scenario: PolicyTrapScenario,
+    resume_value: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResumeSnapshot {
+    initial: FunctionOutcome,
+    resumed: FunctionOutcome,
+    trap_observations: Vec<TrapSnapshot>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -93,6 +118,13 @@ pub fn replay_native_trap_parity(wasm: &[u8], export_name: &str) {
         standard, secure,
         "native trap parity mismatch between standard and secure mode"
     );
+}
+
+pub fn run_policy_trap_parity(data: &[u8]) -> Result<()> {
+    let mut u = Unstructured::new(data);
+    let input = PolicyTrapInput::arbitrary(&mut u)?;
+    replay_policy_trap_parity(input);
+    Ok(())
 }
 
 pub fn replay_validation(wasm: &[u8]) {
@@ -203,10 +235,7 @@ fn capture_execution(wasm: &[u8], secure_mode: bool, options: &CaptureOptions) -
             .expect("exported function should exist");
         let outcome = match function.call_with_context(&call_ctx, &[]) {
             Ok(results) => FunctionOutcome::Returned(results),
-            Err(err) => FunctionOutcome::Trapped {
-                cause: trap_cause_of(&err),
-                message: err.to_string(),
-            },
+            Err(err) => runtime_error_to_outcome(err),
         };
         functions.push(FunctionSnapshot { name, outcome });
     }
@@ -229,6 +258,90 @@ fn capture_execution(wasm: &[u8], secure_mode: bool, options: &CaptureOptions) -
     };
     runtime.close(&ctx).expect("runtime close should succeed");
     outcome
+}
+
+fn replay_policy_trap_parity(input: PolicyTrapInput) {
+    match input.scenario {
+        PolicyTrapScenario::InitialDeny => {
+            let options = CaptureOptions {
+                capture_traps: true,
+                attach_yielder: true,
+                deny_yields: true,
+                export_name: Some("run".to_string()),
+                ..CaptureOptions::default()
+            };
+            let standard = capture_execution(YIELD_WASM, false, &options);
+            let secure = capture_execution(YIELD_WASM, true, &options);
+            assert_eq!(
+                standard, secure,
+                "policy denial mismatch between standard and secure mode"
+            );
+        }
+        PolicyTrapScenario::ResumeDeny => {
+            let standard = capture_resume_policy_denial(false, input.resume_value);
+            let secure = capture_resume_policy_denial(true, input.resume_value);
+            assert_eq!(
+                standard, secure,
+                "resume-path policy denial mismatch between standard and secure mode"
+            );
+        }
+    }
+}
+
+fn capture_resume_policy_denial(secure_mode: bool, resume_value: u64) -> ResumeSnapshot {
+    let ctx = Context::default();
+    let runtime = Runtime::with_config(runtime_config(secure_mode));
+    install_yield_host(&runtime);
+    let guest = runtime
+        .instantiate_binary(YIELD_WASM, ModuleConfig::new())
+        .expect("yield guest should instantiate");
+    let trap_observations = Arc::new(Mutex::new(Vec::new()));
+
+    let initial_ctx = build_call_context(
+        &CaptureOptions {
+            attach_yielder: true,
+            capture_traps: true,
+            ..CaptureOptions::default()
+        },
+        None,
+        Some(trap_observations.clone()),
+    );
+    let initial_err = guest
+        .exported_function("run_twice")
+        .expect("run_twice export should exist")
+        .call_with_context(&initial_ctx, &[])
+        .expect_err("run_twice should yield before resume");
+    let initial = runtime_error_to_outcome(initial_err.clone());
+    let resumer = match initial_err {
+        RuntimeError::Yield(yield_error) => yield_error.resumer().expect("resumer should exist"),
+        other => panic!("expected yielded error, got {}", other),
+    };
+
+    let resumed_ctx = build_call_context(
+        &CaptureOptions {
+            attach_yielder: true,
+            capture_traps: true,
+            deny_yields: true,
+            ..CaptureOptions::default()
+        },
+        None,
+        Some(trap_observations.clone()),
+    );
+    let resumed = match resumer.resume(&resumed_ctx, &[resume_value]) {
+        Ok(results) => FunctionOutcome::Returned(results),
+        Err(err) => runtime_error_to_outcome(err),
+    };
+
+    let snapshot = ResumeSnapshot {
+        initial,
+        resumed,
+        trap_observations: trap_observations
+            .lock()
+            .expect("trap observations poisoned")
+            .clone(),
+    };
+    runtime.close(&ctx).expect("runtime close should succeed");
+    snapshot
 }
 
 fn build_call_context(
@@ -268,6 +381,26 @@ fn build_call_context(
     ctx
 }
 
+fn install_yield_host(runtime: &Runtime) {
+    runtime
+        .new_host_module_builder("example")
+        .new_function_builder()
+        .with_func(
+            |ctx, _module, _params| {
+                razero::get_yielder(&ctx)
+                    .expect("yielder should be injected")
+                    .r#yield();
+                Ok(vec![0])
+            },
+            &[],
+            &[ValueType::I32],
+        )
+        .with_name("async_work")
+        .export("async_work")
+        .instantiate(&Context::default())
+        .expect("yield host should instantiate");
+}
+
 fn selected_exports(module: &Module, options: &CaptureOptions) -> std::result::Result<Vec<String>, String> {
     if let Some(export_name) = &options.export_name {
         let definitions = module.exported_function_definitions();
@@ -294,6 +427,18 @@ fn selected_exports(module: &Module, options: &CaptureOptions) -> std::result::R
 
 fn deny_all_yields(_ctx: &Context, _request: &YieldPolicyRequest) -> bool {
     false
+}
+
+fn runtime_error_to_outcome(err: RuntimeError) -> FunctionOutcome {
+    match err {
+        RuntimeError::Yield(err) => FunctionOutcome::Yielded {
+            message: err.to_string(),
+        },
+        other => FunctionOutcome::Trapped {
+            cause: trap_cause_of(&other),
+            message: other.to_string(),
+        },
+    }
 }
 
 impl From<ParityOptions> for CaptureOptions {

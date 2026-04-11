@@ -37,3 +37,9 @@ name = "logging_no_diff"
 path = "fuzz_targets/logging_no_diff.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "policy_no_diff"
+path = "fuzz_targets/policy_no_diff.rs"
+test = false
+doc = false
