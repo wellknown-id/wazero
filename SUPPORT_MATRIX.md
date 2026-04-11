@@ -100,7 +100,9 @@ These rules cover the currently shipped observer/policy/config surfaces:
   `Yielder::yield()`. A denial terminates execution with a policy-denied
   runtime error.
 - `YieldPolicyObserver`, when present, reports the cooperative-yield allow/deny
-  decision before any resulting `TrapObserver` notification for a denied yield.
+  decision before any resulting `TrapObserver` notification for a denied yield,
+  and before the corresponding `YieldObserver::Yielded` callback when the yield
+  is allowed.
 - `TrapObserver` fires only for recognized runtime traps (for example
   `policy_denied`, `fuel_exhausted`, memory faults). It does not report plain
   host panics, and `Resumer::cancel()` is not a trap.

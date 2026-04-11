@@ -476,6 +476,70 @@ fn yield_policy_denial_notifies_trap_observer_via_public_runtime() {
 }
 
 #[test]
+fn yield_policy_observer_reports_allow_before_yield_observer_yielded_event() {
+    let (_runtime, guest) = setup_yield_runtime();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let base = Context::default();
+    let yielding = with_yielder(&base);
+    let policy_ctx = with_yield_policy(&yielding, allow_all_yields);
+    let observer_ctx = with_yield_policy_observer(&policy_ctx, {
+        let events = events.clone();
+        move |_ctx: &Context, observation: YieldPolicyObservation| {
+            events.lock().expect("yield events poisoned").push((
+                "policy".to_string(),
+                observation.module.name().map(str::to_string),
+                observation.request.name().map(str::to_string),
+                observation.request.caller_module_name().map(str::to_string),
+                Some(observation.decision),
+                None,
+            ));
+        }
+    });
+    let ctx = with_yield_observer(&observer_ctx, {
+        let events = events.clone();
+        move |_ctx: &Context, observation: razero::YieldObservation| {
+            events.lock().expect("yield events poisoned").push((
+                "yield".to_string(),
+                None,
+                None,
+                None,
+                None,
+                Some(observation.event),
+            ));
+        }
+    });
+
+    let err = guest
+        .exported_function("run")
+        .unwrap()
+        .call_with_context(&ctx, &[])
+        .unwrap_err();
+
+    assert!(yielded(err).resumer().is_some());
+    assert_eq!(
+        vec![
+            (
+                "policy".to_string(),
+                None,
+                Some("run".to_string()),
+                None,
+                Some(YieldPolicyDecision::Allowed),
+                None,
+            ),
+            (
+                "yield".to_string(),
+                None,
+                None,
+                None,
+                None,
+                Some(YieldEvent::Yielded),
+            ),
+        ],
+        *events.lock().expect("yield events poisoned")
+    );
+}
+
+#[test]
 fn yield_policy_observer_reports_direct_host_export_denial_before_trap() {
     let runtime = Runtime::new();
     let events = Arc::new(Mutex::new(Vec::new()));
