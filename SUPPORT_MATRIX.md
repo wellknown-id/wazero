@@ -45,6 +45,35 @@ the embedder rather than by a built-in runtime-owned WASI layer.
 | `RuntimeConfig::with_secure_mode(true)`: hardware fault to Wasm OOB trap path and compiler bounds-check elision | ✅ | ✅ in code | ❌ | ❌ | Outside Linux `amd64` / `arm64`, compiled code keeps normal software bounds checks even when secure mode is enabled. Interpreter always keeps software bounds checks. | Linux/amd64 has end-to-end repository coverage for the hardware-fault-to-trap path. Linux/arm64 implementation is present, but [native validation is still pending](ARM64-SECURE-MODE-VALIDATION.md). |
 | `RuntimeConfig::with_fuel(fuel > 0)`: deterministic metering | ✅ | ✅ | ✅ | ✅ | `fuel <= 0` disables metering. | Covered by repository fuel/controller tests on both engines and by fuel benches on the compiler path. |
 
+## Platform limitations and performance tradeoffs
+
+- **Linux/amd64 compiler** is the current best-supported secure-mode path when
+  you want hardware-fault-backed OOB trapping and the strongest existing native
+  validation story.
+- **Linux/arm64 compiler** has the secure-mode implementation in place, but it
+  should still be treated as pending native sign-off until
+  [ARM64-SECURE-MODE-VALIDATION.md](ARM64-SECURE-MODE-VALIDATION.md) is closed
+  out.
+- On **other compiler-supported targets**, `with_secure_mode(true)` still
+  enables the secure-mode configuration surface and guarded allocation behavior
+  where supported, but execution falls back to the normal checked path instead
+  of the Linux signal-handler fault path.
+- On the **interpreter**, secure mode does not remove software bounds checks. It
+  should be treated as the compatibility-first path, not the highest-throughput
+  path.
+- **`RuntimeConfig::new_auto()`** is the safest default when your embedder needs
+  portability. It may transparently land on the interpreter, so do not assume
+  compiler-specific performance characteristics unless you forced the compiler.
+- **Fuel metering** is available on both engines, but the current
+  compiler/secure-mode path still has one known trap-mapping limitation: fuel
+  exhaustion stops execution, yet the final surfaced trap can still read as
+  `memory fault` instead of `fuel exhausted` until the remaining signal-handler
+  integration work lands.
+- **Observers and policy hooks** (`TrapObserver`, `YieldObserver`,
+  `HostCallPolicy`, `YieldPolicy`, `FuelObserver`) are intended for safety and
+  diagnostics, not free instrumentation. They add extra work to each relevant
+  call or trap path and should be enabled deliberately.
+
 ## Hook ordering and precedence
 
 These rules cover the currently shipped observer/policy/config surfaces:
@@ -184,3 +213,6 @@ back to the instantiated-module store.
 - On other targets, `RuntimeConfig::with_secure_mode(true)` still opts into the
   secure-mode configuration surface, but the runtime falls back to checked
   execution instead of the Linux hardware-fault path.
+- If your policy depends on exact trap classification, treat compiler/secure
+  fuel exhaustion as a known caveat until the remaining signal-handler mapping
+  work is complete.

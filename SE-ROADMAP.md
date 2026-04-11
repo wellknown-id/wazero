@@ -113,7 +113,7 @@ Turn prototypes into an experimental runtime that can be evaluated seriously.
 
 - [85%:16b42271] Add targeted tests for memory fault recovery, fuel exhaustion, async resumption, and policy enforcement.
 - [55%:dedf9a6c] Expand fuzzing and negative testing around host interfaces and trap paths, with the `internal/integration_test/fuzz` workspace now covering policy denial / trap-observer parity and deterministic replay for the new `policy_no_diff` target.
-- [75%:1baa1d65] Document platform limitations, performance tradeoffs, and security assumptions.
+- [90%:1baa1d65] Document platform limitations, performance tradeoffs, and security assumptions in `SUPPORT_MATRIX.md` and `THREAT_MODEL.md`, including secure-mode fallback behavior, observer overhead, and the current compiler fuel trap-mapping caveat.
 - [70%:16b42271] Add observability hooks for trap causes, fuel usage, yield counts, and policy denials.
 - [95%:dedf9a6c] Keep the secure mode opt-in until behavior and compatibility are well understood.
 

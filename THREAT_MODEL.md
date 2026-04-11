@@ -110,6 +110,31 @@ The razero store, engine, compilation caches, and type registries are shared acr
 
 **Mitigation**: `call_indirect` performs runtime type checking via `FunctionTypeID` comparison. A mismatch triggers `ErrRuntimeIndirectCallTypeMismatch` (a trap). This is enforced in both interpreter and compiler paths.
 
+## Operational limitations and tradeoffs
+
+- **Secure mode is still opt-in**. The default runtime configuration remains the
+  compatibility-first path; embedders that need guarded allocation or the Linux
+  hardware-fault trap path must enable `with_secure_mode(true)` explicitly.
+- **The strongest secure-mode story today is Linux/amd64 compiler mode**.
+  Linux/arm64 is implemented but still awaiting native sign-off, and other
+  targets fall back to software-checked execution even when secure mode is
+  enabled.
+- **Deterministic fuel stops execution on both engines**, but the current
+  compiler/secure-mode path still has a known signal-handler integration gap:
+  some fuel exhaustion paths surface as `memory fault` instead of
+  `fuel exhausted`.
+- **Observers and policy hooks are part of the trusted policy layer**, not a
+  sandbox boundary by themselves. They are useful for auditing and fail-closed
+  policy decisions, but they also add work on hot paths and should be scoped to
+  the calls that actually need them.
+- **Filesystem, network, clock, and similar capabilities remain external**.
+  razero does not ship a built-in WASI sandbox or egress policy layer, so any
+  host-facing security story depends on the embedder-supplied imports.
+- **This is still an in-process isolation model**. Guard pages, bounds checks,
+  fuel limits, and policy hooks all raise the bar, but they do not replace
+  separate processes or stronger OS/container isolation when the deployment
+  needs a harder tenant boundary.
+
 ## Security property matrix
 
 For the operational support, fallback, and validation status by runtime mode and
@@ -132,7 +157,7 @@ platform, see [SUPPORT_MATRIX.md](SUPPORT_MATRIX.md).
 
 1. The Rust runtime, standard library, and any platform-specific signal/exception handling used by secure mode are trusted.
 2. The host operating system kernel correctly enforces virtual memory protections.
-3. Host functions provided by the embedder are correctly implemented and do not violate the memory safety guarantees of Go.
+3. Host functions provided by the embedder are correctly implemented and do not violate Rust memory-safety expectations through `unsafe` code, FFI, or external side effects.
 4. The WebAssembly module is structurally valid (passes razero's validation phase) before execution.
 5. The attack surface of the compilation cache (file-backed or in-memory) is limited to availability (filling disk), not integrity (compiled code is checksummed).
 6. Any filesystem, network, clock, random, or other system-facing imports are supplied externally by the embedder and are governed by embedder policy rather than by a built-in runtime subsystem.
