@@ -1522,6 +1522,16 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
             "aot metadata: invalid element table index".to_string(),
         ));
     }
+    if imports.iter().any(|import| {
+        matches!(
+            import.desc,
+            AotImportDescMetadata::Func(type_index) if (type_index as usize) >= types.len()
+        )
+    }) {
+        return Err(AotMetadataError::InvalidHeader(
+            "aot metadata: invalid import function type index".to_string(),
+        ));
+    }
 
     Ok(AotCompiledMetadata {
         target: AotTarget {

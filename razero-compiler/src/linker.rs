@@ -3237,6 +3237,70 @@ int main(void) {
     }
 
     #[test]
+    fn packaged_module_sidecar_rejects_corrupted_import_function_type_index() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            import_section: vec![Import::function("env", "hook", 0)],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![0x41, 0x05, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 1,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let metadata = compile_module_metadata(&module);
+        assert_eq!(metadata.types.len(), 1);
+        assert_eq!(metadata.imports.len(), 1);
+        assert_eq!(metadata.imports[0].index_per_type, 0);
+
+        let mut sidecar = serialize_aot_metadata(&metadata);
+        let import = &metadata.imports[0];
+        let mut import_pattern = Vec::new();
+        import_pattern.push(import.ty.0);
+        import_pattern.extend_from_slice(&(import.module.len() as u32).to_le_bytes());
+        import_pattern.extend_from_slice(import.module.as_bytes());
+        import_pattern.extend_from_slice(&(import.name.len() as u32).to_le_bytes());
+        import_pattern.extend_from_slice(import.name.as_bytes());
+        import_pattern.extend_from_slice(&import.index_per_type.to_le_bytes());
+        import_pattern.push(0);
+        import_pattern.extend_from_slice(&0u32.to_le_bytes());
+
+        let matches = sidecar
+            .windows(import_pattern.len())
+            .enumerate()
+            .filter_map(|(offset, window)| (window == import_pattern.as_slice()).then_some(offset))
+            .collect::<Vec<_>>();
+        assert_eq!(1, matches.len());
+        let type_index_offset = matches[0] + import_pattern.len() - 4;
+        sidecar[type_index_offset] = 1;
+        sidecar[type_index_offset + 1] = 0;
+        sidecar[type_index_offset + 2] = 0;
+        sidecar[type_index_offset + 3] = 0;
+
+        let encoded = serialize_native_package_metadata_bundle(&NativePackageMetadataBundle {
+            modules: vec![NativePackageMetadataEntry {
+                module_name: "guest".to_string(),
+                metadata_sidecar_bytes: sidecar,
+            }],
+            host_imports: Vec::new(),
+        });
+
+        let decoded = deserialize_native_package_metadata_bundle(&encoded).unwrap();
+        let err = crate::aot::deserialize_aot_metadata(&decoded.modules[0].metadata_sidecar_bytes)
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "aot metadata: invalid import function type index"
+        );
+    }
+
+    #[test]
     fn packaged_module_sidecar_rejects_corrupted_table_max_flag() {
         let module = Module {
             type_section: vec![function_type(&[], &[ValueType::I32])],
