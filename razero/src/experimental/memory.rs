@@ -103,6 +103,10 @@ impl LinearMemory {
         }
         self.len = 0;
     }
+
+    pub fn is_guard_page_backed(&self) -> bool {
+        matches!(self.backing, LinearMemoryBacking::Guarded(_))
+    }
 }
 
 pub trait MemoryAllocator: Send + Sync {

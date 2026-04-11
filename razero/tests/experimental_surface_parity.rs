@@ -225,6 +225,23 @@ fn memory_allocator_round_trips_through_public_surface() {
 }
 
 #[test]
+fn linear_memory_is_guard_page_backed_reflects_allocation_type() {
+    let plain = LinearMemory::new(1024, 2048);
+    assert!(!plain.is_guard_page_backed());
+
+    #[cfg(target_os = "linux")]
+    {
+        use razero_secmem::GuardPageAllocator;
+
+        let guarded_allocation = GuardPageAllocator
+            .allocate_zeroed(1024)
+            .expect("guard page allocation should succeed");
+        let guarded = LinearMemory::from_guarded(guarded_allocation, 512, 1024);
+        assert!(guarded.is_guard_page_backed());
+    }
+}
+
+#[test]
 fn host_call_policy_round_trips_through_public_surface() {
     let ctx = with_host_call_policy(&Context::default(), allow_host_calls);
     let policy = get_host_call_policy(&ctx).expect("policy should be present");
