@@ -320,6 +320,15 @@ fn linear_memory_is_empty_tracks_length() {
 }
 
 #[test]
+fn linear_memory_len_tracks_allocation_size() {
+    let memory = LinearMemory::new(42, 100);
+    assert_eq!(42, memory.len());
+
+    let empty = LinearMemory::new(0, 100);
+    assert_eq!(0, empty.len());
+}
+
+#[test]
 fn host_call_policy_round_trips_through_public_surface() {
     let ctx = with_host_call_policy(&Context::default(), allow_host_calls);
     let policy = get_host_call_policy(&ctx).expect("policy should be present");
