@@ -7,11 +7,12 @@ use razero::{
     get_close_notifier, get_compilation_workers, get_fuel_controller, get_function_listener_factory,
     get_host_call_policy, get_host_call_policy_observer, get_import_resolver,
     get_import_resolver_observer, get_snapshotter, get_trap_observer, get_yield_policy,
+    get_yielder,
     get_yield_policy_observer,
     with_close_notifier, with_compilation_workers, with_fuel_controller, with_function_listener_factory,
     with_host_call_policy, with_host_call_policy_observer, with_import_resolver,
     with_import_resolver_observer, with_snapshotter, with_trap_observer, with_yield_policy,
-    with_yield_policy_observer, Context, HostCallPolicyDecision, HostCallPolicyObservation,
+    with_yield_policy_observer, with_yielder, Context, HostCallPolicyDecision, HostCallPolicyObservation,
     ImportResolverEvent, ImportResolverObservation, ModuleConfig, Runtime, RuntimeConfig,
     SimpleFuelController, TrapCause, TrapObservation, ValueType, YieldPolicyDecision,
     YieldPolicyObservation,
@@ -22,6 +23,7 @@ const SIMPLE_EXPORT_WASM: &[u8] = &[
     0x02, 0x01, 0x00, 0x07, 0x05, 0x01, 0x01, b'f', 0x00, 0x00, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x41,
     0x2a, 0x0b,
 ];
+const YIELD_WASM: &[u8] = include_bytes!("../../experimental/testdata/yield.wasm");
 
 fn allow_host_calls(_ctx: &Context, _request: &razero::HostCallPolicyRequest) -> bool {
     true
@@ -121,6 +123,41 @@ fn fuel_controller_round_trips_through_public_surface() {
     let controller = get_fuel_controller(&ctx).expect("controller should be present");
 
     assert_eq!(42, controller.budget());
+}
+
+#[test]
+fn yielder_public_surface_enables_runtime_injection() {
+    let runtime = Runtime::new();
+    runtime
+        .new_host_module_builder("example")
+        .new_function_builder()
+        .with_func(
+            |ctx, _module, _params| {
+                get_yielder(&ctx)
+                    .expect("yielder should be injected")
+                    .r#yield();
+                Ok(vec![0])
+            },
+            &[],
+            &[ValueType::I32],
+        )
+        .with_name("async_work")
+        .export("async_work")
+        .instantiate(&Context::default())
+        .unwrap();
+    let guest = runtime
+        .instantiate_binary(YIELD_WASM, ModuleConfig::new())
+        .unwrap();
+
+    assert!(get_yielder(&Context::default()).is_none());
+    assert!(get_yielder(&with_yielder(&Context::default())).is_none());
+    assert!(guest
+        .exported_function("run")
+        .unwrap()
+        .call_with_context(&with_yielder(&Context::default()), &[])
+        .unwrap_err()
+        .to_string()
+        .contains("yielded"));
 }
 
 #[test]
