@@ -13,6 +13,7 @@ pub mod listener;
 pub mod memory;
 pub mod snapshotter;
 pub mod table;
+pub mod time_provider;
 pub mod trap;
 pub mod r#yield;
 pub mod yield_policy;
@@ -63,6 +64,7 @@ pub use r#yield::{
     get_yielder, with_yielder, ErrYielded, Resumer, YieldError, Yielder, ERR_YIELDED,
 };
 pub use table::Table;
+pub use time_provider::{get_time_provider, with_time_provider, IntoTimeProvider, TimeProvider};
 pub use trap::{
     get_trap_observer, trap_cause_of, with_trap_observer, TrapCause, TrapObservation, TrapObserver,
 };

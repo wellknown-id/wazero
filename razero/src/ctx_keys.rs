@@ -19,6 +19,7 @@ use crate::experimental::{
     memory::MemoryAllocator,
     r#yield::Yielder,
     snapshotter::Snapshotter,
+    time_provider::TimeProvider,
     yield_policy::YieldPolicy,
 };
 
@@ -65,6 +66,7 @@ pub struct Context {
     pub(crate) host_call_policy_observer:
         Option<Arc<dyn crate::experimental::host_call_policy_observer::HostCallPolicyObserver>>,
     pub(crate) trap_observer: Option<Arc<dyn crate::experimental::trap::TrapObserver>>,
+    pub(crate) time_provider: Option<Arc<dyn TimeProvider>>,
     pub(crate) yield_policy: Option<Arc<dyn YieldPolicy>>,
     pub(crate) yield_policy_observer:
         Option<Arc<dyn crate::experimental::yield_policy_observer::YieldPolicyObserver>>,
