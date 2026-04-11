@@ -3479,6 +3479,80 @@ int main(void) {
     }
 
     #[test]
+    fn packaged_module_sidecar_rejects_corrupted_global_initializer_count() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            function_section: vec![0],
+            global_section: vec![Global {
+                ty: GlobalType {
+                    val_type: ValueType::I64,
+                    mutable: false,
+                },
+                init: ConstExpr::from_i64(42),
+            }],
+            code_section: vec![Code {
+                body: vec![0x41, 0x05, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![
+                Export {
+                    ty: ExternType::FUNC,
+                    name: "run".to_string(),
+                    index: 0,
+                },
+                Export {
+                    ty: ExternType::GLOBAL,
+                    name: "counter".to_string(),
+                    index: 0,
+                },
+            ],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let metadata = compile_module_metadata(&module);
+        assert_eq!(1, metadata.globals.len());
+        assert_eq!(1, metadata.global_initializers.len());
+
+        let mut sidecar = serialize_aot_metadata(&metadata);
+        let init_expression = &metadata.global_initializers[0].init_expression;
+        let mut global_initializer_pattern = Vec::new();
+        global_initializer_pattern
+            .extend_from_slice(&(metadata.data_segments.len() as u32).to_le_bytes());
+        global_initializer_pattern
+            .extend_from_slice(&(metadata.global_initializers.len() as u32).to_le_bytes());
+        global_initializer_pattern.extend_from_slice(&(init_expression.len() as u32).to_le_bytes());
+        global_initializer_pattern.extend_from_slice(init_expression);
+        global_initializer_pattern
+            .extend_from_slice(&(metadata.element_segments.len() as u32).to_le_bytes());
+
+        let matches = sidecar
+            .windows(global_initializer_pattern.len())
+            .enumerate()
+            .filter_map(|(offset, window)| {
+                (window == global_initializer_pattern.as_slice()).then_some(offset)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(1, matches.len());
+        sidecar[matches[0] + 4..matches[0] + 8].copy_from_slice(&2u32.to_le_bytes());
+
+        let encoded = serialize_native_package_metadata_bundle(&NativePackageMetadataBundle {
+            modules: vec![NativePackageMetadataEntry {
+                module_name: "guest".to_string(),
+                metadata_sidecar_bytes: sidecar,
+            }],
+            host_imports: Vec::new(),
+        });
+
+        let decoded = deserialize_native_package_metadata_bundle(&encoded).unwrap();
+        let err = crate::aot::deserialize_aot_metadata(&decoded.modules[0].metadata_sidecar_bytes)
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "aot metadata: global initializer count mismatch"
+        );
+    }
+
+    #[test]
     fn packaged_module_sidecar_rejects_corrupted_data_segment_passive_flag() {
         let module = Module {
             type_section: vec![function_type(&[], &[ValueType::I32])],
@@ -3719,7 +3793,10 @@ int main(void) {
         let decoded = deserialize_native_package_metadata_bundle(&encoded).unwrap();
         let err = crate::aot::deserialize_aot_metadata(&decoded.modules[0].metadata_sidecar_bytes)
             .unwrap_err();
-        assert_eq!(err.to_string(), "aot metadata: invalid start function index");
+        assert_eq!(
+            err.to_string(),
+            "aot metadata: invalid start function index"
+        );
     }
 
     #[test]

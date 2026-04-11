@@ -379,9 +379,9 @@ fn crc32c(bytes: &[u8]) -> u32 {
 mod tests {
     use super::{crc32c, deserialize_compiled_module, file_cache_key, serialize_compiled_module};
     use crate::aot::{
-        AotCompiledMetadata, AotFunctionMetadata, AotGlobalTypeMetadata, AotImportDescMetadata,
-        AotImportMetadata, AotMemoryMetadata, AotModuleContextMetadata, AotSourceMapEntry,
-        AotTableMetadata,
+        AotCompiledMetadata, AotFunctionMetadata, AotGlobalInitializerMetadata,
+        AotGlobalTypeMetadata, AotImportDescMetadata, AotImportMetadata, AotMemoryMetadata,
+        AotModuleContextMetadata, AotSourceMapEntry, AotTableMetadata,
     };
     use crate::engine::SourceMap;
     use razero_wasm::module::{ExternType, Module, RefType, ValueType};
@@ -453,6 +453,9 @@ mod tests {
                 min: 4,
                 max: Some(5),
                 ty: RefType::FUNCREF,
+            }],
+            global_initializers: vec![AotGlobalInitializerMetadata {
+                init_expression: vec![0x42, 0x2a, 0x0b],
             }],
             globals: vec![AotGlobalTypeMetadata {
                 val_type: ValueType::I64,

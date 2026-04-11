@@ -1568,6 +1568,11 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
             ));
         }
     }
+    if global_initializers.len() != globals.len() {
+        return Err(AotMetadataError::InvalidHeader(
+            "aot metadata: global initializer count mismatch".to_string(),
+        ));
+    }
 
     Ok(AotCompiledMetadata {
         target: AotTarget {
