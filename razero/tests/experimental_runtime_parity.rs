@@ -705,6 +705,42 @@ fn yield_policy_observer_resume_context_receives_follow_on_denial() {
 }
 
 #[test]
+fn yield_policy_observer_resume_context_receives_follow_on_allow() {
+    let (_runtime, guest) = setup_yield_runtime();
+    let resumed_observations = Arc::new(Mutex::new(Vec::new()));
+
+    let err = guest
+        .exported_function("run_twice")
+        .unwrap()
+        .call_with_context(&with_yielder(&Context::default()), &[])
+        .unwrap_err();
+    let first_resumer = yielded(err).resumer().expect("resumer should be present");
+
+    let resumed_ctx = with_yield_policy_observer(
+        &with_yield_policy(&with_yielder(&Context::default()), allow_all_yields),
+        record_yield_policy_observations(resumed_observations.clone()),
+    );
+    let err = first_resumer.resume(&resumed_ctx, &[40]).unwrap_err();
+    let second_resumer = yielded(err).resumer().expect("resumer should be present");
+    let results = second_resumer
+        .resume(&with_yielder(&Context::default()), &[2])
+        .unwrap();
+
+    assert_eq!(vec![42], results);
+    assert_eq!(
+        vec![(
+            None,
+            Some("run_twice".to_string()),
+            None,
+            YieldPolicyDecision::Allowed,
+        )],
+        *resumed_observations
+            .lock()
+            .expect("resumed yield policy observations poisoned")
+    );
+}
+
+#[test]
 fn yield_policy_observer_initial_context_does_not_persist_when_resume_omits_observer() {
     let (_runtime, guest) = setup_yield_runtime();
     let observations = Arc::new(Mutex::new(Vec::new()));
