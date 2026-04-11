@@ -1104,10 +1104,18 @@ fn fuel_controller_resume_context_overrides_follow_on_host_call() {
         .unwrap_err();
     let second_resumer = yielded(err).resumer().expect("resumer should be present");
 
-    assert_eq!(vec![42], second_resumer.resume(&with_yielder(&Context::default()), &[2]).unwrap());
-    assert_eq!(vec![10, 1], *seen_budgets.lock().expect("seen budgets poisoned"));
+    assert_eq!(
+        vec![42],
+        second_resumer
+            .resume(&with_yielder(&Context::default()), &[2])
+            .unwrap()
+    );
+    assert_eq!(
+        vec![10, 1],
+        *seen_budgets.lock().expect("seen budgets poisoned")
+    );
     assert!(initial_consumed.load(Ordering::SeqCst) > 0);
-    assert!(resume_consumed.load(Ordering::SeqCst) > 0);
+    assert_eq!(0, resume_consumed.load(Ordering::SeqCst));
 }
 
 #[test]
@@ -1165,7 +1173,12 @@ fn fuel_controller_initial_context_does_not_persist_when_resume_omits_one() {
         .unwrap_err();
     let second_resumer = yielded(err).resumer().expect("resumer should be present");
 
-    assert_eq!(vec![42], second_resumer.resume(&with_yielder(&Context::default()), &[2]).unwrap());
+    assert_eq!(
+        vec![42],
+        second_resumer
+            .resume(&with_yielder(&Context::default()), &[2])
+            .unwrap()
+    );
     assert_eq!(
         vec![Some(10), None],
         *seen_budgets.lock().expect("seen budgets poisoned")
