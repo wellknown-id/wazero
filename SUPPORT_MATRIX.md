@@ -136,11 +136,15 @@ allowed host function later calls `Yield()`.
   `YieldPolicy`. A `YieldObserver` attached to the resume context receives the
   `resumed` notification for that resume attempt, and a `TrapObserver` attached
   to the resume context receives follow-on traps raised during the resumed
-  segment.
+  segment. A `HostCallPolicyObserver` attached to the resume context receives
+  allow/deny decisions for follow-on resumed-segment host calls.
 - If the resume context omits `YieldObserver`, the suspended execution does not
   currently emit additional yield-observer callbacks for the resumed segment.
 - If the resume context omits `TrapObserver`, the resumed segment does not
   currently report its follow-on traps to the observer from the initial call.
+- If the resume context omits `HostCallPolicyObserver`, the resumed segment does
+  not currently report its later host-call policy decisions to the observer
+  from the initial call.
 
 ### Import resolution
 

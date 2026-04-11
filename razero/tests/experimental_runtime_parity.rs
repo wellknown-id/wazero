@@ -134,6 +134,10 @@ fn deny_hook_impl_host_call(_ctx: &Context, request: &HostCallPolicyRequest) -> 
     request.name() != Some("hook_impl")
 }
 
+fn deny_async_work_host_call(_ctx: &Context, request: &HostCallPolicyRequest) -> bool {
+    request.name() != Some("async_work")
+}
+
 fn record_trap_observations(
     observations: Arc<Mutex<Vec<(TrapCause, String)>>>,
 ) -> impl Fn(&Context, razero::TrapObservation) + Send + Sync + 'static {
@@ -631,6 +635,110 @@ fn host_call_policy_observer_reports_allowed_guest_import_metadata() {
         *observations
             .lock()
             .expect("host call policy observations poisoned")
+    );
+}
+
+#[test]
+fn host_call_policy_resume_context_controls_follow_on_host_call() {
+    let (_runtime, guest) = setup_yield_runtime();
+    let initial_observations = Arc::new(Mutex::new(Vec::new()));
+    let resumed_observations = Arc::new(Mutex::new(Vec::new()));
+    let initial_ctx = with_host_call_policy_observer(
+        &with_host_call_policy(&with_yielder(&Context::default()), allow_all_host_calls),
+        record_host_call_policy_observations(initial_observations.clone()),
+    );
+
+    let err = guest
+        .exported_function("run_twice")
+        .unwrap()
+        .call_with_context(&initial_ctx, &[])
+        .unwrap_err();
+    let resumer = yielded(err).resumer().expect("resumer should be present");
+    assert_eq!(
+        vec![(
+            None,
+            Some("async_work".to_string()),
+            None,
+            HostCallPolicyDecision::Allowed,
+        )],
+        *initial_observations
+            .lock()
+            .expect("initial host call observations poisoned")
+    );
+
+    let resumed_ctx = with_host_call_policy_observer(
+        &with_host_call_policy(
+            &with_yielder(&Context::default()),
+            deny_async_work_host_call,
+        ),
+        record_host_call_policy_observations(resumed_observations.clone()),
+    );
+    let err = resumer.resume(&resumed_ctx, &[40]).unwrap_err();
+
+    assert_eq!("policy denied: host call", err.to_string());
+    assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+    assert_eq!(
+        vec![(
+            None,
+            Some("async_work".to_string()),
+            None,
+            HostCallPolicyDecision::Allowed,
+        )],
+        *initial_observations
+            .lock()
+            .expect("initial host call observations poisoned")
+    );
+    assert_eq!(
+        vec![(
+            None,
+            Some("async_work".to_string()),
+            None,
+            HostCallPolicyDecision::Denied,
+        )],
+        *resumed_observations
+            .lock()
+            .expect("resumed host call observations poisoned")
+    );
+}
+
+#[test]
+fn host_call_policy_initial_observer_does_not_persist_when_resume_omits_one() {
+    let (_runtime, guest) = setup_yield_runtime();
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let initial_ctx = with_host_call_policy_observer(
+        &with_host_call_policy(&with_yielder(&Context::default()), allow_all_host_calls),
+        record_host_call_policy_observations(observations.clone()),
+    );
+
+    let err = guest
+        .exported_function("run_twice")
+        .unwrap()
+        .call_with_context(&initial_ctx, &[])
+        .unwrap_err();
+    let resumer = yielded(err).resumer().expect("resumer should be present");
+
+    let err = resumer
+        .resume(
+            &with_host_call_policy(
+                &with_yielder(&Context::default()),
+                deny_async_work_host_call,
+            ),
+            &[40],
+        )
+        .unwrap_err();
+
+    assert_eq!("policy denied: host call", err.to_string());
+    assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+    assert_eq!(
+        vec![(
+            None,
+            Some("async_work".to_string()),
+            None,
+            HostCallPolicyDecision::Allowed,
+        )],
+        *observations
+            .lock()
+            .expect("host call observations poisoned")
     );
 }
 
