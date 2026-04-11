@@ -1325,6 +1325,7 @@ fn import_resolver_config_round_trips_through_public_surface() {
         &Context::default(),
         ImportResolverConfig {
             acl: Some(acl.clone()),
+            fail_closed: true,
             ..ImportResolverConfig::default()
         },
     );
@@ -1332,6 +1333,18 @@ fn import_resolver_config_round_trips_through_public_surface() {
 
     assert_eq!(Some(acl), cfg.acl);
     assert!(cfg.resolver.is_none());
+    assert!(cfg.fail_closed);
+
+    let default_cfg = get_import_resolver_config(&with_import_resolver_config(
+        &Context::default(),
+        ImportResolverConfig {
+            acl: Some(ImportACL::new().allow_modules(["env"])),
+            fail_closed: false,
+            ..ImportResolverConfig::default()
+        },
+    ))
+    .expect("config should be present");
+    assert!(!default_cfg.fail_closed);
 }
 
 #[test]
