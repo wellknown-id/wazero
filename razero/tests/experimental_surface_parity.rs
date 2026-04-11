@@ -628,6 +628,22 @@ fn module_exported_memory_definitions_round_trip_through_public_surface() {
 }
 
 #[test]
+fn module_exported_function_definitions_round_trip_through_public_surface() {
+    let runtime = Runtime::new();
+    let guest = runtime
+        .instantiate_binary(SIMPLE_EXPORT_WASM, ModuleConfig::new().with_name("guest"))
+        .unwrap();
+
+    let exported = guest.exported_function_definitions();
+    assert_eq!(1, exported.len());
+    let definition = exported.get("f").unwrap();
+    assert_eq!(None, definition.import());
+    assert!(definition.param_types().is_empty());
+    assert_eq!(&[ValueType::I32], definition.result_types());
+    assert_eq!(&["f".to_string()], definition.export_names());
+}
+
+#[test]
 fn linear_memory_is_empty_tracks_length() {
     let mut memory = LinearMemory::new(8, 16);
     assert!(!memory.is_empty());
