@@ -447,12 +447,62 @@ fn yield_policy_denies_follow_on_suspension_via_public_resume_path() {
 }
 
 #[test]
-fn yield_policy_denial_notifies_trap_observer_via_public_resume_path() {
+fn trap_observer_resume_context_receives_follow_on_policy_denial() {
     let (_runtime, guest) = setup_yield_runtime();
-    let observations = Arc::new(Mutex::new(Vec::new()));
+    let initial_observations = Arc::new(Mutex::new(Vec::new()));
+    let resumed_observations = Arc::new(Mutex::new(Vec::new()));
     let base = Context::default();
     let yielding = with_yielder(&base);
-    let initial_ctx = with_trap_observer(&yielding, record_trap_observations(observations.clone()));
+    let initial_ctx = with_trap_observer(
+        &yielding,
+        record_trap_observations(initial_observations.clone()),
+    );
+
+    let err = guest
+        .exported_function("run_twice")
+        .unwrap()
+        .call_with_context(&initial_ctx, &[])
+        .unwrap_err();
+    let resumer = yielded(err).resumer().expect("resumer should be present");
+    assert!(initial_observations
+        .lock()
+        .expect("initial trap observations poisoned")
+        .is_empty());
+
+    let resumed_base = Context::default();
+    let resumed_yielding = with_yielder(&resumed_base);
+    let resumed_policy = with_yield_policy(&resumed_yielding, deny_all_yields);
+    let resumed_ctx = with_trap_observer(
+        &resumed_policy,
+        record_trap_observations(resumed_observations.clone()),
+    );
+    let err = resumer.resume(&resumed_ctx, &[40]).unwrap_err();
+
+    assert_eq!("policy denied: cooperative yield", err.to_string());
+    assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+    assert!(initial_observations
+        .lock()
+        .expect("initial trap observations poisoned")
+        .is_empty());
+    assert_eq!(
+        vec![(
+            TrapCause::PolicyDenied,
+            "policy denied: cooperative yield".to_string()
+        )],
+        *resumed_observations
+            .lock()
+            .expect("resumed trap observations poisoned")
+    );
+}
+
+#[test]
+fn trap_observer_initial_context_does_not_persist_when_resume_omits_observer() {
+    let (_runtime, guest) = setup_yield_runtime();
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let initial_ctx = with_trap_observer(
+        &with_yielder(&Context::default()),
+        record_trap_observations(observations.clone()),
+    );
 
     let err = guest
         .exported_function("run_twice")
@@ -465,24 +515,19 @@ fn yield_policy_denial_notifies_trap_observer_via_public_resume_path() {
         .expect("trap observations poisoned")
         .is_empty());
 
-    let resumed_base = Context::default();
-    let resumed_yielding = with_yielder(&resumed_base);
-    let resumed_policy = with_yield_policy(&resumed_yielding, deny_all_yields);
-    let resumed_ctx = with_trap_observer(
-        &resumed_policy,
-        record_trap_observations(observations.clone()),
-    );
-    let err = resumer.resume(&resumed_ctx, &[40]).unwrap_err();
+    let err = resumer
+        .resume(
+            &with_yield_policy(&with_yielder(&Context::default()), deny_all_yields),
+            &[40],
+        )
+        .unwrap_err();
 
     assert_eq!("policy denied: cooperative yield", err.to_string());
     assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
-    assert_eq!(
-        vec![(
-            TrapCause::PolicyDenied,
-            "policy denied: cooperative yield".to_string()
-        )],
-        *observations.lock().expect("trap observations poisoned")
-    );
+    assert!(observations
+        .lock()
+        .expect("trap observations poisoned")
+        .is_empty());
 }
 
 #[test]

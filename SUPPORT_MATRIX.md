@@ -134,9 +134,13 @@ allowed host function later calls `Yield()`.
 - Resume uses the resume context for subsequent host-call state. That means a
   resumed execution can swap in a new `TrapObserver`, `HostCallPolicy`, or
   `YieldPolicy`. A `YieldObserver` attached to the resume context receives the
-  `resumed` notification for that resume attempt.
+  `resumed` notification for that resume attempt, and a `TrapObserver` attached
+  to the resume context receives follow-on traps raised during the resumed
+  segment.
 - If the resume context omits `YieldObserver`, the suspended execution does not
   currently emit additional yield-observer callbacks for the resumed segment.
+- If the resume context omits `TrapObserver`, the resumed segment does not
+  currently report its follow-on traps to the observer from the initial call.
 
 ### Import resolution
 
