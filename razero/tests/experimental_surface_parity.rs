@@ -7,18 +7,19 @@ use razero::{
     add_fuel, benchmark_function_listener, get_close_notifier, get_compilation_workers,
     get_fuel_controller, get_fuel_observer, get_function_listener_factory, get_host_call_policy,
     get_host_call_policy_observer, get_import_resolver, get_import_resolver_config,
-    get_import_resolver_observer, get_memory_allocator, get_snapshotter, get_trap_observer,
-    get_yield_policy, get_yield_policy_observer, get_yielder, new_stack_iterator, remaining_fuel,
-    trap_cause_of, with_close_notifier, with_compilation_workers, with_fuel_controller,
-    with_fuel_observer, with_function_listener_factory, with_host_call_policy,
-    with_host_call_policy_observer, with_import_resolver, with_import_resolver_acl,
-    with_import_resolver_config, with_import_resolver_observer, with_memory_allocator,
-    with_snapshotter, with_trap_observer, with_yield_observer, with_yield_policy,
-    with_yield_policy_observer, with_yielder, AggregatingFuelController, Context, FuelEvent,
-    FuelObservation, FunctionDefinition, FunctionListenerFn, HostCallPolicyDecision,
-    HostCallPolicyObservation, HostCallPolicyRequest, ImportACL, ImportResolverConfig,
-    ImportResolverEvent, ImportResolverObservation, LinearMemory, MemoryDefinition, ModuleConfig,
-    Runtime, RuntimeConfig, RuntimeError, SimpleFuelController, StackFrame, StackIterator,
+    get_import_resolver_observer, get_memory_allocator, get_snapshotter, get_time_provider,
+    get_trap_observer, get_yield_policy, get_yield_policy_observer, get_yielder,
+    new_stack_iterator, remaining_fuel, trap_cause_of, with_close_notifier,
+    with_compilation_workers, with_fuel_controller, with_fuel_observer,
+    with_function_listener_factory, with_host_call_policy, with_host_call_policy_observer,
+    with_import_resolver, with_import_resolver_acl, with_import_resolver_config,
+    with_import_resolver_observer, with_memory_allocator, with_snapshotter, with_time_provider,
+    with_trap_observer, with_yield_observer, with_yield_policy, with_yield_policy_observer,
+    with_yielder, AggregatingFuelController, Context, FuelEvent, FuelObservation,
+    FunctionDefinition, FunctionListenerFn, HostCallPolicyDecision, HostCallPolicyObservation,
+    HostCallPolicyRequest, ImportACL, ImportResolverConfig, ImportResolverEvent,
+    ImportResolverObservation, LinearMemory, MemoryDefinition, ModuleConfig, Runtime,
+    RuntimeConfig, RuntimeError, SimpleFuelController, StackFrame, StackIterator, TimeProvider,
     TrapCause, TrapObservation, ValueType, YieldEvent, YieldObservation, YieldPolicyDecision,
     YieldPolicyObservation,
 };
@@ -90,6 +91,41 @@ fn close_notifier_round_trips_through_public_surface() {
     notifier.close_notify(&ctx, 42);
 
     assert_eq!(42, exit_code.load(Ordering::SeqCst));
+}
+
+#[test]
+fn time_provider_round_trips_through_public_surface() {
+    struct StubTimeProvider {
+        sleeps: Arc<Mutex<Vec<i64>>>,
+    }
+
+    impl TimeProvider for StubTimeProvider {
+        fn walltime(&self) -> (i64, i32) {
+            (1, 2)
+        }
+
+        fn nanotime(&self) -> i64 {
+            3
+        }
+
+        fn nanosleep(&self, ns: i64) {
+            self.sleeps.lock().expect("sleep log poisoned").push(ns);
+        }
+    }
+
+    let sleeps = Arc::new(Mutex::new(Vec::new()));
+    let ctx = with_time_provider(
+        &Context::default(),
+        StubTimeProvider {
+            sleeps: sleeps.clone(),
+        },
+    );
+    let provider = get_time_provider(&ctx).expect("time provider should exist");
+
+    assert_eq!((1, 2), provider.walltime());
+    assert_eq!(3, provider.nanotime());
+    provider.nanosleep(7);
+    assert_eq!(vec![7], *sleeps.lock().expect("sleep log poisoned"));
 }
 
 #[test]
