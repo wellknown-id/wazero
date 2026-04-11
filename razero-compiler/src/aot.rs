@@ -1732,7 +1732,15 @@ fn read_table_metadata(cursor: &mut Cursor<&[u8]>) -> Result<AotTableMetadata, A
     Ok(AotTableMetadata {
         min,
         max,
-        ty: RefType(read_u8(cursor)?),
+        ty: match read_u8(cursor)? {
+            0x70 => RefType::FUNCREF,
+            0x6f => RefType::EXTERNREF,
+            _ => {
+                return Err(AotMetadataError::InvalidHeader(
+                    "aot metadata: invalid table ref type".to_string(),
+                ));
+            }
+        },
     })
 }
 
