@@ -964,6 +964,34 @@ fn host_call_policy_observer_round_trips_through_public_surface() {
 }
 
 #[test]
+fn host_call_policy_observer_emits_denied_decisions_through_public_surface() {
+    let observed = Arc::new(AtomicU32::new(0));
+    let ctx = with_host_call_policy_observer(&Context::default(), {
+        let observed = observed.clone();
+        move |_ctx: &Context, observation: HostCallPolicyObservation| {
+            assert_eq!(HostCallPolicyDecision::Denied, observation.decision);
+            observed.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let observer = get_host_call_policy_observer(&ctx).expect("observer should be present");
+    let runtime = Runtime::new();
+    let compiled = runtime.compile(SIMPLE_EXPORT_WASM).unwrap();
+    let module = runtime
+        .instantiate(&compiled, ModuleConfig::new().with_name("guest"))
+        .unwrap();
+    observer.observe_host_call_policy(
+        &ctx,
+        HostCallPolicyObservation {
+            module,
+            request: razero::HostCallPolicyRequest::new(),
+            decision: HostCallPolicyDecision::Denied,
+        },
+    );
+
+    assert_eq!(1, observed.load(Ordering::SeqCst));
+}
+
+#[test]
 fn yield_policy_round_trips_through_public_surface() {
     let ctx = with_yield_policy(&Context::default(), allow_yields);
     let policy = get_yield_policy(&ctx).expect("policy should be present");
@@ -1118,6 +1146,34 @@ fn yield_policy_observer_round_trips_through_public_surface() {
             module,
             request: razero::YieldPolicyRequest::new(),
             decision: YieldPolicyDecision::Allowed,
+        },
+    );
+
+    assert_eq!(1, observed.load(Ordering::SeqCst));
+}
+
+#[test]
+fn yield_policy_observer_emits_denied_decisions_through_public_surface() {
+    let observed = Arc::new(AtomicU32::new(0));
+    let ctx = with_yield_policy_observer(&Context::default(), {
+        let observed = observed.clone();
+        move |_ctx: &Context, observation: YieldPolicyObservation| {
+            assert_eq!(YieldPolicyDecision::Denied, observation.decision);
+            observed.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let observer = get_yield_policy_observer(&ctx).expect("observer should be present");
+    let runtime = Runtime::new();
+    let compiled = runtime.compile(SIMPLE_EXPORT_WASM).unwrap();
+    let module = runtime
+        .instantiate(&compiled, ModuleConfig::new().with_name("guest"))
+        .unwrap();
+    observer.observe_yield_policy(
+        &ctx,
+        YieldPolicyObservation {
+            module,
+            request: razero::YieldPolicyRequest::new(),
+            decision: YieldPolicyDecision::Denied,
         },
     );
 
