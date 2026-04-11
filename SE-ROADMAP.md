@@ -53,7 +53,7 @@ explicitly assessed for the corresponding workstream.
 Establish the baseline needed to evaluate all later work.
 
 - [95%:dedf9a6c] Document the threat model for untrusted tenant code, host functions, and shared infrastructure.
-- [80%:dedf9a6c] Define supported and unsupported security properties for each runtime mode and platform.
+- [81%:8f114064] Define supported and unsupported security properties for each runtime mode and platform, with cached and uncached wazevo secure-mode compile paths now sharing the same memory-isolation capability gate on unsupported targets.
 - [85%:dedf9a6c] Identify the wazero subsystems that will change first: memory management, compiler backends, and trap handling.
 - [97%:156dfeb5] Define new error and trap categories for memory faults, fuel exhaustion, policy denials, and async yield/resume transitions.
 - [80%:dedf9a6c] Add benchmark and regression baselines for compile time, execution time, memory growth, and trap overhead.
