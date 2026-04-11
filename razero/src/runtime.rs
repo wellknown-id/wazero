@@ -2437,6 +2437,15 @@ mod tests {
         );
     }
 
+    #[test]
+    fn runtime_config_propagates_secure_memory_to_store() {
+        for secure_mode in [false, true] {
+            let runtime = Runtime::with_config(RuntimeConfig::new().with_secure_mode(secure_mode));
+            let store = runtime.inner.store.lock().expect("runtime store poisoned");
+            assert_eq!(secure_mode, store.secure_memory);
+        }
+    }
+
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn secure_mode_falls_back_to_plain_guest_memory_when_guard_pages_are_unsupported() {
