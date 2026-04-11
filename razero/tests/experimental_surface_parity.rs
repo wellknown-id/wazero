@@ -6,16 +6,18 @@ use std::sync::{
 use razero::{
     get_close_notifier, get_compilation_workers, get_fuel_controller, get_function_listener_factory,
     get_host_call_policy, get_host_call_policy_observer, get_import_resolver,
-    get_import_resolver_observer, get_memory_allocator, get_snapshotter, get_trap_observer,
-    get_yield_policy, get_yielder,
+    get_import_resolver_config, get_import_resolver_observer, get_memory_allocator,
+    get_snapshotter, get_trap_observer, get_yield_policy, get_yielder,
     get_yield_policy_observer,
     with_close_notifier, with_compilation_workers, with_fuel_controller, with_function_listener_factory,
     with_host_call_policy, with_host_call_policy_observer, with_import_resolver,
-    with_import_resolver_observer, with_memory_allocator, with_snapshotter, with_trap_observer,
-    with_yield_policy, with_yield_policy_observer, with_yielder, Context, HostCallPolicyDecision,
-    HostCallPolicyObservation, ImportResolverEvent, ImportResolverObservation, LinearMemory,
-    ModuleConfig, Runtime, RuntimeConfig, SimpleFuelController, TrapCause, TrapObservation,
-    ValueType, YieldPolicyDecision, YieldPolicyObservation,
+    with_import_resolver_acl, with_import_resolver_config, with_import_resolver_observer,
+    with_memory_allocator, with_snapshotter, with_trap_observer, with_yield_policy,
+    with_yield_policy_observer, with_yielder, Context, HostCallPolicyDecision,
+    HostCallPolicyObservation, ImportACL, ImportResolverConfig, ImportResolverEvent,
+    ImportResolverObservation, LinearMemory, ModuleConfig, Runtime, RuntimeConfig,
+    SimpleFuelController, TrapCause, TrapObservation, ValueType, YieldPolicyDecision,
+    YieldPolicyObservation,
 };
 
 const SIMPLE_EXPORT_WASM: &[u8] = &[
@@ -368,4 +370,30 @@ fn import_resolver_can_return_anonymous_module_instances() {
         .call(&[])
         .unwrap();
     assert_eq!(2, call_count.load(Ordering::SeqCst));
+}
+
+#[test]
+fn import_resolver_config_round_trips_through_public_surface() {
+    let acl = ImportACL::new().deny_modules(["env"]);
+    let ctx = with_import_resolver_config(
+        &Context::default(),
+        ImportResolverConfig {
+            acl: Some(acl.clone()),
+            ..ImportResolverConfig::default()
+        },
+    );
+    let cfg = get_import_resolver_config(&ctx).expect("config should be present");
+
+    assert_eq!(Some(acl), cfg.acl);
+    assert!(cfg.resolver.is_none());
+}
+
+#[test]
+fn with_import_resolver_acl_preserves_existing_resolver() {
+    let ctx = with_import_resolver(&Context::default(), |_name| None);
+    let ctx = with_import_resolver_acl(&ctx, ImportACL::new().allow_modules(["env"]));
+    let cfg = get_import_resolver_config(&ctx).expect("config should be present");
+
+    assert!(cfg.resolver.is_some());
+    assert_eq!(Some(ImportACL::new().allow_modules(["env"])), cfg.acl);
 }
