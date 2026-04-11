@@ -185,6 +185,51 @@ back to the instantiated-module store.
 - Fuel consumption is reported through `Consumed` on normal completion and on
   trap/error paths.
 
+## Current experimental fuel cost model
+
+The current fuel surface is intentionally **coarse-grained**. A fuel unit is not
+yet documented as “one Wasm instruction” or any other per-opcode promise.
+Instead, the current experimental contract is:
+
+- razero charges fuel at a small set of **control-flow checkpoints** chosen to
+  keep accounting deterministic without paying instruction-by-instruction
+  overhead everywhere.
+- On the **compiler path**, the current production metering points are function
+  entries plus loop / control-flow boundaries used by the compiler’s injected
+  fuel checks.
+- On the **interpreter path**, fuel is currently debited at guest/native
+  function entry and on backward-branch / loop progression paths.
+- **Basic-block-level charging is not complete yet**, so embedders should treat
+  today’s fuel values as runtime-version-specific accounting units rather than a
+  stable cross-version “instruction count”.
+
+### What embedders can rely on today
+
+- Fuel is best treated as a **deterministic execution budget**, not as an exact
+  cost profiler.
+- The same runtime configuration and engine choice will charge fuel
+  deterministically for the same execution shape.
+- Long-running loops and repeated control-flow re-entry consume fuel and can be
+  stopped through exhaustion.
+- `experimental::with_fuel_controller` can override the per-call budget chosen
+  from `RuntimeConfig::with_fuel`.
+- Imported host work is **not automatically priced by wall clock or syscall
+  cost**. If your embedder wants host-side resource accounting, debit or
+  recharge explicitly from the host with `experimental::add_fuel`.
+- Yield / resume keeps using the budget/controller selected for the suspended
+  execution unless the runtime’s existing documented override points say
+  otherwise.
+
+### What is still intentionally unspecified
+
+- No stable per-instruction pricing table is promised yet.
+- No compatibility guarantee is made that a given module will consume the exact
+  same numeric fuel amount across future accounting-model revisions.
+- Compiler and interpreter fuel units are intended to be operationally similar,
+  but they should still be treated as **engine-specific experimental accounting
+  surfaces**, especially while basic-block injection and compiler trap mapping
+  remain incomplete.
+
 ## Practical guidance
 
 - Install hardening hooks at the narrowest scope that matches their job:
