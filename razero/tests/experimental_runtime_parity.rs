@@ -10,11 +10,11 @@ use std::{
 
 use razero::{
     add_fuel, get_fuel_controller, get_import_resolver, get_snapshotter, get_yielder,
-    remaining_fuel, with_fuel_controller, with_function_listener_factory, with_import_resolver,
-    with_snapshotter, with_trap_observer, with_yield_policy, with_yielder, trap_cause_of, Context,
-    FunctionDefinition, FunctionListener,
-    FunctionListenerFactory, Module, ModuleConfig, Runtime, RuntimeConfig, RuntimeError, Snapshot,
-    TrapCause, ValueType, YieldError, ERR_YIELDED,
+    remaining_fuel, trap_cause_of, with_fuel_controller, with_function_listener_factory,
+    with_import_resolver, with_snapshotter, with_trap_observer, with_yield_policy, with_yielder,
+    Context, CoreFeatures, FunctionDefinition, FunctionListener, FunctionListenerFactory, Module,
+    ModuleConfig, Runtime, RuntimeConfig, RuntimeError, Snapshot, TrapCause, ValueType, YieldError,
+    CORE_FEATURES_THREADS, ERR_YIELDED,
 };
 
 const YIELD_WASM: &[u8] = include_bytes!("../../experimental/testdata/yield.wasm");
@@ -50,6 +50,11 @@ const UNREACHABLE_WASM: &[u8] = &[
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02,
     0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x00, 0x0a, 0x05, 0x01, 0x03, 0x00,
     0x00, 0x0b,
+];
+const UNALIGNED_ATOMIC_STORE_WASM: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02,
+    0x01, 0x00, 0x05, 0x04, 0x01, 0x03, 0x01, 0x01, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00,
+    0x00, 0x0a, 0x0c, 0x01, 0x0a, 0x00, 0x41, 0x01, 0x41, 0x2a, 0xfe, 0x17, 0x02, 0x00, 0x0b,
 ];
 const GUEST_IMPORT_INC_WASM: &[u8] = &[
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f,
@@ -347,7 +352,10 @@ fn yield_policy_denial_notifies_trap_observer_via_public_runtime() {
     assert_eq!("policy denied: cooperative yield", err.to_string());
     assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
     assert_eq!(
-        vec![(TrapCause::PolicyDenied, "policy denied: cooperative yield".to_string())],
+        vec![(
+            TrapCause::PolicyDenied,
+            "policy denied: cooperative yield".to_string()
+        )],
         *observations.lock().expect("trap observations poisoned")
     );
 }
@@ -388,12 +396,10 @@ fn yield_policy_denial_notifies_trap_observer_via_public_resume_path() {
         .call_with_context(&initial_ctx, &[])
         .unwrap_err();
     let resumer = yielded(err).resumer().expect("resumer should be present");
-    assert!(
-        observations
-            .lock()
-            .expect("trap observations poisoned")
-            .is_empty()
-    );
+    assert!(observations
+        .lock()
+        .expect("trap observations poisoned")
+        .is_empty());
 
     let resumed_base = Context::default();
     let resumed_yielding = with_yielder(&resumed_base);
@@ -407,7 +413,10 @@ fn yield_policy_denial_notifies_trap_observer_via_public_resume_path() {
     assert_eq!("policy denied: cooperative yield", err.to_string());
     assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
     assert_eq!(
-        vec![(TrapCause::PolicyDenied, "policy denied: cooperative yield".to_string())],
+        vec![(
+            TrapCause::PolicyDenied,
+            "policy denied: cooperative yield".to_string()
+        )],
         *observations.lock().expect("trap observations poisoned")
     );
 }
@@ -745,7 +754,10 @@ fn interpreter_invalid_conversion_trap_notifies_observer() {
         .call_with_context(&ctx, &[])
         .unwrap_err();
 
-    assert_eq!(Some(TrapCause::InvalidConversionToInteger), trap_cause_of(&err));
+    assert_eq!(
+        Some(TrapCause::InvalidConversionToInteger),
+        trap_cause_of(&err)
+    );
     assert_eq!(
         vec![(
             TrapCause::InvalidConversionToInteger,
@@ -775,7 +787,10 @@ fn interpreter_invalid_table_access_trap_notifies_observer() {
 
     assert_eq!(Some(TrapCause::InvalidTableAccess), trap_cause_of(&err));
     assert_eq!(
-        vec![(TrapCause::InvalidTableAccess, "invalid table access".to_string())],
+        vec![(
+            TrapCause::InvalidTableAccess,
+            "invalid table access".to_string()
+        )],
         *observations.lock().expect("trap observations poisoned")
     );
 }
@@ -798,7 +813,10 @@ fn interpreter_indirect_call_type_mismatch_trap_notifies_observer() {
         .call_with_context(&ctx, &[])
         .unwrap_err();
 
-    assert_eq!(Some(TrapCause::IndirectCallTypeMismatch), trap_cause_of(&err));
+    assert_eq!(
+        Some(TrapCause::IndirectCallTypeMismatch),
+        trap_cause_of(&err)
+    );
     assert_eq!(
         vec![(
             TrapCause::IndirectCallTypeMismatch,
@@ -829,6 +847,34 @@ fn interpreter_unreachable_trap_notifies_observer() {
     assert_eq!(Some(TrapCause::Unreachable), trap_cause_of(&err));
     assert_eq!(
         vec![(TrapCause::Unreachable, "unreachable".to_string())],
+        *observations.lock().expect("trap observations poisoned")
+    );
+}
+
+#[test]
+fn interpreter_unaligned_atomic_trap_notifies_observer() {
+    let runtime = Runtime::with_config(
+        RuntimeConfig::new_interpreter()
+            .with_core_features(CoreFeatures::V2 | CORE_FEATURES_THREADS),
+    );
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let guest = runtime
+        .instantiate_binary(UNALIGNED_ATOMIC_STORE_WASM, ModuleConfig::new())
+        .unwrap();
+    let ctx = with_trap_observer(
+        &Context::default(),
+        record_trap_observations(observations.clone()),
+    );
+
+    let err = guest
+        .exported_function("run")
+        .unwrap()
+        .call_with_context(&ctx, &[])
+        .unwrap_err();
+
+    assert_eq!(Some(TrapCause::UnalignedAtomic), trap_cause_of(&err));
+    assert_eq!(
+        vec![(TrapCause::UnalignedAtomic, "unaligned atomic".to_string())],
         *observations.lock().expect("trap observations poisoned")
     );
 }
