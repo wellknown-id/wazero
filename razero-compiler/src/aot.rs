@@ -1569,6 +1569,16 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
             "aot metadata: import count mismatch".to_string(),
         ));
     }
+    if module_shape.has_local_memory != memory.is_some() {
+        return Err(AotMetadataError::InvalidHeader(
+            "aot metadata: local memory flag mismatch".to_string(),
+        ));
+    }
+    if module_shape.has_any_memory != (memory.is_some() || module_shape.import_memory_count > 0) {
+        return Err(AotMetadataError::InvalidHeader(
+            "aot metadata: any memory flag mismatch".to_string(),
+        ));
+    }
     let total_function_count = module_shape
         .import_function_count
         .checked_add(module_shape.local_function_count)
