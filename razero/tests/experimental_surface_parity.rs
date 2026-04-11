@@ -280,6 +280,26 @@ fn linear_memory_is_guard_page_backed_reflects_allocation_type() {
 }
 
 #[test]
+fn memory_is_guard_page_backed_reflects_instance_memory_backing() {
+    let definition = MemoryDefinition::new(1, Some(2));
+
+    let plain = razero::Memory::new(definition.clone(), LinearMemory::new(1024, 2048));
+    assert!(!plain.is_guard_page_backed());
+
+    #[cfg(target_os = "linux")]
+    {
+        use razero_secmem::GuardPageAllocator;
+
+        let guarded_allocation = GuardPageAllocator
+            .allocate_zeroed(1024)
+            .expect("guard page allocation should succeed");
+        let guarded = LinearMemory::from_guarded(guarded_allocation, 512, 1024);
+        let guarded = razero::Memory::new(definition, guarded);
+        assert!(guarded.is_guard_page_backed());
+    }
+}
+
+#[test]
 fn linear_memory_is_empty_tracks_length() {
     let mut memory = LinearMemory::new(8, 16);
     assert!(!memory.is_empty());

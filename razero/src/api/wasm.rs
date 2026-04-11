@@ -757,13 +757,16 @@ impl MemoryAccess for DynamicMemoryAccess {
 #[derive(Clone)]
 pub struct Memory {
     definition: MemoryDefinition,
+    is_guard_page_backed: bool,
     access: Arc<dyn MemoryAccess>,
 }
 
 impl Memory {
     pub fn new(definition: MemoryDefinition, linear_memory: LinearMemory) -> Self {
+        let is_guard_page_backed = linear_memory.is_guard_page_backed();
         Self {
             definition,
+            is_guard_page_backed,
             access: Arc::new(OwnedMemoryAccess {
                 memory: Arc::new(Mutex::new(linear_memory)),
             }),
@@ -780,6 +783,7 @@ impl Memory {
     ) -> Self {
         Self {
             definition,
+            is_guard_page_backed: false,
             access: Arc::new(DynamicMemoryAccess {
                 size: Arc::new(size),
                 read: Arc::new(read),
@@ -800,6 +804,10 @@ impl Memory {
 
     pub fn pages(&self) -> u32 {
         self.size() / 65_536
+    }
+
+    pub fn is_guard_page_backed(&self) -> bool {
+        self.is_guard_page_backed
     }
 
     pub fn read(&self, offset: usize, len: usize) -> Option<Vec<u8>> {
