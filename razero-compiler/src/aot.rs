@@ -1561,6 +1561,13 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
             "aot metadata: invalid export index".to_string(),
         ));
     }
+    if let Some(start_idx) = start_function_index {
+        if start_idx >= total_function_count {
+            return Err(AotMetadataError::InvalidHeader(
+                "aot metadata: invalid start function index".to_string(),
+            ));
+        }
+    }
 
     Ok(AotCompiledMetadata {
         target: AotTarget {

@@ -3672,6 +3672,57 @@ int main(void) {
     }
 
     #[test]
+    fn packaged_module_sidecar_rejects_invalid_start_function_index() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            function_section: vec![0; 8],
+            code_section: vec![
+                Code {
+                    body: vec![0x41, 0x00, 0x0b],
+                    ..Code::default()
+                };
+                8
+            ],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 6,
+            }],
+            start_section: Some(7),
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let metadata = compile_module_metadata(&module);
+        assert_eq!(metadata.start_function_index, Some(7));
+
+        let mut sidecar = serialize_aot_metadata(&metadata);
+        let start_pattern = [1, 7, 0, 0, 0];
+        let matches = sidecar
+            .windows(start_pattern.len())
+            .enumerate()
+            .filter_map(|(offset, window)| (window == start_pattern).then_some(offset))
+            .collect::<Vec<_>>();
+        assert_eq!(1, matches.len());
+        sidecar[matches[0] + 1] = 8;
+        sidecar[matches[0] + 2] = 0;
+        sidecar[matches[0] + 3] = 0;
+        sidecar[matches[0] + 4] = 0;
+
+        let encoded = serialize_native_package_metadata_bundle(&NativePackageMetadataBundle {
+            modules: vec![NativePackageMetadataEntry {
+                module_name: "guest".to_string(),
+                metadata_sidecar_bytes: sidecar,
+            }],
+            host_imports: Vec::new(),
+        });
+
+        let decoded = deserialize_native_package_metadata_bundle(&encoded).unwrap();
+        let err = crate::aot::deserialize_aot_metadata(&decoded.modules[0].metadata_sidecar_bytes)
+            .unwrap_err();
+        assert_eq!(err.to_string(), "aot metadata: invalid start function index");
+    }
+
+    #[test]
     fn packaged_module_sidecar_rejects_corrupted_helper_exit_code_flag() {
         let module = Module {
             type_section: vec![function_type(&[], &[ValueType::I32])],
