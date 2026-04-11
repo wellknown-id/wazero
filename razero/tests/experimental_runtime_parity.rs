@@ -155,6 +155,10 @@ fn deny_async_work_host_call(_ctx: &Context, request: &HostCallPolicyRequest) ->
     request.name() != Some("async_work")
 }
 
+fn deny_inc_host_call(_ctx: &Context, request: &HostCallPolicyRequest) -> bool {
+    request.name() != Some("inc")
+}
+
 fn record_trap_observations(
     observations: Arc<Mutex<Vec<(TrapCause, String)>>>,
 ) -> impl Fn(&Context, razero::TrapObservation) + Send + Sync + 'static {
@@ -2637,6 +2641,51 @@ fn listener_abort_runs_without_after_on_host_error() {
     assert_eq!("boom", err.to_string());
     assert_eq!(
         vec!["before:fail".to_string(), "abort:fail:boom".to_string()],
+        *events.lock().expect("events poisoned")
+    );
+}
+
+#[test]
+fn denied_host_import_aborts_only_caller_listener() {
+    let runtime = Runtime::new();
+    runtime
+        .new_host_module_builder("env")
+        .new_function_builder()
+        .with_func(
+            |_ctx, _module, params| Ok(vec![params[0] + 1]),
+            &[ValueType::I32],
+            &[ValueType::I32],
+        )
+        .with_name("inc")
+        .export("inc")
+        .instantiate(&Context::default())
+        .unwrap();
+    let guest = runtime
+        .instantiate_binary(
+            GUEST_IMPORT_INC_WASM,
+            ModuleConfig::new().with_name("guest"),
+        )
+        .unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let call_ctx = with_function_listener_factory(
+        &Context::default(),
+        AbortRecordingFactory {
+            events: events.clone(),
+        },
+    );
+
+    let err = guest
+        .exported_function("run")
+        .unwrap()
+        .call_with_context(&with_host_call_policy(&call_ctx, deny_inc_host_call), &[41])
+        .unwrap_err();
+
+    assert_eq!("policy denied: host call", err.to_string());
+    assert_eq!(
+        vec![
+            "before:run".to_string(),
+            "abort:run:policy denied: host call".to_string()
+        ],
         *events.lock().expect("events poisoned")
     );
 }
