@@ -427,7 +427,7 @@ mod tests {
         };
         let aot = AotCompiledMetadata {
             module_id: [9; 32],
-            import_function_count: 1,
+            import_function_count: 0,
             entry_preamble_offsets: vec![0, 8],
             imports: vec![AotImportMetadata {
                 ty: ExternType::MEMORY,
@@ -463,7 +463,7 @@ mod tests {
             }],
             functions: vec![AotFunctionMetadata {
                 local_function_index: 0,
-                wasm_function_index: 1,
+                wasm_function_index: 0,
                 type_index: 0,
                 executable_offset: 0,
                 executable_len: 4,
@@ -488,7 +488,7 @@ mod tests {
                 executable_offset: 4,
             }],
             module_shape: AotModuleShapeMetadata {
-                import_function_count: 1,
+                import_function_count: 0,
                 import_memory_count: 1,
                 local_function_count: 1,
                 local_global_count: 1,

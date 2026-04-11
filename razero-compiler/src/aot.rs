@@ -1532,6 +1532,19 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
             "aot metadata: invalid import function type index".to_string(),
         ));
     }
+    let total_import_count = module_shape
+        .import_function_count
+        .checked_add(module_shape.import_global_count)
+        .and_then(|count| count.checked_add(module_shape.import_memory_count))
+        .and_then(|count| count.checked_add(module_shape.import_table_count))
+        .ok_or_else(|| {
+            AotMetadataError::InvalidHeader("aot metadata: invalid import count".to_string())
+        })?;
+    if total_import_count as usize != imports.len() {
+        return Err(AotMetadataError::InvalidHeader(
+            "aot metadata: import count mismatch".to_string(),
+        ));
+    }
     let total_function_count = module_shape
         .import_function_count
         .checked_add(module_shape.local_function_count)
@@ -1974,6 +1987,20 @@ mod tests {
                     index_per_type: 0,
                 },
                 AotImportMetadata {
+                    ty: ExternType::FUNC,
+                    module: "env".to_string(),
+                    name: "host1".to_string(),
+                    desc: AotImportDescMetadata::Func(0),
+                    index_per_type: 1,
+                },
+                AotImportMetadata {
+                    ty: ExternType::FUNC,
+                    module: "env".to_string(),
+                    name: "host2".to_string(),
+                    desc: AotImportDescMetadata::Func(0),
+                    index_per_type: 2,
+                },
+                AotImportMetadata {
                     ty: ExternType::MEMORY,
                     module: "env".to_string(),
                     name: "memory".to_string(),
@@ -2056,7 +2083,7 @@ mod tests {
                 enabled_features: 0x55,
                 import_function_count: 3,
                 import_global_count: 1,
-                import_memory_count: 0,
+                import_memory_count: 1,
                 import_table_count: 1,
                 local_function_count: 1,
                 local_global_count: 1,

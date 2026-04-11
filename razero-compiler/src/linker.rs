@@ -1841,12 +1841,13 @@ mod tests {
         module
             .import_section
             .push(Import::function("env", "log", 0));
+        module.import_function_count += 1;
         let metadata = compile_module_metadata(&module);
 
         let err = validate_hello_host_metadata(&metadata).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "packaged host-import linker expected a descriptor for every imported function"
+            "packaged host-import linker currently expects explicit function imports, one local memory, no globals/tables/start, and no element segments"
         );
     }
 
@@ -3621,6 +3622,80 @@ int main(void) {
     }
 
     #[test]
+    fn packaged_module_sidecar_rejects_corrupted_import_count_mismatch() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            import_section: vec![Import::function("env", "hook", 0)],
+            import_function_count: 1,
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![0x41, 0x05, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 1,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let metadata = compile_module_metadata(&module);
+        assert_eq!(1, metadata.module_shape.import_function_count);
+        assert_eq!(1, metadata.imports.len());
+
+        let mut sidecar = serialize_aot_metadata(&metadata);
+        let mut module_shape_pattern = Vec::new();
+        module_shape_pattern
+            .extend_from_slice(&metadata.module_shape.enabled_features.to_le_bytes());
+        module_shape_pattern
+            .extend_from_slice(&metadata.module_shape.import_function_count.to_le_bytes());
+        module_shape_pattern
+            .extend_from_slice(&metadata.module_shape.import_global_count.to_le_bytes());
+        module_shape_pattern
+            .extend_from_slice(&metadata.module_shape.import_memory_count.to_le_bytes());
+        module_shape_pattern
+            .extend_from_slice(&metadata.module_shape.import_table_count.to_le_bytes());
+        module_shape_pattern
+            .extend_from_slice(&metadata.module_shape.local_function_count.to_le_bytes());
+        module_shape_pattern
+            .extend_from_slice(&metadata.module_shape.local_global_count.to_le_bytes());
+        module_shape_pattern
+            .extend_from_slice(&metadata.module_shape.local_table_count.to_le_bytes());
+        module_shape_pattern.push(u8::from(metadata.module_shape.has_local_memory));
+        module_shape_pattern.push(u8::from(metadata.module_shape.has_any_memory));
+        module_shape_pattern.push(u8::from(metadata.module_shape.has_start_section));
+        module_shape_pattern
+            .extend_from_slice(&metadata.module_shape.data_segment_count.to_le_bytes());
+        module_shape_pattern
+            .extend_from_slice(&metadata.module_shape.element_segment_count.to_le_bytes());
+        module_shape_pattern.push(u8::from(metadata.module_shape.is_host_module));
+
+        let matches = sidecar
+            .windows(module_shape_pattern.len())
+            .enumerate()
+            .filter_map(|(offset, window)| {
+                (window == module_shape_pattern.as_slice()).then_some(offset)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(1, matches.len());
+        sidecar[matches[0] + 8..matches[0] + 12].copy_from_slice(&2u32.to_le_bytes());
+
+        let encoded = serialize_native_package_metadata_bundle(&NativePackageMetadataBundle {
+            modules: vec![NativePackageMetadataEntry {
+                module_name: "guest".to_string(),
+                metadata_sidecar_bytes: sidecar,
+            }],
+            host_imports: Vec::new(),
+        });
+
+        let decoded = deserialize_native_package_metadata_bundle(&encoded).unwrap();
+        let err = crate::aot::deserialize_aot_metadata(&decoded.modules[0].metadata_sidecar_bytes)
+            .unwrap_err();
+        assert_eq!(err.to_string(), "aot metadata: import count mismatch");
+    }
+
+    #[test]
     fn packaged_module_sidecar_rejects_corrupted_table_count_mismatch() {
         let module = Module {
             type_section: vec![function_type(&[], &[ValueType::I32])],
@@ -4415,6 +4490,7 @@ int main(void) {
                     ty: RefType::FUNCREF,
                 },
             )],
+            import_table_count: 1,
             function_section: vec![0],
             code_section: vec![Code {
                 body: vec![0x41, 0x05, 0x0b],
