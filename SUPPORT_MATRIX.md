@@ -195,9 +195,10 @@ back to the instantiated-module store.
 - `FunctionListener.Before` for the guest call runs after the initial
   `budgeted` notification, and `FunctionListener.Abort` / `After` happens
   before the terminal `consumed` or `exhausted` fuel event.
-- For yielded executions, the fuel controller/budget is chosen when the Wasm
-  call starts and is carried through later `Resume` calls for that suspended
-  execution.
+- Fuel controller behavior on `Resume` is currently narrower than the original
+  budget-controller docs implied: a resume context can replace the
+  `FuelController` for later resumed-segment host calls, and omitting one on
+  resume leaves those later resumed-segment host calls without a controller.
 - Current yielded-call observer semantics are narrower than the yield observer
   surface: the initial yielded call emits its `budgeted` / terminal
   `consumed` lifecycle before returning the `YieldError`, and later `Resume`

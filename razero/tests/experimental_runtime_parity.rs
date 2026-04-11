@@ -966,7 +966,12 @@ fn snapshotter_is_not_reinjected_on_follow_on_resumed_host_call() {
         .unwrap_err();
     let second_resumer = yielded(err).resumer().expect("resumer should be present");
 
-    assert_eq!(vec![true, false], *observations.lock().expect("snapshotter observations poisoned"));
+    assert_eq!(
+        vec![true, false],
+        *observations
+            .lock()
+            .expect("snapshotter observations poisoned")
+    );
     assert_eq!(
         vec![42],
         second_resumer
@@ -1031,6 +1036,141 @@ fn snapshotter_initial_context_does_not_persist_when_resume_omits_one() {
             .resume(&with_yielder(&Context::default()), &[2])
             .unwrap()
     );
+}
+
+#[test]
+fn fuel_controller_resume_context_overrides_follow_on_host_call() {
+    let runtime = Runtime::new();
+    let seen_budgets = Arc::new(Mutex::new(Vec::new()));
+    runtime
+        .new_host_module_builder("example")
+        .new_function_builder()
+        .with_func(
+            {
+                let seen_budgets = seen_budgets.clone();
+                move |ctx, _module, _params| {
+                    let controller =
+                        get_fuel_controller(&ctx).expect("fuel controller should exist");
+                    seen_budgets
+                        .lock()
+                        .expect("seen budgets poisoned")
+                        .push(controller.budget());
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                }
+            },
+            &[],
+            &[ValueType::I32],
+        )
+        .with_name("async_work")
+        .export("async_work")
+        .instantiate(&Context::default())
+        .unwrap();
+    let guest = runtime
+        .instantiate_binary(YIELD_WASM, ModuleConfig::new())
+        .unwrap();
+    let initial_consumed = Arc::new(AtomicI64::new(0));
+    let resume_consumed = Arc::new(AtomicI64::new(0));
+
+    let err = guest
+        .exported_function("run_twice")
+        .unwrap()
+        .call_with_context(
+            &with_fuel_controller(
+                &with_yielder(&Context::default()),
+                TrackingFuelController {
+                    budget: 10,
+                    consumed: initial_consumed.clone(),
+                },
+            ),
+            &[],
+        )
+        .unwrap_err();
+    let first_resumer = yielded(err).resumer().expect("resumer should be present");
+
+    let err = first_resumer
+        .resume(
+            &with_fuel_controller(
+                &with_yielder(&Context::default()),
+                TrackingFuelController {
+                    budget: 1,
+                    consumed: resume_consumed.clone(),
+                },
+            ),
+            &[40],
+        )
+        .unwrap_err();
+    let second_resumer = yielded(err).resumer().expect("resumer should be present");
+
+    assert_eq!(vec![42], second_resumer.resume(&with_yielder(&Context::default()), &[2]).unwrap());
+    assert_eq!(vec![10, 1], *seen_budgets.lock().expect("seen budgets poisoned"));
+    assert!(initial_consumed.load(Ordering::SeqCst) > 0);
+    assert!(resume_consumed.load(Ordering::SeqCst) > 0);
+}
+
+#[test]
+fn fuel_controller_initial_context_does_not_persist_when_resume_omits_one() {
+    let runtime = Runtime::new();
+    let seen_budgets = Arc::new(Mutex::new(Vec::new()));
+    runtime
+        .new_host_module_builder("example")
+        .new_function_builder()
+        .with_func(
+            {
+                let seen_budgets = seen_budgets.clone();
+                move |ctx, _module, _params| {
+                    let budget = get_fuel_controller(&ctx).map(|controller| controller.budget());
+                    seen_budgets
+                        .lock()
+                        .expect("seen budgets poisoned")
+                        .push(budget);
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                }
+            },
+            &[],
+            &[ValueType::I32],
+        )
+        .with_name("async_work")
+        .export("async_work")
+        .instantiate(&Context::default())
+        .unwrap();
+    let guest = runtime
+        .instantiate_binary(YIELD_WASM, ModuleConfig::new())
+        .unwrap();
+    let consumed = Arc::new(AtomicI64::new(0));
+
+    let err = guest
+        .exported_function("run_twice")
+        .unwrap()
+        .call_with_context(
+            &with_fuel_controller(
+                &with_yielder(&Context::default()),
+                TrackingFuelController {
+                    budget: 10,
+                    consumed: consumed.clone(),
+                },
+            ),
+            &[],
+        )
+        .unwrap_err();
+    let first_resumer = yielded(err).resumer().expect("resumer should be present");
+
+    let err = first_resumer
+        .resume(&with_yielder(&Context::default()), &[40])
+        .unwrap_err();
+    let second_resumer = yielded(err).resumer().expect("resumer should be present");
+
+    assert_eq!(vec![42], second_resumer.resume(&with_yielder(&Context::default()), &[2]).unwrap());
+    assert_eq!(
+        vec![Some(10), None],
+        *seen_budgets.lock().expect("seen budgets poisoned")
+    );
+    assert!(consumed.load(Ordering::SeqCst) > 0);
 }
 
 #[test]
