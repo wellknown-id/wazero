@@ -717,6 +717,57 @@ fn yield_policy_request_builders_round_trip_through_public_surface() {
 }
 
 #[test]
+fn yield_policy_request_param_and_result_types_round_trip_through_public_surface() {
+    let function = FunctionDefinition::new("test")
+        .with_signature(vec![ValueType::I32, ValueType::I64], vec![ValueType::F64]);
+    let request = razero::YieldPolicyRequest::new().with_function(function);
+
+    assert_eq!(
+        Some(&[ValueType::I32, ValueType::I64][..]),
+        request.param_types()
+    );
+    assert_eq!(Some(&[ValueType::F64][..]), request.result_types());
+
+    let empty_request = razero::YieldPolicyRequest::new();
+    assert_eq!(None, empty_request.param_types());
+    assert_eq!(None, empty_request.result_types());
+}
+
+#[test]
+fn yield_policy_request_param_and_result_names_round_trip_through_public_surface() {
+    let function = FunctionDefinition::new("test")
+        .with_parameter_names(vec!["a".to_string(), "b".to_string()])
+        .with_result_names(vec!["result".to_string()]);
+    let request = razero::YieldPolicyRequest::new().with_function(function);
+
+    assert_eq!(
+        Some(&["a".to_string(), "b".to_string()][..]),
+        request.param_names()
+    );
+    assert_eq!(Some(&["result".to_string()][..]), request.result_names());
+
+    let empty_request = razero::YieldPolicyRequest::new();
+    assert_eq!(None, empty_request.param_names());
+    assert_eq!(None, empty_request.result_names());
+}
+
+#[test]
+fn yield_policy_request_export_names_round_trip_through_public_surface() {
+    let function = FunctionDefinition::new("test")
+        .with_export_name("export1")
+        .with_export_name("export2");
+    let request = razero::YieldPolicyRequest::new().with_function(function);
+
+    assert_eq!(
+        &["export1".to_string(), "export2".to_string()][..],
+        request.export_names()
+    );
+
+    let empty_request = razero::YieldPolicyRequest::new();
+    assert!(empty_request.export_names().is_empty());
+}
+
+#[test]
 fn yield_policy_observer_round_trips_through_public_surface() {
     let observed = Arc::new(AtomicU32::new(0));
     let ctx = with_yield_policy_observer(&Context::default(), {
