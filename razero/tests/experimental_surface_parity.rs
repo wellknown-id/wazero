@@ -6,12 +6,13 @@ use std::sync::{
 use razero::{
     get_close_notifier, get_compilation_workers, get_function_listener_factory,
     get_host_call_policy, get_host_call_policy_observer, get_import_resolver,
-    get_import_resolver_observer, get_trap_observer, get_yield_policy, get_yield_policy_observer,
+    get_import_resolver_observer, get_snapshotter, get_trap_observer, get_yield_policy,
+    get_yield_policy_observer,
     with_close_notifier, with_compilation_workers, with_function_listener_factory,
     with_host_call_policy, with_host_call_policy_observer, with_import_resolver,
-    with_import_resolver_observer, with_trap_observer, with_yield_policy,
+    with_import_resolver_observer, with_snapshotter, with_trap_observer, with_yield_policy,
     with_yield_policy_observer, Context, HostCallPolicyDecision, HostCallPolicyObservation,
-    ImportResolverEvent, ImportResolverObservation, ModuleConfig, Runtime, RuntimeConfig,
+    ImportResolverEvent, ImportResolverObservation, ModuleConfig, Runtime, RuntimeConfig, ValueType,
     TrapCause, TrapObservation, YieldPolicyDecision, YieldPolicyObservation,
 };
 
@@ -81,6 +82,36 @@ fn close_notifier_round_trips_through_public_surface() {
     notifier.close_notify(&ctx, 42);
 
     assert_eq!(42, exit_code.load(Ordering::SeqCst));
+}
+
+#[test]
+fn snapshotter_public_surface_enables_runtime_injection() {
+    let runtime = Runtime::new();
+    let module = runtime
+        .new_host_module_builder("example")
+        .new_function_builder()
+        .with_callback(
+            move |ctx, _module, _params| {
+                assert!(get_snapshotter(&ctx).is_some());
+                Ok(vec![7])
+            },
+            &[],
+            &[ValueType::I32],
+        )
+        .export("snapshot")
+        .instantiate(&Context::default())
+        .unwrap();
+
+    assert!(get_snapshotter(&Context::default()).is_none());
+    assert!(get_snapshotter(&with_snapshotter(&Context::default())).is_none());
+    assert_eq!(
+        vec![7],
+        module
+            .exported_function("snapshot")
+            .unwrap()
+            .call_with_context(&with_snapshotter(&Context::default()), &[])
+            .unwrap()
+    );
 }
 
 #[test]
