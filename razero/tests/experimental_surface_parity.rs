@@ -424,6 +424,37 @@ fn linear_memory_free_clears_public_surface_state() {
 }
 
 #[test]
+fn linear_memory_reallocate_resizes_within_max_bound() {
+    let mut memory = LinearMemory::new(8, 32);
+    memory.bytes_mut()[0] = 42;
+    memory.bytes_mut()[3] = 99;
+
+    {
+        let grown = memory
+            .reallocate(16)
+            .expect("growth within max should succeed");
+        assert_eq!(16, grown.len());
+        assert_eq!(42, grown[0]);
+        assert_eq!(99, grown[3]);
+        assert!(grown[8..].iter().all(|byte| *byte == 0));
+    }
+    assert_eq!(16, memory.len());
+
+    {
+        let shrunk = memory
+            .reallocate(4)
+            .expect("shrink within max should succeed");
+        assert_eq!(4, shrunk.len());
+        assert_eq!(42, shrunk[0]);
+        assert_eq!(99, shrunk[3]);
+    }
+    assert_eq!(4, memory.len());
+
+    assert!(memory.reallocate(64).is_none());
+    assert_eq!(4, memory.len());
+}
+
+#[test]
 fn host_call_policy_round_trips_through_public_surface() {
     let ctx = with_host_call_policy(&Context::default(), allow_host_calls);
     let policy = get_host_call_policy(&ctx).expect("policy should be present");
