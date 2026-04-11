@@ -579,6 +579,24 @@ fn host_call_policy_request_export_names_round_trip_through_public_surface() {
 }
 
 #[test]
+fn host_call_policy_request_defaults_to_empty_metadata_through_public_surface() {
+    let request = HostCallPolicyRequest::new();
+
+    assert_eq!(None, request.param_types());
+    assert_eq!(None, request.result_types());
+    assert_eq!(None, request.param_names());
+    assert_eq!(None, request.result_names());
+    assert_eq!(None, request.caller_module_name());
+    assert_eq!(0, request.param_count());
+    assert_eq!(0, request.result_count());
+    assert_eq!(None, request.import());
+    assert_eq!(None, request.memory());
+    assert_eq!(None, request.module_name());
+    assert_eq!(None, request.name());
+    assert!(request.export_names().is_empty());
+}
+
+#[test]
 fn function_listener_factory_round_trips_through_public_surface() {
     let ctx = with_function_listener_factory(
         &Context::default(),
@@ -765,6 +783,24 @@ fn yield_policy_request_export_names_round_trip_through_public_surface() {
 
     let empty_request = razero::YieldPolicyRequest::new();
     assert!(empty_request.export_names().is_empty());
+}
+
+#[test]
+fn yield_policy_request_defaults_to_empty_metadata_through_public_surface() {
+    let request = razero::YieldPolicyRequest::new();
+
+    assert_eq!(None, request.param_types());
+    assert_eq!(None, request.result_types());
+    assert_eq!(None, request.param_names());
+    assert_eq!(None, request.result_names());
+    assert_eq!(None, request.caller_module_name());
+    assert_eq!(0, request.param_count());
+    assert_eq!(0, request.result_count());
+    assert_eq!(None, request.import());
+    assert_eq!(None, request.memory());
+    assert_eq!(None, request.module_name());
+    assert_eq!(None, request.name());
+    assert!(request.export_names().is_empty());
 }
 
 #[test]
