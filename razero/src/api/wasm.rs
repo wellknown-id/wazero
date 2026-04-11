@@ -25,6 +25,7 @@ use crate::{
         r#yield::{Resumer, YieldError, Yielder},
         snapshotter::{Snapshot, Snapshotter},
         trap::{get_trap_observer, trap_cause_of, TrapObservation},
+        yield_observer::{notify_yield_observer, YieldEvent},
         yield_policy::YieldPolicyRequest,
         yield_policy_observer::{notify_yield_policy_observer, YieldPolicyDecision},
     },
@@ -1096,6 +1097,14 @@ impl Function {
                         resumer.install_suspended_invocation(suspended);
                     }
                     module.mark_suspended(resumer_id);
+                    notify_yield_observer(
+                        &invocation_ctx,
+                        &module,
+                        YieldEvent::Yielded,
+                        1,
+                        self.inner.definition.result_types().len() as i32,
+                        0,
+                    );
                     snapshot_active.store(false, std::sync::atomic::Ordering::SeqCst);
                     let resumer: Arc<dyn Resumer> = resumer;
                     return Err(RuntimeError::from(YieldError::new(Some(resumer))));
@@ -1935,6 +1944,14 @@ impl Resumer for PendingResumer {
                 function_definition: Some(self.definition.clone()),
                 listener_stack: self.listener_stack.clone(),
             });
+            notify_yield_observer(
+                &invocation_ctx,
+                &self.module,
+                YieldEvent::Resumed,
+                1,
+                expected_results as i32,
+                0,
+            );
             let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
                 with_active_invocation(&invocation_ctx, &self.module, || {
                     with_active_fuel_remaining(self.fuel_remaining.clone(), || {

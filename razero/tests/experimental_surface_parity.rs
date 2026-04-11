@@ -13,13 +13,13 @@ use razero::{
     with_function_listener_factory, with_host_call_policy, with_host_call_policy_observer,
     with_import_resolver, with_import_resolver_acl, with_import_resolver_config,
     with_import_resolver_observer, with_memory_allocator, with_snapshotter, with_trap_observer,
-    with_yield_policy, with_yield_policy_observer, with_yielder, AggregatingFuelController,
-    Context, FuelEvent, FuelObservation, FunctionDefinition, FunctionListenerFn,
-    HostCallPolicyDecision, HostCallPolicyObservation, HostCallPolicyRequest, ImportACL,
-    ImportResolverConfig, ImportResolverEvent, ImportResolverObservation, LinearMemory,
-    MemoryDefinition, ModuleConfig, Runtime, RuntimeConfig, SimpleFuelController, StackFrame,
-    StackIterator, TrapCause, TrapObservation, ValueType, YieldPolicyDecision,
-    YieldPolicyObservation,
+    with_yield_observer, with_yield_policy, with_yield_policy_observer, with_yielder,
+    AggregatingFuelController, Context, FuelEvent, FuelObservation, FunctionDefinition,
+    FunctionListenerFn, HostCallPolicyDecision, HostCallPolicyObservation, HostCallPolicyRequest,
+    ImportACL, ImportResolverConfig, ImportResolverEvent, ImportResolverObservation, LinearMemory,
+    MemoryDefinition, ModuleConfig, Runtime, RuntimeConfig, RuntimeError, SimpleFuelController,
+    StackFrame, StackIterator, TrapCause, TrapObservation, ValueType, YieldEvent, YieldObservation,
+    YieldPolicyDecision, YieldPolicyObservation,
 };
 
 const SIMPLE_EXPORT_WASM: &[u8] = &[
@@ -530,6 +530,79 @@ fn yield_policy_observer_round_trips_through_public_surface() {
     );
 
     assert_eq!(1, observed.load(Ordering::SeqCst));
+}
+
+#[test]
+fn yield_observer_round_trips_through_public_surface() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let runtime = Runtime::new();
+    runtime
+        .new_host_module_builder("example")
+        .new_function_builder()
+        .with_func(
+            |ctx, _module, _params| {
+                get_yielder(&ctx)
+                    .expect("yielder should be injected")
+                    .r#yield();
+                Ok(vec![0])
+            },
+            &[],
+            &[ValueType::I32],
+        )
+        .with_name("async_work")
+        .export("async_work")
+        .instantiate(&Context::default())
+        .unwrap();
+    let guest = runtime
+        .instantiate_binary(YIELD_WASM, ModuleConfig::new().with_name("guest"))
+        .unwrap();
+
+    let initial_ctx = with_yield_observer(&with_yielder(&Context::default()), {
+        let events = events.clone();
+        move |_ctx: &Context, observation: YieldObservation| {
+            events.lock().expect("events poisoned").push((
+                observation.module.name().map(str::to_string),
+                observation.event,
+                observation.yield_count,
+                observation.expected_host_results,
+            ));
+        }
+    });
+    let err = guest
+        .exported_function("run")
+        .unwrap()
+        .call_with_context(&initial_ctx, &[])
+        .unwrap_err();
+    let yield_error = match err {
+        RuntimeError::Yield(yield_error) => yield_error,
+        other => panic!("expected yield error, got {other}"),
+    };
+
+    let resume_ctx = with_yield_observer(&with_yielder(&Context::default()), {
+        let events = events.clone();
+        move |_ctx: &Context, observation: YieldObservation| {
+            events.lock().expect("events poisoned").push((
+                observation.module.name().map(str::to_string),
+                observation.event,
+                observation.yield_count,
+                observation.expected_host_results,
+            ));
+        }
+    });
+    let results = yield_error
+        .resumer()
+        .expect("resumer should be present")
+        .resume(&resume_ctx, &[42])
+        .unwrap();
+
+    assert_eq!(vec![142], results);
+    assert_eq!(
+        vec![
+            (Some("guest".to_string()), YieldEvent::Yielded, 1, 1),
+            (Some("guest".to_string()), YieldEvent::Resumed, 1, 1),
+        ],
+        *events.lock().expect("events poisoned")
+    );
 }
 
 #[test]
