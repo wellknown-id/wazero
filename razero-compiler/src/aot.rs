@@ -1668,6 +1668,14 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
             "aot metadata: active element requires offset expression".to_string(),
         ));
     }
+    if element_segments
+        .iter()
+        .any(|element| !matches!(element.mode, ElementMode::Active) && element.table_index != 0)
+    {
+        return Err(AotMetadataError::InvalidHeader(
+            "aot metadata: passive/declarative element requires table_index == 0".to_string(),
+        ));
+    }
     if module_shape.local_function_count as usize != functions.len() {
         return Err(AotMetadataError::InvalidHeader(
             "aot metadata: function count mismatch".to_string(),
