@@ -337,6 +337,65 @@ fn fuel_observer_public_surface_emits_exhausted_notifications() {
 }
 
 #[test]
+fn fuel_observer_public_surface_emits_recharged_notifications() {
+    let runtime = Runtime::new();
+    let module = runtime
+        .new_host_module_builder("env")
+        .new_function_builder()
+        .with_func(
+            |ctx, _module, _params| {
+                add_fuel(&ctx, 2).unwrap();
+                Ok(vec![1])
+            },
+            &[],
+            &[ValueType::I32],
+        )
+        .with_name("recharge")
+        .export("recharge")
+        .instantiate(&Context::default())
+        .unwrap();
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let ctx = with_fuel_observer(
+        &with_fuel_controller(&Context::default(), SimpleFuelController::new(5)),
+        {
+            let observations = observations.clone();
+            move |_ctx: &Context, observation: FuelObservation| {
+                observations
+                    .lock()
+                    .expect("fuel observations poisoned")
+                    .push((
+                        observation.module.name().map(str::to_string),
+                        observation.event,
+                        observation.budget,
+                        observation.consumed,
+                        observation.remaining,
+                        observation.delta,
+                    ));
+            }
+        },
+    );
+
+    assert_eq!(
+        vec![1],
+        module
+            .exported_function("recharge")
+            .unwrap()
+            .call_with_context(&ctx, &[])
+            .unwrap()
+    );
+    assert!(observations
+        .lock()
+        .expect("fuel observations poisoned")
+        .iter()
+        .any(|observation| {
+            matches!(
+                observation,
+                (Some(module), FuelEvent::Recharged, _, _, _, 2) if module == "env"
+            )
+        }));
+}
+
+#[test]
 fn yielder_public_surface_enables_runtime_injection() {
     let runtime = Runtime::new();
     runtime
