@@ -4,12 +4,14 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::arbitrary::{Result, Unstructured};
 use razero::{
     add_fuel, logging, trap_cause_of, with_function_listener_factory, with_fuel_observer,
-    with_host_call_policy, with_host_call_policy_observer, with_trap_observer,
-    with_yield_observer, with_yield_policy, with_yielder, Context, CoreFeatures, FuelEvent,
-    FuelObservation, FunctionDefinition, FunctionListener, FunctionListenerFactory,
-    HostCallPolicyDecision, HostCallPolicyObservation, Module, ModuleConfig, Runtime,
-    RuntimeConfig, RuntimeError, TrapCause, TrapObservation, ValueType, YieldEvent,
-    YieldObservation, YieldPolicyRequest, CORE_FEATURES_TAIL_CALL,
+    with_host_call_policy, with_host_call_policy_observer, with_import_resolver_config,
+    with_import_resolver_observer, with_trap_observer, with_yield_observer, with_yield_policy,
+    with_yielder, Context, CoreFeatures, FuelEvent, FuelObservation, FunctionDefinition,
+    FunctionListener, FunctionListenerFactory, HostCallPolicyDecision,
+    HostCallPolicyObservation, ImportACL, ImportResolverConfig, ImportResolverEvent,
+    ImportResolverObservation, Module, ModuleConfig, Runtime, RuntimeConfig, RuntimeError,
+    TrapCause, TrapObservation, ValueType, YieldEvent, YieldObservation, YieldPolicyRequest,
+    CORE_FEATURES_TAIL_CALL,
     CORE_FEATURES_THREADS,
 };
 use wasm_smith::Config;
@@ -26,6 +28,12 @@ const GUEST_HOST_CALL_DENY_WASM: &[u8] = &[
     0x7f, 0x02, 0x0c, 0x01, 0x03, b'e', b'n', b'v', 0x04, b'h', b'o', b'o', b'k', 0x00, 0x00,
     0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x01, 0x0a, 0x08,
     0x01, 0x06, 0x00, 0x41, 0x2a, 0x10, 0x00, 0x0b,
+];
+const GUEST_IMPORT_START_WASM: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x02,
+    0x0d, 0x01, 0x03, b'e', b'n', b'v', 0x05, b's', b't', b'a', b'r', b't', 0x00, 0x00, 0x03,
+    0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x01, 0x0a, 0x06, 0x01,
+    0x04, 0x00, 0x10, 0x00, 0x0b,
 ];
 const DIV_BY_ZERO_WASM: &[u8] = &[
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f,
@@ -139,6 +147,25 @@ struct FuelSnapshot {
     delta: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ImportResolverSnapshot {
+    import_module: String,
+    event: ImportResolverEvent,
+    resolved: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ImportResolverExecution {
+    Instantiated {
+        outcome: FunctionOutcome,
+        observations: Vec<ImportResolverSnapshot>,
+    },
+    InstantiateError {
+        message: String,
+        observations: Vec<ImportResolverSnapshot>,
+    },
+}
+
 #[derive(Arbitrary, Clone, Copy, Debug)]
 enum PolicyTrapScenario {
     InitialDeny,
@@ -168,6 +195,15 @@ enum FixedTrapScenario {
 enum FuelObserverScenario {
     GuestLoopExhaustion,
     HostDebitExhaustion,
+}
+
+#[derive(Arbitrary, Clone, Copy, Debug)]
+enum ImportResolverScenario {
+    AclAllowStoreFallback,
+    AclDenied,
+    ResolverResolved,
+    ResolverAttemptedStoreFallback,
+    FailClosedDenied,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -297,6 +333,25 @@ pub fn replay_all_fuel_observer_fixtures() {
         FuelObserverScenario::HostDebitExhaustion,
     ] {
         replay_fuel_observer_parity(scenario);
+    }
+}
+
+pub fn run_import_resolver_parity(data: &[u8]) -> Result<()> {
+    let mut u = Unstructured::new(data);
+    let scenario = ImportResolverScenario::arbitrary(&mut u)?;
+    replay_import_resolver_parity(scenario);
+    Ok(())
+}
+
+pub fn replay_all_import_resolver_fixtures() {
+    for scenario in [
+        ImportResolverScenario::AclAllowStoreFallback,
+        ImportResolverScenario::AclDenied,
+        ImportResolverScenario::ResolverResolved,
+        ImportResolverScenario::ResolverAttemptedStoreFallback,
+        ImportResolverScenario::FailClosedDenied,
+    ] {
+        replay_import_resolver_parity(scenario);
     }
 }
 
@@ -562,6 +617,17 @@ fn replay_fuel_observer_parity(scenario: FuelObserverScenario) {
     );
 }
 
+fn replay_import_resolver_parity(scenario: ImportResolverScenario) {
+    let standard = capture_import_resolver_snapshot(scenario, false);
+    let secure = capture_import_resolver_snapshot(scenario, true);
+    assert_import_resolver_snapshot(&standard, scenario);
+    assert_import_resolver_snapshot(&secure, scenario);
+    assert_eq!(
+        standard, secure,
+        "import resolver parity mismatch between standard and secure mode"
+    );
+}
+
 fn capture_resume_policy_denial(secure_mode: bool, resume_value: u64) -> ResumeSnapshot {
     let ctx = Context::default();
     let runtime = Runtime::with_config(runtime_config(secure_mode));
@@ -680,6 +746,114 @@ fn capture_fuel_observer_snapshot(
     };
     runtime.close(&ctx).expect("runtime close should succeed");
     snapshot
+}
+
+fn capture_import_resolver_snapshot(
+    scenario: ImportResolverScenario,
+    secure_mode: bool,
+) -> ImportResolverExecution {
+    let runtime = Runtime::with_config(runtime_config(secure_mode));
+    let env_module = install_import_start_host(&runtime);
+    let observations = Arc::new(Mutex::new(Vec::new()));
+
+    let base_ctx = with_import_resolver_observer(&Context::default(), {
+        let observations = observations.clone();
+        move |_ctx: &Context, observation: ImportResolverObservation| {
+            observations
+                .lock()
+                .expect("import resolver observations poisoned")
+                .push(ImportResolverSnapshot {
+                    import_module: observation.import_module,
+                    event: observation.event,
+                    resolved: observation.resolved_module.is_some(),
+                });
+        }
+    });
+
+    let resolver_env_module = env_module.clone();
+    let ctx = match scenario {
+        ImportResolverScenario::AclAllowStoreFallback => with_import_resolver_config(
+            &base_ctx,
+            ImportResolverConfig {
+                acl: Some(ImportACL::new().allow_modules(["env"])),
+                ..ImportResolverConfig::default()
+            },
+        ),
+        ImportResolverScenario::AclDenied => with_import_resolver_config(
+            &base_ctx,
+            ImportResolverConfig {
+                acl: Some(ImportACL::new().deny_modules(["env"])),
+                ..ImportResolverConfig::default()
+            },
+        ),
+        ImportResolverScenario::ResolverResolved => with_import_resolver_config(
+            &base_ctx,
+            ImportResolverConfig {
+                resolver: Some(Arc::new(move |name| {
+                    (name == "env").then_some(resolver_env_module.clone())
+                })),
+                ..ImportResolverConfig::default()
+            },
+        ),
+        ImportResolverScenario::ResolverAttemptedStoreFallback => with_import_resolver_config(
+            &base_ctx,
+            ImportResolverConfig {
+                resolver: Some(Arc::new(|_| None)),
+                ..ImportResolverConfig::default()
+            },
+        ),
+        ImportResolverScenario::FailClosedDenied => with_import_resolver_config(
+            &base_ctx,
+            ImportResolverConfig {
+                acl: Some(ImportACL::new().allow_modules(["env"])),
+                fail_closed: true,
+                ..ImportResolverConfig::default()
+            },
+        ),
+    };
+
+    let outcome = match runtime.compile(GUEST_IMPORT_START_WASM) {
+        Ok(compiled) => match runtime.instantiate_with_context(&ctx, &compiled, ModuleConfig::new()) {
+            Ok(module) => {
+                let outcome = match module
+                    .exported_function("run")
+                    .expect("run export should exist")
+                    .call(&[])
+                {
+                    Ok(results) => FunctionOutcome::Returned(results),
+                    Err(err) => runtime_error_to_outcome(err),
+                };
+                ImportResolverExecution::Instantiated {
+                    outcome,
+                    observations: Vec::new(),
+                }
+            }
+            Err(err) => ImportResolverExecution::InstantiateError {
+                message: err.to_string(),
+                observations: Vec::new(),
+            },
+        },
+        Err(err) => ImportResolverExecution::InstantiateError {
+            message: err.to_string(),
+            observations: Vec::new(),
+        },
+    };
+
+    let observations = observations
+        .lock()
+        .expect("import resolver observations poisoned")
+        .clone();
+    let close_ctx = Context::default();
+    runtime.close(&close_ctx).expect("runtime close should succeed");
+    match outcome {
+        ImportResolverExecution::Instantiated { outcome, .. } => ImportResolverExecution::Instantiated {
+            outcome,
+            observations,
+        },
+        ImportResolverExecution::InstantiateError { message, .. } => {
+            ImportResolverExecution::InstantiateError { message, observations }
+        }
+    }
 }
 
 fn build_call_context(
@@ -819,6 +993,16 @@ fn install_fuel_debit_host(runtime: &Runtime) {
         .export("hook")
         .instantiate(&Context::default())
         .expect("fuel debit fixture should instantiate");
+}
+
+fn install_import_start_host(runtime: &Runtime) -> Module {
+    runtime
+        .new_host_module_builder("env")
+        .new_function_builder()
+        .with_callback(|_ctx, _module, _params| Ok(Vec::new()), &[], &[])
+        .export("start")
+        .instantiate(&Context::default())
+        .expect("import-start host should instantiate")
 }
 
 fn selected_exports(module: &Module, options: &CaptureOptions) -> std::result::Result<Vec<String>, String> {
@@ -994,6 +1178,132 @@ fn assert_fuel_observer_snapshot(snapshot: &ExecutionSnapshot) {
         observations.first().map(|observation| observation.event),
         "fuel observer scenario should begin with a budgeted event"
     );
+}
+
+fn assert_import_resolver_snapshot(
+    snapshot: &ImportResolverExecution,
+    scenario: ImportResolverScenario,
+) {
+    match scenario {
+        ImportResolverScenario::AclAllowStoreFallback => {
+            let ImportResolverExecution::Instantiated {
+                outcome,
+                observations,
+            } = snapshot
+            else {
+                panic!("ACL-allowed store-fallback scenario should instantiate");
+            };
+            assert_eq!(&FunctionOutcome::Returned(Vec::new()), outcome);
+            assert_eq!(
+                &vec![
+                    ImportResolverSnapshot {
+                        import_module: "env".to_string(),
+                        event: ImportResolverEvent::AclAllowed,
+                        resolved: false,
+                    },
+                    ImportResolverSnapshot {
+                        import_module: "env".to_string(),
+                        event: ImportResolverEvent::StoreFallback,
+                        resolved: false,
+                    },
+                ],
+                observations
+            );
+        }
+        ImportResolverScenario::AclDenied => {
+            let ImportResolverExecution::InstantiateError {
+                message,
+                observations,
+            } = snapshot
+            else {
+                panic!("ACL-denied scenario should fail instantiation");
+            };
+            assert!(message.contains("denied by import ACL"));
+            assert_eq!(
+                &vec![ImportResolverSnapshot {
+                    import_module: "env".to_string(),
+                    event: ImportResolverEvent::AclDenied,
+                    resolved: false,
+                }],
+                observations
+            );
+        }
+        ImportResolverScenario::ResolverResolved => {
+            let ImportResolverExecution::Instantiated {
+                outcome,
+                observations,
+            } = snapshot
+            else {
+                panic!("resolver-resolved scenario should instantiate");
+            };
+            assert_eq!(&FunctionOutcome::Returned(Vec::new()), outcome);
+            assert_eq!(
+                &vec![
+                    ImportResolverSnapshot {
+                        import_module: "env".to_string(),
+                        event: ImportResolverEvent::ResolverAttempted,
+                        resolved: false,
+                    },
+                    ImportResolverSnapshot {
+                        import_module: "env".to_string(),
+                        event: ImportResolverEvent::ResolverResolved,
+                        resolved: true,
+                    },
+                ],
+                observations
+            );
+        }
+        ImportResolverScenario::ResolverAttemptedStoreFallback => {
+            let ImportResolverExecution::Instantiated {
+                outcome,
+                observations,
+            } = snapshot
+            else {
+                panic!("resolver-attempted store-fallback scenario should instantiate");
+            };
+            assert_eq!(&FunctionOutcome::Returned(Vec::new()), outcome);
+            assert_eq!(
+                &vec![
+                    ImportResolverSnapshot {
+                        import_module: "env".to_string(),
+                        event: ImportResolverEvent::ResolverAttempted,
+                        resolved: false,
+                    },
+                    ImportResolverSnapshot {
+                        import_module: "env".to_string(),
+                        event: ImportResolverEvent::StoreFallback,
+                        resolved: false,
+                    },
+                ],
+                observations
+            );
+        }
+        ImportResolverScenario::FailClosedDenied => {
+            let ImportResolverExecution::InstantiateError {
+                message,
+                observations,
+            } = snapshot
+            else {
+                panic!("fail-closed scenario should fail instantiation");
+            };
+            assert!(message.contains("unresolved by import resolver"));
+            assert_eq!(
+                &vec![
+                    ImportResolverSnapshot {
+                        import_module: "env".to_string(),
+                        event: ImportResolverEvent::AclAllowed,
+                        resolved: false,
+                    },
+                    ImportResolverSnapshot {
+                        import_module: "env".to_string(),
+                        event: ImportResolverEvent::FailClosedDenied,
+                        resolved: false,
+                    },
+                ],
+                observations
+            );
+        }
+    }
 }
 
 impl From<ParityOptions> for CaptureOptions {

@@ -55,3 +55,9 @@ name = "fuel_no_diff"
 path = "fuzz_targets/fuel_no_diff.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "import_resolver_no_diff"
+path = "fuzz_targets/import_resolver_no_diff.rs"
+test = false
+doc = false
