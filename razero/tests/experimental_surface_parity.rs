@@ -8,7 +8,7 @@ use razero::{
     get_fuel_observer, get_function_listener_factory, get_host_call_policy,
     get_host_call_policy_observer, get_import_resolver, get_import_resolver_config,
     get_import_resolver_observer, get_memory_allocator, get_snapshotter, get_trap_observer,
-    get_yield_policy, get_yield_policy_observer, get_yielder, new_stack_iterator,
+    get_yield_policy, get_yield_policy_observer, get_yielder, new_stack_iterator, trap_cause_of,
     with_close_notifier, with_compilation_workers, with_fuel_controller, with_fuel_observer,
     with_function_listener_factory, with_host_call_policy, with_host_call_policy_observer,
     with_import_resolver, with_import_resolver_acl, with_import_resolver_config,
@@ -428,6 +428,26 @@ fn trap_observer_round_trips_through_public_surface() {
     );
 
     assert_eq!(1, observed.load(Ordering::SeqCst));
+}
+
+#[test]
+fn trap_cause_of_round_trips_through_public_surface() {
+    assert_eq!(
+        Some(TrapCause::OutOfBoundsMemoryAccess),
+        trap_cause_of(&razero::RuntimeError::new("out of bounds memory access"))
+    );
+    assert_eq!(
+        Some(TrapCause::FuelExhausted),
+        trap_cause_of(&razero::RuntimeError::new("fuel exhausted"))
+    );
+    assert_eq!(
+        Some(TrapCause::PolicyDenied),
+        trap_cause_of(&razero::RuntimeError::new("policy denied"))
+    );
+    assert_eq!(
+        None,
+        trap_cause_of(&razero::RuntimeError::new("some other error"))
+    );
 }
 
 #[test]
