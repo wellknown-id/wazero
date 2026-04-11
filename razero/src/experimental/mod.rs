@@ -46,9 +46,10 @@ pub use import_resolver_observer::{
     ImportResolverObservation, ImportResolverObserver,
 };
 pub use listener::{
-    benchmark_function_listener, new_stack_iterator, with_function_listener_factory,
-    FrameStackIterator, FunctionListener, FunctionListenerFactory, FunctionListenerFactoryFn,
-    FunctionListenerFn, MultiFunctionListenerFactory, StackFrame, StackIterator,
+    benchmark_function_listener, get_function_listener_factory, new_stack_iterator,
+    with_function_listener_factory, FrameStackIterator, FunctionListener, FunctionListenerFactory,
+    FunctionListenerFactoryFn, FunctionListenerFn, MultiFunctionListenerFactory, StackFrame,
+    StackIterator,
 };
 pub use memory::{
     get_memory_allocator, with_memory_allocator, DefaultMemoryAllocator, IntoMemoryAllocator,

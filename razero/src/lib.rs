@@ -31,10 +31,11 @@ pub use config::{CompiledModule, ModuleConfig, RuntimeConfig, RuntimeEngineKind}
 pub use ctx_keys::{CancelHandle, Context, ContextDoneError, ContextKey};
 pub use experimental::{
     add_fuel, benchmark_function_listener, get_close_notifier, get_compilation_workers,
-    get_fuel_controller, get_host_call_policy, get_host_call_policy_observer, get_import_resolver,
-    get_import_resolver_config, get_import_resolver_observer, get_memory_allocator,
-    get_snapshotter, get_trap_observer, get_yield_policy, get_yield_policy_observer, get_yielder,
-    new_stack_iterator, remaining_fuel, trap_cause_of, with_close_notifier,
+    get_fuel_controller, get_function_listener_factory, get_host_call_policy,
+    get_host_call_policy_observer, get_import_resolver, get_import_resolver_config,
+    get_import_resolver_observer, get_memory_allocator, get_snapshotter, get_trap_observer,
+    get_yield_policy, get_yield_policy_observer, get_yielder, new_stack_iterator,
+    remaining_fuel, trap_cause_of, with_close_notifier,
     with_compilation_workers, with_fuel_controller, with_function_listener_factory,
     with_host_call_policy, with_host_call_policy_observer, with_import_resolver,
     with_import_resolver_acl, with_import_resolver_config, with_import_resolver_observer,

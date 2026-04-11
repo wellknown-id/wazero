@@ -4,14 +4,14 @@ use std::sync::{
 };
 
 use razero::{
-    get_compilation_workers, get_host_call_policy, get_host_call_policy_observer,
-    get_import_resolver, get_import_resolver_observer, get_trap_observer, get_yield_policy,
-    get_yield_policy_observer, with_compilation_workers, with_host_call_policy,
-    with_host_call_policy_observer, with_import_resolver, with_import_resolver_observer,
-    with_trap_observer, with_yield_policy, with_yield_policy_observer, Context,
-    HostCallPolicyDecision, HostCallPolicyObservation, ImportResolverEvent,
-    ImportResolverObservation, ModuleConfig, Runtime, RuntimeConfig, TrapCause, TrapObservation,
-    YieldPolicyDecision, YieldPolicyObservation,
+    get_compilation_workers, get_function_listener_factory, get_host_call_policy,
+    get_host_call_policy_observer, get_import_resolver, get_import_resolver_observer,
+    get_trap_observer, get_yield_policy, get_yield_policy_observer, with_compilation_workers,
+    with_function_listener_factory, with_host_call_policy, with_host_call_policy_observer,
+    with_import_resolver, with_import_resolver_observer, with_trap_observer, with_yield_policy,
+    with_yield_policy_observer, Context, HostCallPolicyDecision, HostCallPolicyObservation,
+    ImportResolverEvent, ImportResolverObservation, ModuleConfig, Runtime, RuntimeConfig,
+    TrapCause, TrapObservation, YieldPolicyDecision, YieldPolicyObservation,
 };
 
 const SIMPLE_EXPORT_WASM: &[u8] = &[
@@ -76,6 +76,24 @@ fn host_call_policy_round_trips_through_public_surface() {
     assert!(RuntimeConfig::new()
         .with_host_call_policy(allow_host_calls)
         .host_call_policy()
+        .is_some());
+}
+
+#[test]
+fn function_listener_factory_round_trips_through_public_surface() {
+    let ctx = with_function_listener_factory(&Context::default(), |_definition: &razero::FunctionDefinition| {
+        Some(Arc::new(
+            |_ctx: &Context,
+             _module: &razero::Module,
+             _definition: &razero::FunctionDefinition,
+             _params: &[u64],
+             _stack: &mut dyn razero::StackIterator| {},
+        ) as Arc<dyn razero::FunctionListener>)
+    });
+    let factory = get_function_listener_factory(&ctx).expect("factory should be present");
+
+    assert!(factory
+        .new_listener(&razero::FunctionDefinition::new("demo"))
         .is_some());
 }
 

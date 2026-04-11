@@ -198,6 +198,10 @@ pub fn with_function_listener_factory(
     cloned
 }
 
+pub fn get_function_listener_factory(ctx: &Context) -> Option<Arc<dyn FunctionListenerFactory>> {
+    ctx.function_listener_factory.clone()
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StackFrame {
     definition: FunctionDefinition,
