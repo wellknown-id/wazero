@@ -1433,6 +1433,31 @@ fn import_resolver_observer_emits_acl_allowed_through_public_surface() {
 }
 
 #[test]
+fn import_resolver_observer_emits_resolver_attempted_through_public_surface() {
+    let observed = Arc::new(AtomicU32::new(0));
+    let ctx = with_import_resolver_observer(&Context::default(), {
+        let observed = observed.clone();
+        move |_ctx: &Context, observation: ImportResolverObservation| {
+            assert_eq!(ImportResolverEvent::ResolverAttempted, observation.event);
+            assert!(observation.resolved_module.is_none());
+            observed.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let observer = get_import_resolver_observer(&ctx).expect("observer should be present");
+    observer.observe_import_resolution(
+        &ctx,
+        ImportResolverObservation {
+            module_name: "guest".to_string(),
+            import_module: "env".to_string(),
+            resolved_module: None,
+            event: ImportResolverEvent::ResolverAttempted,
+        },
+    );
+
+    assert_eq!(1, observed.load(Ordering::SeqCst));
+}
+
+#[test]
 fn import_resolver_can_return_anonymous_module_instances() {
     let runtime = Runtime::new();
     let call_count = Arc::new(AtomicU32::new(0));
