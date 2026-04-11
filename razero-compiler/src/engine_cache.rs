@@ -381,7 +381,7 @@ mod tests {
     use crate::aot::{
         AotCompiledMetadata, AotFunctionMetadata, AotGlobalInitializerMetadata,
         AotGlobalTypeMetadata, AotImportDescMetadata, AotImportMetadata, AotMemoryMetadata,
-        AotModuleContextMetadata, AotSourceMapEntry, AotTableMetadata,
+        AotModuleContextMetadata, AotModuleShapeMetadata, AotSourceMapEntry, AotTableMetadata,
     };
     use crate::engine::SourceMap;
     use razero_wasm::module::{ExternType, Module, RefType, ValueType};
@@ -487,6 +487,16 @@ mod tests {
                 wasm_binary_offset: 10,
                 executable_offset: 4,
             }],
+            module_shape: AotModuleShapeMetadata {
+                import_function_count: 1,
+                import_memory_count: 1,
+                local_function_count: 1,
+                local_global_count: 1,
+                local_table_count: 1,
+                has_local_memory: true,
+                has_any_memory: true,
+                ..AotModuleShapeMetadata::default()
+            },
             ensure_termination: false,
             memory_isolation_enabled: false,
             ..AotCompiledMetadata::default()

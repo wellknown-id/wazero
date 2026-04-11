@@ -1573,6 +1573,11 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
             "aot metadata: global initializer count mismatch".to_string(),
         ));
     }
+    if module_shape.local_global_count as usize != globals.len() {
+        return Err(AotMetadataError::InvalidHeader(
+            "aot metadata: global count mismatch".to_string(),
+        ));
+    }
 
     Ok(AotCompiledMetadata {
         target: AotTarget {
@@ -2034,7 +2039,7 @@ mod tests {
                 import_memory_count: 0,
                 import_table_count: 1,
                 local_function_count: 2,
-                local_global_count: 4,
+                local_global_count: 1,
                 local_table_count: 1,
                 has_local_memory: true,
                 has_any_memory: true,

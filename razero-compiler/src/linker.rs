@@ -3553,6 +3553,74 @@ int main(void) {
     }
 
     #[test]
+    fn packaged_module_sidecar_rejects_corrupted_global_count_mismatch() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            function_section: vec![0],
+            global_section: vec![Global {
+                ty: GlobalType {
+                    val_type: ValueType::I64,
+                    mutable: false,
+                },
+                init: ConstExpr::from_i64(42),
+            }],
+            code_section: vec![Code {
+                body: vec![0x41, 0x05, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![
+                Export {
+                    ty: ExternType::FUNC,
+                    name: "run".to_string(),
+                    index: 0,
+                },
+                Export {
+                    ty: ExternType::GLOBAL,
+                    name: "counter".to_string(),
+                    index: 0,
+                },
+            ],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let metadata = compile_module_metadata(&module);
+        assert_eq!(1, metadata.module_shape.local_global_count);
+        assert_eq!(1, metadata.globals.len());
+
+        let mut sidecar = serialize_aot_metadata(&metadata);
+        let mut local_global_pattern = Vec::new();
+        local_global_pattern
+            .extend_from_slice(&metadata.module_shape.local_function_count.to_le_bytes());
+        local_global_pattern
+            .extend_from_slice(&metadata.module_shape.local_global_count.to_le_bytes());
+        local_global_pattern
+            .extend_from_slice(&metadata.module_shape.local_table_count.to_le_bytes());
+
+        let matches = sidecar
+            .windows(local_global_pattern.len())
+            .enumerate()
+            .filter_map(|(offset, window)| {
+                (window == local_global_pattern.as_slice()).then_some(offset)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(1, matches.len());
+        sidecar[matches[0] + 4..matches[0] + 8].copy_from_slice(&2u32.to_le_bytes());
+
+        let encoded = serialize_native_package_metadata_bundle(&NativePackageMetadataBundle {
+            modules: vec![NativePackageMetadataEntry {
+                module_name: "guest".to_string(),
+                metadata_sidecar_bytes: sidecar,
+            }],
+            host_imports: Vec::new(),
+        });
+
+        let decoded = deserialize_native_package_metadata_bundle(&encoded).unwrap();
+        let err = crate::aot::deserialize_aot_metadata(&decoded.modules[0].metadata_sidecar_bytes)
+            .unwrap_err();
+        assert_eq!(err.to_string(), "aot metadata: global count mismatch");
+    }
+
+    #[test]
     fn packaged_module_sidecar_rejects_corrupted_data_segment_passive_flag() {
         let module = Module {
             type_section: vec![function_type(&[], &[ValueType::I32])],
