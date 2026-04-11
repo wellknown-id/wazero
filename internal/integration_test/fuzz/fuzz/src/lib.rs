@@ -455,24 +455,46 @@ fn replay_policy_trap_parity(input: PolicyTrapInput) {
 }
 
 fn replay_fixed_trap_parity(scenario: FixedTrapScenario) {
-    match scenario {
-        FixedTrapScenario::OutOfBounds => replay_native_trap_parity(OOB_LOAD_WASM, "oob"),
-        FixedTrapScenario::DivideByZero => replay_native_trap_parity(DIV_BY_ZERO_WASM, "run"),
-        FixedTrapScenario::DivideOverflow => replay_native_trap_parity(DIV_OVERFLOW_WASM, "run"),
+    let (wasm, export_name, expected_cause) = match scenario {
+        FixedTrapScenario::OutOfBounds => {
+            (OOB_LOAD_WASM, "oob", TrapCause::OutOfBoundsMemoryAccess)
+        }
+        FixedTrapScenario::DivideByZero => {
+            (DIV_BY_ZERO_WASM, "run", TrapCause::IntegerDivideByZero)
+        }
+        FixedTrapScenario::DivideOverflow => {
+            (DIV_OVERFLOW_WASM, "run", TrapCause::IntegerOverflow)
+        }
         FixedTrapScenario::InvalidConversion => {
-            replay_native_trap_parity(INVALID_CONVERSION_WASM, "run")
+            (INVALID_CONVERSION_WASM, "run", TrapCause::InvalidConversionToInteger)
         }
         FixedTrapScenario::InvalidTableAccess => {
-            replay_native_trap_parity(INVALID_TABLE_ACCESS_WASM, "run")
+            (INVALID_TABLE_ACCESS_WASM, "run", TrapCause::InvalidTableAccess)
         }
-        FixedTrapScenario::IndirectCallTypeMismatch => {
-            replay_native_trap_parity(INDIRECT_CALL_TYPE_MISMATCH_WASM, "run")
-        }
-        FixedTrapScenario::Unreachable => replay_native_trap_parity(UNREACHABLE_WASM, "run"),
+        FixedTrapScenario::IndirectCallTypeMismatch => (
+            INDIRECT_CALL_TYPE_MISMATCH_WASM,
+            "run",
+            TrapCause::IndirectCallTypeMismatch,
+        ),
+        FixedTrapScenario::Unreachable => (UNREACHABLE_WASM, "run", TrapCause::Unreachable),
         FixedTrapScenario::UnalignedAtomic => {
-            replay_native_trap_parity(UNALIGNED_ATOMIC_STORE_WASM, "run")
+            (UNALIGNED_ATOMIC_STORE_WASM, "run", TrapCause::UnalignedAtomic)
         }
-    }
+    };
+
+    let options = CaptureOptions {
+        capture_traps: true,
+        export_name: Some(export_name.to_string()),
+        ..CaptureOptions::default()
+    };
+    let standard = capture_execution(wasm, false, &options);
+    let secure = capture_execution(wasm, true, &options);
+    assert_trap_snapshot_cause(&standard, expected_cause);
+    assert_trap_snapshot_cause(&secure, expected_cause);
+    assert_eq!(
+        standard, secure,
+        "fixed trap parity mismatch between standard and secure mode"
+    );
 }
 
 fn capture_resume_policy_denial(secure_mode: bool, resume_value: u64) -> ResumeSnapshot {
@@ -771,6 +793,37 @@ fn assert_host_call_policy_snapshot(snapshot: &ExecutionSnapshot) {
             })
         }),
         "host-call policy denial should record a policy-denied trap observation"
+    );
+}
+
+fn assert_trap_snapshot_cause(snapshot: &ExecutionSnapshot, expected_cause: TrapCause) {
+    let ExecutionSnapshot::Executed {
+        functions,
+        trap_observations,
+        ..
+    } = snapshot
+    else {
+        panic!("fixed trap scenario should execute");
+    };
+    assert!(
+        functions.iter().any(|function| {
+            matches!(
+                &function.outcome,
+                FunctionOutcome::Trapped {
+                    cause: Some(cause),
+                    ..
+                } if *cause == expected_cause
+            )
+        }),
+        "fixed trap scenario should surface expected trap cause in function outcome"
+    );
+    assert!(
+        trap_observations.as_ref().is_some_and(|observations| {
+            observations
+                .iter()
+                .any(|observation| observation.cause == expected_cause)
+        }),
+        "fixed trap scenario should record expected trap cause in trap observations"
     );
 }
 
