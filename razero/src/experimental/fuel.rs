@@ -4,8 +4,12 @@ use std::sync::{
 };
 
 use crate::{
-    api::error::{Result, RuntimeError},
+    api::{
+        error::{Result, RuntimeError},
+        wasm::active_invocation,
+    },
     ctx_keys::Context,
+    experimental::fuel_observer::{notify_fuel_observer, FuelEvent},
 };
 
 pub trait FuelController: Send + Sync {
@@ -121,7 +125,26 @@ pub fn add_fuel(ctx: &Context, amount: i64) -> Result<()> {
                 "no fuel accessor in context: fuel not enabled or not in a host function",
             )
         })?;
-    accessor.fetch_add(amount, Ordering::SeqCst);
+    let remaining = accessor.fetch_add(amount, Ordering::SeqCst) + amount;
+    if amount > 0 {
+        if let Some((active_ctx, module)) = active_invocation() {
+            let budget = active_ctx
+                .fuel_controller
+                .as_ref()
+                .map(|controller| controller.budget())
+                .unwrap_or_else(|| module.default_fuel())
+                .max(0);
+            notify_fuel_observer(
+                &active_ctx,
+                &module,
+                FuelEvent::Recharged,
+                budget,
+                (budget - remaining).max(0),
+                remaining,
+                amount,
+            );
+        }
+    }
     Ok(())
 }
 
@@ -144,7 +167,7 @@ mod tests {
     use std::{
         sync::{
             atomic::{AtomicI64, Ordering},
-            Arc,
+            Arc, Mutex,
         },
         thread,
     };
@@ -153,7 +176,12 @@ mod tests {
         add_fuel, get_fuel_controller, remaining_fuel, with_fuel_controller,
         AggregatingFuelController, FuelController, SimpleFuelController,
     };
-    use crate::ctx_keys::{Context, InvocationContext};
+    use crate::{
+        api::wasm::with_active_invocation,
+        ctx_keys::{Context, InvocationContext},
+        experimental::fuel_observer::{with_fuel_observer, FuelEvent, FuelObservation},
+        ModuleConfig, Runtime,
+    };
 
     #[test]
     fn simple_fuel_controller_budget() {
@@ -314,5 +342,63 @@ mod tests {
         assert_eq!(700, fuel.load(Ordering::SeqCst));
         add_fuel(&ctx, -800).unwrap();
         assert_eq!(-100, fuel.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn add_fuel_emits_recharged_notification_during_active_invocation() {
+        let fuel = Arc::new(AtomicI64::new(500));
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let ctx = with_fuel_observer(
+            &with_fuel_controller(&Context::default(), SimpleFuelController::new(1_000)),
+            {
+                let observations = observations.clone();
+                move |_ctx: &Context, observation: FuelObservation| {
+                    observations
+                        .lock()
+                        .expect("fuel observations poisoned")
+                        .push((
+                            observation.module.name().map(str::to_string),
+                            observation.event,
+                            observation.budget,
+                            observation.consumed,
+                            observation.remaining,
+                            observation.delta,
+                        ));
+                }
+            },
+        )
+        .with_invocation(InvocationContext {
+            fuel_remaining: Some(fuel.clone()),
+            snapshotter: None,
+            yielder: None,
+            function_listener: None,
+            function_definition: None,
+            listener_stack: Vec::new(),
+        });
+        let runtime = Runtime::new();
+        let compiled = runtime
+            .compile(&[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            ])
+            .unwrap();
+        let module = runtime
+            .instantiate(&compiled, ModuleConfig::new().with_name("guest"))
+            .unwrap();
+
+        with_active_invocation(&ctx, &module, || add_fuel(&ctx, 250)).unwrap();
+
+        assert_eq!(750, remaining_fuel(&ctx).unwrap());
+        assert_eq!(750, fuel.load(Ordering::SeqCst));
+        assert_eq!(
+            vec![(
+                Some("guest".to_string()),
+                FuelEvent::Recharged,
+                1_000,
+                250,
+                750,
+                250
+            )],
+            *observations.lock().expect("fuel observations poisoned")
+        );
     }
 }
