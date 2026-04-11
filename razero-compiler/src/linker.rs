@@ -3606,6 +3606,80 @@ int main(void) {
     }
 
     #[test]
+    fn packaged_module_sidecar_rejects_corrupted_import_descriptor_tag() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            import_section: vec![Import::function("env", "hook", 0)],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![0x41, 0x05, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 1,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let metadata = compile_module_metadata(&module);
+
+        let mut sidecar = serialize_aot_metadata(&metadata);
+        let import_pattern = [
+            ExternType::FUNC.0,
+            3,
+            0,
+            0,
+            0,
+            b'e',
+            b'n',
+            b'v',
+            4,
+            0,
+            0,
+            0,
+            b'h',
+            b'o',
+            b'o',
+            b'k',
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
+        let matches = sidecar
+            .windows(import_pattern.len())
+            .enumerate()
+            .filter_map(|(offset, window)| (window == import_pattern).then_some(offset))
+            .collect::<Vec<_>>();
+        assert_eq!(1, matches.len());
+        let import_desc_tag_offset = matches[0] + 1 + 4 + 3 + 4 + 4 + 4;
+        sidecar[import_desc_tag_offset] = 0xff;
+
+        let encoded = serialize_native_package_metadata_bundle(&NativePackageMetadataBundle {
+            modules: vec![NativePackageMetadataEntry {
+                module_name: "guest".to_string(),
+                metadata_sidecar_bytes: sidecar,
+            }],
+            host_imports: Vec::new(),
+        });
+
+        let decoded = deserialize_native_package_metadata_bundle(&encoded).unwrap();
+        let err = crate::aot::deserialize_aot_metadata(&decoded.modules[0].metadata_sidecar_bytes)
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "aot metadata: invalid import descriptor tag"
+        );
+    }
+
+    #[test]
     fn package_metadata_bundle_round_trips_with_memory_config_variants() {
         let modules = [
             (
