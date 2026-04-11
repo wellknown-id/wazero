@@ -145,6 +145,9 @@ allowed host function later calls `Yield()`.
 - If the resume context omits `HostCallPolicyObserver`, the resumed segment does
   not currently report its later host-call policy decisions to the observer
   from the initial call.
+- A `TimeProvider` attached to the resume context is what later resumed-segment
+  host calls observe. If the resume context omits `TimeProvider`, resumed host
+  calls do not inherit the initial call's provider.
 
 ### Import resolution
 

@@ -9,17 +9,17 @@ use std::{
 };
 
 use razero::{
-    add_fuel, get_fuel_controller, get_import_resolver, get_snapshotter, get_yielder,
-    remaining_fuel, trap_cause_of, with_fuel_controller, with_fuel_observer,
+    add_fuel, get_fuel_controller, get_import_resolver, get_snapshotter, get_time_provider,
+    get_yielder, remaining_fuel, trap_cause_of, with_fuel_controller, with_fuel_observer,
     with_function_listener_factory, with_host_call_policy, with_host_call_policy_observer,
     with_import_resolver, with_import_resolver_config, with_import_resolver_observer,
-    with_snapshotter, with_trap_observer, with_yield_observer, with_yield_policy, with_yielder,
-    Context, CoreFeatures, FuelEvent, FuelObservation, FunctionDefinition, FunctionListener,
-    FunctionListenerFactory, HostCallPolicyDecision, HostCallPolicyObservation,
-    HostCallPolicyRequest, ImportACL, ImportResolverConfig, ImportResolverEvent,
-    ImportResolverObservation, Module, ModuleConfig, Runtime, RuntimeConfig, RuntimeError,
-    Snapshot, TrapCause, ValueType, YieldError, YieldEvent, YieldObservation,
-    CORE_FEATURES_THREADS, ERR_YIELDED,
+    with_snapshotter, with_time_provider, with_trap_observer, with_yield_observer,
+    with_yield_policy, with_yielder, Context, CoreFeatures, FuelEvent, FuelObservation,
+    FunctionDefinition, FunctionListener, FunctionListenerFactory, HostCallPolicyDecision,
+    HostCallPolicyObservation, HostCallPolicyRequest, ImportACL, ImportResolverConfig,
+    ImportResolverEvent, ImportResolverObservation, Module, ModuleConfig, Runtime, RuntimeConfig,
+    RuntimeError, Snapshot, TimeProvider, TrapCause, ValueType, YieldError, YieldEvent,
+    YieldObservation, CORE_FEATURES_THREADS, ERR_YIELDED,
 };
 
 const YIELD_WASM: &[u8] = include_bytes!("../../experimental/testdata/yield.wasm");
@@ -76,6 +76,23 @@ const LOOP_EXPORT_WASM: &[u8] = &[
 struct TrackingFuelController {
     budget: i64,
     consumed: Arc<AtomicI64>,
+}
+
+struct StubTimeProvider {
+    wall: (i64, i32),
+    nano: i64,
+}
+
+impl TimeProvider for StubTimeProvider {
+    fn walltime(&self) -> (i64, i32) {
+        self.wall
+    }
+
+    fn nanotime(&self) -> i64 {
+        self.nano
+    }
+
+    fn nanosleep(&self, _ns: i64) {}
 }
 
 impl razero::FuelController for TrackingFuelController {
@@ -739,6 +756,163 @@ fn host_call_policy_initial_observer_does_not_persist_when_resume_omits_one() {
         *observations
             .lock()
             .expect("host call observations poisoned")
+    );
+}
+
+#[test]
+fn time_provider_resume_context_overrides_follow_on_host_call() {
+    let runtime = Runtime::new();
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    runtime
+        .new_host_module_builder("example")
+        .new_function_builder()
+        .with_func(
+            {
+                let observations = observations.clone();
+                move |ctx, _module, _params| {
+                    let observed = get_time_provider(&ctx).map(|provider| {
+                        let (sec, nsec) = provider.walltime();
+                        (sec, nsec, provider.nanotime())
+                    });
+                    observations
+                        .lock()
+                        .expect("time provider observations poisoned")
+                        .push(observed);
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                }
+            },
+            &[],
+            &[ValueType::I32],
+        )
+        .with_name("async_work")
+        .export("async_work")
+        .instantiate(&Context::default())
+        .unwrap();
+    let guest = runtime
+        .instantiate_binary(YIELD_WASM, ModuleConfig::new())
+        .unwrap();
+
+    let err = guest
+        .exported_function("run_twice")
+        .unwrap()
+        .call_with_context(
+            &with_time_provider(
+                &with_yielder(&Context::default()),
+                StubTimeProvider {
+                    wall: (1, 2),
+                    nano: 3,
+                },
+            ),
+            &[],
+        )
+        .unwrap_err();
+    let first_resumer = yielded(err).resumer().expect("resumer should be present");
+    assert_eq!(
+        vec![Some((1, 2, 3))],
+        *observations
+            .lock()
+            .expect("time provider observations poisoned")
+    );
+
+    let err = first_resumer
+        .resume(
+            &with_time_provider(
+                &with_yielder(&Context::default()),
+                StubTimeProvider {
+                    wall: (4, 5),
+                    nano: 6,
+                },
+            ),
+            &[40],
+        )
+        .unwrap_err();
+    let second_resumer = yielded(err).resumer().expect("resumer should be present");
+
+    assert_eq!(
+        vec![Some((1, 2, 3)), Some((4, 5, 6))],
+        *observations
+            .lock()
+            .expect("time provider observations poisoned")
+    );
+    assert_eq!(
+        vec![42],
+        second_resumer
+            .resume(&with_yielder(&Context::default()), &[2])
+            .unwrap()
+    );
+}
+
+#[test]
+fn time_provider_initial_context_does_not_persist_when_resume_omits_one() {
+    let runtime = Runtime::new();
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    runtime
+        .new_host_module_builder("example")
+        .new_function_builder()
+        .with_func(
+            {
+                let observations = observations.clone();
+                move |ctx, _module, _params| {
+                    let observed = get_time_provider(&ctx).map(|provider| {
+                        let (sec, nsec) = provider.walltime();
+                        (sec, nsec, provider.nanotime())
+                    });
+                    observations
+                        .lock()
+                        .expect("time provider observations poisoned")
+                        .push(observed);
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                }
+            },
+            &[],
+            &[ValueType::I32],
+        )
+        .with_name("async_work")
+        .export("async_work")
+        .instantiate(&Context::default())
+        .unwrap();
+    let guest = runtime
+        .instantiate_binary(YIELD_WASM, ModuleConfig::new())
+        .unwrap();
+
+    let err = guest
+        .exported_function("run_twice")
+        .unwrap()
+        .call_with_context(
+            &with_time_provider(
+                &with_yielder(&Context::default()),
+                StubTimeProvider {
+                    wall: (1, 2),
+                    nano: 3,
+                },
+            ),
+            &[],
+        )
+        .unwrap_err();
+    let first_resumer = yielded(err).resumer().expect("resumer should be present");
+
+    let err = first_resumer
+        .resume(&with_yielder(&Context::default()), &[40])
+        .unwrap_err();
+    let second_resumer = yielded(err).resumer().expect("resumer should be present");
+
+    assert_eq!(
+        vec![Some((1, 2, 3)), None],
+        *observations
+            .lock()
+            .expect("time provider observations poisoned")
+    );
+    assert_eq!(
+        vec![42],
+        second_resumer
+            .resume(&with_yielder(&Context::default()), &[2])
+            .unwrap()
     );
 }
 
