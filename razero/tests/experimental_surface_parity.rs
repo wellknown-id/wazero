@@ -597,6 +597,30 @@ fn host_call_policy_request_defaults_to_empty_metadata_through_public_surface() 
 }
 
 #[test]
+fn host_call_policy_request_memory_metadata_round_trip_through_public_surface() {
+    let memory = MemoryDefinition::new(1, Some(2))
+        .with_module_name(Some("env".to_string()))
+        .with_import("env", "memory")
+        .with_export_name("memory");
+    let request = HostCallPolicyRequest::new().with_memory(memory.clone());
+
+    assert_eq!(Some(&memory), request.memory());
+    assert_eq!(
+        Some("env"),
+        request.memory().and_then(MemoryDefinition::module_name)
+    );
+    assert_eq!(
+        Some(("env", "memory")),
+        request.memory().and_then(MemoryDefinition::import)
+    );
+    assert_eq!(Some(1), request.memory().map(MemoryDefinition::minimum_pages));
+    assert_eq!(
+        Some(Some(2)),
+        request.memory().map(MemoryDefinition::maximum_pages)
+    );
+}
+
+#[test]
 fn function_listener_factory_round_trips_through_public_surface() {
     let ctx = with_function_listener_factory(
         &Context::default(),
@@ -801,6 +825,30 @@ fn yield_policy_request_defaults_to_empty_metadata_through_public_surface() {
     assert_eq!(None, request.module_name());
     assert_eq!(None, request.name());
     assert!(request.export_names().is_empty());
+}
+
+#[test]
+fn yield_policy_request_memory_metadata_round_trip_through_public_surface() {
+    let memory = MemoryDefinition::new(1, Some(2))
+        .with_module_name(Some("env".to_string()))
+        .with_import("env", "memory")
+        .with_export_name("memory");
+    let request = razero::YieldPolicyRequest::new().with_memory(memory.clone());
+
+    assert_eq!(Some(&memory), request.memory());
+    assert_eq!(
+        Some("env"),
+        request.memory().and_then(MemoryDefinition::module_name)
+    );
+    assert_eq!(
+        Some(("env", "memory")),
+        request.memory().and_then(MemoryDefinition::import)
+    );
+    assert_eq!(Some(1), request.memory().map(MemoryDefinition::minimum_pages));
+    assert_eq!(
+        Some(Some(2)),
+        request.memory().map(MemoryDefinition::maximum_pages)
+    );
 }
 
 #[test]
