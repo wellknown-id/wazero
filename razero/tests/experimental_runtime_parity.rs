@@ -14,12 +14,13 @@ use razero::{
     with_function_listener_factory, with_host_call_policy, with_host_call_policy_observer,
     with_import_resolver, with_import_resolver_config, with_import_resolver_observer,
     with_snapshotter, with_time_provider, with_trap_observer, with_yield_observer,
-    with_yield_policy, with_yielder, Context, CoreFeatures, FuelEvent, FuelObservation,
-    FunctionDefinition, FunctionListener, FunctionListenerFactory, HostCallPolicyDecision,
-    HostCallPolicyObservation, HostCallPolicyRequest, ImportACL, ImportResolverConfig,
-    ImportResolverEvent, ImportResolverObservation, Module, ModuleConfig, Runtime, RuntimeConfig,
-    RuntimeError, Snapshot, TimeProvider, TrapCause, ValueType, YieldError, YieldEvent,
-    YieldObservation, CORE_FEATURES_THREADS, ERR_YIELDED,
+    with_yield_policy, with_yield_policy_observer, with_yielder, Context, CoreFeatures, FuelEvent,
+    FuelObservation, FunctionDefinition, FunctionListener, FunctionListenerFactory,
+    HostCallPolicyDecision, HostCallPolicyObservation, HostCallPolicyRequest, ImportACL,
+    ImportResolverConfig, ImportResolverEvent, ImportResolverObservation, Module, ModuleConfig,
+    Runtime, RuntimeConfig, RuntimeError, Snapshot, TimeProvider, TrapCause, ValueType, YieldError,
+    YieldEvent, YieldObservation, YieldPolicyDecision, YieldPolicyObservation,
+    CORE_FEATURES_THREADS, ERR_YIELDED,
 };
 
 const YIELD_WASM: &[u8] = include_bytes!("../../experimental/testdata/yield.wasm");
@@ -201,6 +202,31 @@ fn record_host_call_policy_observations(
         observations
             .lock()
             .expect("host call policy observations poisoned")
+            .push((
+                observation.module.name().map(str::to_string),
+                observation.request.name().map(str::to_string),
+                observation.request.caller_module_name().map(str::to_string),
+                observation.decision,
+            ));
+    }
+}
+
+fn record_yield_policy_observations(
+    observations: Arc<
+        Mutex<
+            Vec<(
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                YieldPolicyDecision,
+            )>,
+        >,
+    >,
+) -> impl Fn(&Context, YieldPolicyObservation) + Send + Sync + 'static {
+    move |_ctx: &Context, observation: YieldPolicyObservation| {
+        observations
+            .lock()
+            .expect("yield policy observations poisoned")
             .push((
                 observation.module.name().map(str::to_string),
                 observation.request.name().map(str::to_string),
@@ -553,6 +579,101 @@ fn trap_observer_initial_context_does_not_persist_when_resume_omits_observer() {
         .lock()
         .expect("trap observations poisoned")
         .is_empty());
+}
+
+#[test]
+fn yield_policy_observer_resume_context_receives_follow_on_denial() {
+    let (_runtime, guest) = setup_yield_runtime();
+    let initial_observations = Arc::new(Mutex::new(Vec::new()));
+    let resumed_observations = Arc::new(Mutex::new(Vec::new()));
+    let initial_ctx = with_yield_policy_observer(
+        &with_yielder(&Context::default()),
+        record_yield_policy_observations(initial_observations.clone()),
+    );
+
+    let err = guest
+        .exported_function("run_twice")
+        .unwrap()
+        .call_with_context(&initial_ctx, &[])
+        .unwrap_err();
+    let resumer = yielded(err).resumer().expect("resumer should be present");
+    assert!(initial_observations
+        .lock()
+        .expect("initial yield policy observations poisoned")
+        .is_empty());
+
+    let resumed_ctx = with_yield_policy_observer(
+        &with_yield_policy(&with_yielder(&Context::default()), deny_all_yields),
+        record_yield_policy_observations(resumed_observations.clone()),
+    );
+    let err = resumer.resume(&resumed_ctx, &[40]).unwrap_err();
+
+    assert_eq!("policy denied: cooperative yield", err.to_string());
+    assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+    assert!(initial_observations
+        .lock()
+        .expect("initial yield policy observations poisoned")
+        .is_empty());
+    assert_eq!(
+        vec![(
+            None,
+            Some("run_twice".to_string()),
+            None,
+            YieldPolicyDecision::Denied,
+        )],
+        *resumed_observations
+            .lock()
+            .expect("resumed yield policy observations poisoned")
+    );
+}
+
+#[test]
+fn yield_policy_observer_initial_context_does_not_persist_when_resume_omits_observer() {
+    let (_runtime, guest) = setup_yield_runtime();
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let initial_ctx = with_yield_policy_observer(
+        &with_yield_policy(&with_yielder(&Context::default()), allow_all_yields),
+        record_yield_policy_observations(observations.clone()),
+    );
+
+    let err = guest
+        .exported_function("run_twice")
+        .unwrap()
+        .call_with_context(&initial_ctx, &[])
+        .unwrap_err();
+    let resumer = yielded(err).resumer().expect("resumer should be present");
+    assert_eq!(
+        vec![(
+            None,
+            Some("run_twice".to_string()),
+            None,
+            YieldPolicyDecision::Allowed,
+        )],
+        *observations
+            .lock()
+            .expect("yield policy observations poisoned")
+    );
+
+    let err = resumer
+        .resume(
+            &with_yield_policy(&with_yielder(&Context::default()), deny_all_yields),
+            &[40],
+        )
+        .unwrap_err();
+
+    assert_eq!("policy denied: cooperative yield", err.to_string());
+    assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+    assert_eq!(
+        vec![(
+            None,
+            Some("run_twice".to_string()),
+            None,
+            YieldPolicyDecision::Allowed,
+        )],
+        *observations
+            .lock()
+            .expect("yield policy observations poisoned")
+    );
 }
 
 #[test]

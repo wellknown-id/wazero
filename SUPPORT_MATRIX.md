@@ -136,8 +136,9 @@ allowed host function later calls `Yield()`.
   `YieldPolicy`. A `YieldObserver` attached to the resume context receives the
   `resumed` notification for that resume attempt, and a `TrapObserver` attached
   to the resume context receives follow-on traps raised during the resumed
-  segment. A `HostCallPolicyObserver` attached to the resume context receives
-  allow/deny decisions for follow-on resumed-segment host calls.
+  segment. A `HostCallPolicyObserver` or `YieldPolicyObserver` attached to the
+  resume context receives allow/deny decisions for follow-on resumed-segment
+  host calls or cooperative yields.
 - If the resume context omits `YieldObserver`, the suspended execution does not
   currently emit additional yield-observer callbacks for the resumed segment.
 - If the resume context omits `TrapObserver`, the resumed segment does not
@@ -145,6 +146,9 @@ allowed host function later calls `Yield()`.
 - If the resume context omits `HostCallPolicyObserver`, the resumed segment does
   not currently report its later host-call policy decisions to the observer
   from the initial call.
+- If the resume context omits `YieldPolicyObserver`, the resumed segment does
+  not currently report its later cooperative-yield allow/deny decisions to the
+  observer from the initial call.
 - A `TimeProvider` attached to the resume context is what later resumed-segment
   host calls observe. If the resume context omits `TimeProvider`, resumed host
   calls do not inherit the initial call's provider.
@@ -161,6 +165,7 @@ matrix:
 | `TrapObserver` | The resume context's observer sees follow-on traps | Follow-on resumed-segment traps are not reported to the original observer |
 | `HostCallPolicy` | The resume context's policy decides later resumed-segment host calls | Later resumed-segment host calls run without a call-scoped override |
 | `HostCallPolicyObserver` | The resume context's observer sees resumed-segment allow/deny decisions | No resumed-segment host-call policy observer callbacks |
+| `YieldPolicyObserver` | The resume context's observer sees resumed-segment cooperative-yield allow/deny decisions | No resumed-segment yield-policy observer callbacks |
 | `TimeProvider` | Resumed host calls see the resume context's provider | Resumed host calls do not inherit the initial provider |
 | `FuelController` | Resumed host calls see the resume context's controller when one is supplied | Resumed host calls do not inherit the initial controller |
 | `FuelObserver` | No additional resumed-segment callbacks are currently emitted | Same behavior: no additional resumed-segment callbacks |
