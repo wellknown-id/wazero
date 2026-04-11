@@ -1522,6 +1522,30 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
             "aot metadata: invalid element table index".to_string(),
         ));
     }
+    if element_segments
+        .iter()
+        .filter(|element| matches!(element.mode, ElementMode::Active))
+        .any(|element| {
+            let table_ty = if element.table_index < module_shape.import_table_count {
+                imports
+                    .iter()
+                    .filter_map(|import| match &import.desc {
+                        AotImportDescMetadata::Table(table) => Some(table.ty),
+                        _ => None,
+                    })
+                    .nth(element.table_index as usize)
+            } else {
+                tables
+                    .get((element.table_index - module_shape.import_table_count) as usize)
+                    .map(|table| table.ty)
+            };
+            table_ty.is_some_and(|table_ty| element.ty != table_ty)
+        })
+    {
+        return Err(AotMetadataError::InvalidHeader(
+            "aot metadata: active element ref type mismatch".to_string(),
+        ));
+    }
     if imports.iter().any(|import| {
         matches!(
             import.desc,
