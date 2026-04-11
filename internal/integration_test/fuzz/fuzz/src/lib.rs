@@ -3,9 +3,10 @@ use std::sync::{Arc, Mutex};
 use arbitrary::Arbitrary;
 use libfuzzer_sys::arbitrary::{Result, Unstructured};
 use razero::{
-    logging, with_function_listener_factory, Context, CoreFeatures, FunctionDefinition,
-    FunctionListener, FunctionListenerFactory, Module, ModuleConfig, Runtime, RuntimeConfig,
-    RuntimeError, CORE_FEATURES_TAIL_CALL, CORE_FEATURES_THREADS,
+    logging, trap_cause_of, with_function_listener_factory, with_trap_observer,
+    with_yield_policy, with_yielder, Context, CoreFeatures, FunctionDefinition, FunctionListener,
+    FunctionListenerFactory, Module, ModuleConfig, Runtime, RuntimeConfig, RuntimeError,
+    TrapCause, TrapObservation, YieldPolicyRequest, CORE_FEATURES_TAIL_CALL, CORE_FEATURES_THREADS,
 };
 use wasm_smith::Config;
 
@@ -19,17 +20,45 @@ pub struct ParityOptions {
 enum ExecutionSnapshot {
     CompileError(String),
     InstantiateError(String),
+    SetupError(String),
     Executed {
         functions: Vec<FunctionSnapshot>,
         memory: Option<Vec<u8>>,
         logs: Option<Vec<String>>,
+        trap_observations: Option<Vec<TrapSnapshot>>,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FunctionSnapshot {
     name: String,
-    outcome: std::result::Result<Vec<u64>, String>,
+    outcome: FunctionOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FunctionOutcome {
+    Returned(Vec<u64>),
+    Trapped {
+        message: String,
+        cause: Option<TrapCause>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrapSnapshot {
+    module_name: Option<String>,
+    cause: TrapCause,
+    message: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CaptureOptions {
+    check_memory: bool,
+    check_logging: bool,
+    capture_traps: bool,
+    attach_yielder: bool,
+    deny_yields: bool,
+    export_name: Option<String>,
 }
 
 fn fuzz_features() -> CoreFeatures {
@@ -43,11 +72,26 @@ fn runtime_config(secure_mode: bool) -> RuntimeConfig {
 }
 
 pub fn replay_native_parity(wasm: &[u8], options: ParityOptions) {
-    let standard = capture_execution(wasm, false, options);
-    let secure = capture_execution(wasm, true, options);
+    let options = CaptureOptions::from(options);
+    let standard = capture_execution(wasm, false, &options);
+    let secure = capture_execution(wasm, true, &options);
     assert_eq!(
         standard, secure,
         "native parity mismatch between standard and secure mode"
+    );
+}
+
+pub fn replay_native_trap_parity(wasm: &[u8], export_name: &str) {
+    let options = CaptureOptions {
+        capture_traps: true,
+        export_name: Some(export_name.to_string()),
+        ..CaptureOptions::default()
+    };
+    let standard = capture_execution(wasm, false, &options);
+    let secure = capture_execution(wasm, true, &options);
+    assert_eq!(
+        standard, secure,
+        "native trap parity mismatch between standard and secure mode"
     );
 }
 
@@ -114,7 +158,7 @@ fn generate_execution_module(data: &[u8], check_logging: bool) -> Result<Vec<u8>
     Ok(module.to_bytes())
 }
 
-fn capture_execution(wasm: &[u8], secure_mode: bool, options: ParityOptions) -> ExecutionSnapshot {
+fn capture_execution(wasm: &[u8], secure_mode: bool, options: &CaptureOptions) -> ExecutionSnapshot {
     let ctx = Context::default();
     let runtime = Runtime::with_config(runtime_config(secure_mode));
     let compiled = match runtime.compile(wasm) {
@@ -135,32 +179,35 @@ fn capture_execution(wasm: &[u8], secure_mode: bool, options: ParityOptions) -> 
         }
     };
 
-    let (call_ctx, logs) = if options.check_logging {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        (
-            with_function_listener_factory(
-                &Context::default(),
-                RecordingFactory {
-                    events: events.clone(),
-                },
-            ),
-            Some(events),
-        )
-    } else {
-        (Context::default(), None)
+    let logs = options
+        .check_logging
+        .then(|| Arc::new(Mutex::new(Vec::new())));
+    let trap_observations = options
+        .capture_traps
+        .then(|| Arc::new(Mutex::new(Vec::new())));
+    let call_ctx = build_call_context(options, logs.clone(), trap_observations.clone());
+
+    let exports = match selected_exports(&module, options) {
+        Ok(exports) => exports,
+        Err(err) => {
+            let outcome = ExecutionSnapshot::SetupError(err);
+            runtime.close(&ctx).expect("runtime close should succeed");
+            return outcome;
+        }
     };
 
     let mut functions = Vec::new();
-    for (name, definition) in module.exported_function_definitions() {
-        if !definition.param_types().is_empty() {
-            continue;
-        }
+    for name in exports {
         let function = module
             .exported_function(&name)
             .expect("exported function should exist");
-        let outcome = function
-            .call_with_context(&call_ctx, &[])
-            .map_err(|err| err.to_string());
+        let outcome = match function.call_with_context(&call_ctx, &[]) {
+            Ok(results) => FunctionOutcome::Returned(results),
+            Err(err) => FunctionOutcome::Trapped {
+                cause: trap_cause_of(&err),
+                message: err.to_string(),
+            },
+        };
         functions.push(FunctionSnapshot { name, outcome });
     }
 
@@ -171,14 +218,92 @@ fn capture_execution(wasm: &[u8], secure_mode: bool, options: ParityOptions) -> 
             .unwrap_or_default()
     });
     let logs = logs.map(|events| events.lock().expect("log buffer poisoned").clone());
+    let trap_observations = trap_observations
+        .map(|events| events.lock().expect("trap observations poisoned").clone());
 
     let outcome = ExecutionSnapshot::Executed {
         functions,
         memory,
         logs,
+        trap_observations,
     };
     runtime.close(&ctx).expect("runtime close should succeed");
     outcome
+}
+
+fn build_call_context(
+    options: &CaptureOptions,
+    logs: Option<Arc<Mutex<Vec<String>>>>,
+    trap_observations: Option<Arc<Mutex<Vec<TrapSnapshot>>>>,
+) -> Context {
+    let mut ctx = Context::default();
+
+    if options.attach_yielder {
+        ctx = with_yielder(&ctx);
+    }
+    if options.deny_yields {
+        ctx = with_yield_policy(&ctx, deny_all_yields);
+    }
+    if let Some(events) = logs {
+        ctx = with_function_listener_factory(
+            &ctx,
+            RecordingFactory {
+                events: events.clone(),
+            },
+        );
+    }
+    if let Some(observations) = trap_observations {
+        ctx = with_trap_observer(&ctx, move |_ctx: &Context, observation: TrapObservation| {
+            observations
+                .lock()
+                .expect("trap observations poisoned")
+                .push(TrapSnapshot {
+                    module_name: observation.module.name().map(str::to_string),
+                    cause: observation.cause,
+                    message: observation.err.to_string(),
+                });
+        });
+    }
+
+    ctx
+}
+
+fn selected_exports(module: &Module, options: &CaptureOptions) -> std::result::Result<Vec<String>, String> {
+    if let Some(export_name) = &options.export_name {
+        let definitions = module.exported_function_definitions();
+        let Some(definition) = definitions.get(export_name) else {
+            return Err(format!("missing exported function: {export_name}"));
+        };
+        if !definition.param_types().is_empty() {
+            return Err(format!(
+                "exported function {export_name} requires {} params",
+                definition.param_types().len()
+            ));
+        }
+        return Ok(vec![export_name.clone()]);
+    }
+
+    let mut exports = module
+        .exported_function_definitions()
+        .into_iter()
+        .filter_map(|(name, definition)| definition.param_types().is_empty().then_some(name))
+        .collect::<Vec<_>>();
+    exports.sort();
+    Ok(exports)
+}
+
+fn deny_all_yields(_ctx: &Context, _request: &YieldPolicyRequest) -> bool {
+    false
+}
+
+impl From<ParityOptions> for CaptureOptions {
+    fn from(value: ParityOptions) -> Self {
+        Self {
+            check_memory: value.check_memory,
+            check_logging: value.check_logging,
+            ..Self::default()
+        }
+    }
 }
 
 struct RecordingFactory {

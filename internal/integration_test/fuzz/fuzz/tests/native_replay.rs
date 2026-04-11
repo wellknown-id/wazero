@@ -1,11 +1,13 @@
 use std::{env, fs};
 
 use wazero_fuzz_fuzz::{
-    replay_native_parity, replay_validation, run_native_parity, run_validation, ParityOptions,
+    replay_native_parity, replay_native_trap_parity, replay_validation, run_native_parity,
+    run_validation, ParityOptions,
 };
 
 const FAC_WASM: &[u8] = include_bytes!("../../../../../testdata/fac.wasm");
 const MEM_GROW_WASM: &[u8] = include_bytes!("../../../../../testdata/mem_grow.wasm");
+const OOB_LOAD_WASM: &[u8] = include_bytes!("../../../../../testdata/oob_load.wasm");
 const FUZZ_TEST_WASM: &[u8] = include_bytes!("../../wazerolib/testdata/test.wasm");
 
 #[test]
@@ -31,6 +33,11 @@ fn known_modules_replay_under_native_parity() {
             check_logging: true,
         },
     );
+}
+
+#[test]
+fn known_trap_fixture_replays_with_observer_capture() {
+    replay_native_trap_parity(OOB_LOAD_WASM, "oob");
 }
 
 #[test]
