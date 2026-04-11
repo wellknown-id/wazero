@@ -1508,6 +1508,21 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
         )
     };
 
+    let total_table_count = module_shape
+        .import_table_count
+        .checked_add(module_shape.local_table_count)
+        .ok_or_else(|| {
+            AotMetadataError::InvalidHeader("aot metadata: invalid table count".to_string())
+        })?;
+    if element_segments
+        .iter()
+        .any(|element| element.table_index >= total_table_count)
+    {
+        return Err(AotMetadataError::InvalidHeader(
+            "aot metadata: invalid element table index".to_string(),
+        ));
+    }
+
     Ok(AotCompiledMetadata {
         target: AotTarget {
             architecture,
