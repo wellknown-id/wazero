@@ -880,6 +880,38 @@ fn interpreter_unaligned_atomic_trap_notifies_observer() {
 }
 
 #[test]
+fn compiled_oob_trap_notifies_observer() {
+    if !razero_platform::compiler_supported()
+        || !cfg!(target_os = "linux")
+        || !cfg!(any(target_arch = "x86_64", target_arch = "aarch64"))
+    {
+        return;
+    }
+
+    let runtime = Runtime::with_config(RuntimeConfig::new_compiler().with_secure_mode(true));
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let guest = runtime
+        .instantiate_binary(OOB_LOAD_WASM, ModuleConfig::new())
+        .unwrap();
+    let ctx = with_trap_observer(
+        &Context::default(),
+        record_trap_observations(observations.clone()),
+    );
+
+    let err = guest
+        .exported_function("oob")
+        .unwrap()
+        .call_with_context(&ctx, &[])
+        .unwrap_err();
+
+    assert_eq!(Some(TrapCause::MemoryFault), trap_cause_of(&err));
+    assert_eq!(
+        vec![(TrapCause::MemoryFault, "memory fault".to_string())],
+        *observations.lock().expect("trap observations poisoned")
+    );
+}
+
+#[test]
 fn snapshot_restore_within_nested_invocation_overrides_result() {
     let runtime = Runtime::new();
     let sidechannel = Arc::new(AtomicI64::new(0));
