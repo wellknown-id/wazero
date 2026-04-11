@@ -13,12 +13,13 @@ use razero::{
     with_function_listener_factory, with_host_call_policy, with_host_call_policy_observer,
     with_import_resolver, with_import_resolver_acl, with_import_resolver_config,
     with_import_resolver_observer, with_memory_allocator, with_snapshotter, with_trap_observer,
-    with_yield_policy, with_yield_policy_observer, with_yielder, Context, FuelEvent,
-    FuelObservation, FunctionDefinition, FunctionListenerFn, HostCallPolicyDecision,
-    HostCallPolicyObservation, HostCallPolicyRequest, ImportACL, ImportResolverConfig,
-    ImportResolverEvent, ImportResolverObservation, LinearMemory, MemoryDefinition, ModuleConfig,
-    Runtime, RuntimeConfig, SimpleFuelController, StackFrame, StackIterator, TrapCause,
-    TrapObservation, ValueType, YieldPolicyDecision, YieldPolicyObservation,
+    with_yield_policy, with_yield_policy_observer, with_yielder, AggregatingFuelController,
+    Context, FuelEvent, FuelObservation, FunctionDefinition, FunctionListenerFn,
+    HostCallPolicyDecision, HostCallPolicyObservation, HostCallPolicyRequest, ImportACL,
+    ImportResolverConfig, ImportResolverEvent, ImportResolverObservation, LinearMemory,
+    MemoryDefinition, ModuleConfig, Runtime, RuntimeConfig, SimpleFuelController, StackFrame,
+    StackIterator, TrapCause, TrapObservation, ValueType, YieldPolicyDecision,
+    YieldPolicyObservation,
 };
 
 const SIMPLE_EXPORT_WASM: &[u8] = &[
@@ -141,6 +142,15 @@ fn simple_fuel_controller_total_consumed_round_trips_through_public_surface() {
 
     razero::FuelController::consumed(&controller, 25);
     assert_eq!(150, controller.total_consumed());
+}
+
+#[test]
+fn aggregating_fuel_controller_total_consumed_round_trips_through_public_surface() {
+    let controller = AggregatingFuelController::new(None, 1_000);
+    assert_eq!(0, controller.total_consumed());
+
+    razero::FuelController::consumed(&controller, 100);
+    assert_eq!(100, controller.total_consumed());
 }
 
 #[test]
