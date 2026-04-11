@@ -15,10 +15,10 @@ use razero::{
     with_import_resolver_observer, with_memory_allocator, with_snapshotter, with_trap_observer,
     with_yield_policy, with_yield_policy_observer, with_yielder, Context, FuelEvent,
     FuelObservation, FunctionDefinition, FunctionListenerFn, HostCallPolicyDecision,
-    HostCallPolicyObservation, ImportACL, ImportResolverConfig, ImportResolverEvent,
-    ImportResolverObservation, LinearMemory, ModuleConfig, Runtime, RuntimeConfig,
-    SimpleFuelController, StackFrame, StackIterator, TrapCause, TrapObservation, ValueType,
-    YieldPolicyDecision, YieldPolicyObservation,
+    HostCallPolicyObservation, HostCallPolicyRequest, ImportACL, ImportResolverConfig,
+    ImportResolverEvent, ImportResolverObservation, LinearMemory, MemoryDefinition, ModuleConfig,
+    Runtime, RuntimeConfig, SimpleFuelController, StackFrame, StackIterator, TrapCause,
+    TrapObservation, ValueType, YieldPolicyDecision, YieldPolicyObservation,
 };
 
 const SIMPLE_EXPORT_WASM: &[u8] = &[
@@ -232,6 +232,31 @@ fn host_call_policy_round_trips_through_public_surface() {
         .with_host_call_policy(allow_host_calls)
         .host_call_policy()
         .is_some());
+}
+
+#[test]
+fn host_call_policy_request_builders_round_trip_through_public_surface() {
+    let function = FunctionDefinition::new("test_fn")
+        .with_module_name(Some("guest".to_string()))
+        .with_export_name("test")
+        .with_signature(vec![ValueType::I32], vec![ValueType::I64])
+        .with_import("env", "call");
+    let memory = MemoryDefinition::new(1, Some(2))
+        .with_module_name(Some("guest".to_string()))
+        .with_export_name("memory")
+        .with_import("env", "memory");
+    let request = HostCallPolicyRequest::new()
+        .with_function(function)
+        .with_memory(memory.clone())
+        .with_caller_module_name("caller");
+
+    assert_eq!(Some("caller"), request.caller_module_name());
+    assert_eq!(Some(&memory), request.memory());
+    assert_eq!(Some("test_fn"), request.name());
+    assert_eq!(Some("guest"), request.module_name());
+    assert_eq!(Some(("env", "call")), request.import());
+    assert_eq!(1, request.param_count());
+    assert_eq!(1, request.result_count());
 }
 
 #[test]
