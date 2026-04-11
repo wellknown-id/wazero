@@ -4,11 +4,12 @@ use std::sync::{
 };
 
 use razero::{
-    get_compilation_workers, get_function_listener_factory, get_host_call_policy,
-    get_host_call_policy_observer, get_import_resolver, get_import_resolver_observer,
-    get_trap_observer, get_yield_policy, get_yield_policy_observer, with_compilation_workers,
-    with_function_listener_factory, with_host_call_policy, with_host_call_policy_observer,
-    with_import_resolver, with_import_resolver_observer, with_trap_observer, with_yield_policy,
+    get_close_notifier, get_compilation_workers, get_function_listener_factory,
+    get_host_call_policy, get_host_call_policy_observer, get_import_resolver,
+    get_import_resolver_observer, get_trap_observer, get_yield_policy, get_yield_policy_observer,
+    with_close_notifier, with_compilation_workers, with_function_listener_factory,
+    with_host_call_policy, with_host_call_policy_observer, with_import_resolver,
+    with_import_resolver_observer, with_trap_observer, with_yield_policy,
     with_yield_policy_observer, Context, HostCallPolicyDecision, HostCallPolicyObservation,
     ImportResolverEvent, ImportResolverObservation, ModuleConfig, Runtime, RuntimeConfig,
     TrapCause, TrapObservation, YieldPolicyDecision, YieldPolicyObservation,
@@ -65,6 +66,21 @@ fn compilation_workers_drive_context_aware_compile_paths() {
 fn close_on_context_done_round_trips_in_runtime_config() {
     let config = RuntimeConfig::new().with_close_on_context_done(true);
     assert!(config.close_on_context_done());
+}
+
+#[test]
+fn close_notifier_round_trips_through_public_surface() {
+    let exit_code = Arc::new(AtomicU32::new(0));
+    let ctx = with_close_notifier(&Context::default(), {
+        let exit_code = exit_code.clone();
+        move |_ctx: &Context, code: u32| {
+            exit_code.store(code, Ordering::SeqCst);
+        }
+    });
+    let notifier = get_close_notifier(&ctx).expect("notifier should be present");
+    notifier.close_notify(&ctx, 42);
+
+    assert_eq!(42, exit_code.load(Ordering::SeqCst));
 }
 
 #[test]
