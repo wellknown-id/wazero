@@ -1593,6 +1593,11 @@ pub fn deserialize_aot_metadata(bytes: &[u8]) -> Result<AotCompiledMetadata, Aot
             "aot metadata: element segment count mismatch".to_string(),
         ));
     }
+    if module_shape.local_function_count as usize != functions.len() {
+        return Err(AotMetadataError::InvalidHeader(
+            "aot metadata: function count mismatch".to_string(),
+        ));
+    }
 
     Ok(AotCompiledMetadata {
         target: AotTarget {
@@ -2053,7 +2058,7 @@ mod tests {
                 import_global_count: 1,
                 import_memory_count: 0,
                 import_table_count: 1,
-                local_function_count: 2,
+                local_function_count: 1,
                 local_global_count: 1,
                 local_table_count: 1,
                 has_local_memory: true,
@@ -2230,6 +2235,10 @@ mod tests {
                 executable_offset: 8,
                 executable_len: 4,
             }],
+            module_shape: AotModuleShapeMetadata {
+                local_function_count: 1,
+                ..AotModuleShapeMetadata::default()
+            },
             ..AotCompiledMetadata::default()
         };
 
