@@ -109,8 +109,8 @@ These rules cover the currently shipped observer/policy/config surfaces:
 - `TrapObserver` fires only for recognized runtime traps (for example
   `policy_denied`, `fuel_exhausted`, memory faults). It does not report plain
   host panics, and `Resumer::cancel()` is not a trap.
-- `FunctionListener.Abort` runs during stack unwinding before trap and terminal
-  fuel notifications are emitted.
+- On the current denied host-import path, `TrapObserver` fires before the
+  caller's `FunctionListener.Abort` during unwinding.
 
 ```rust
 let call_ctx = experimental::with_trap_observer(
