@@ -2944,6 +2944,65 @@ fn listener_abort_runs_without_after_on_host_error() {
 }
 
 #[test]
+fn allowed_host_import_reports_policy_without_separate_import_listener_callbacks() {
+    let runtime = Runtime::new();
+    runtime
+        .new_host_module_builder("env")
+        .new_function_builder()
+        .with_func(
+            |_ctx, _module, params| Ok(vec![params[0] + 1]),
+            &[ValueType::I32],
+            &[ValueType::I32],
+        )
+        .with_name("inc")
+        .export("inc")
+        .instantiate(&Context::default())
+        .unwrap();
+    let guest = runtime
+        .instantiate_binary(
+            GUEST_IMPORT_INC_WASM,
+            ModuleConfig::new().with_name("guest"),
+        )
+        .unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let base_ctx = with_function_listener_factory(
+        &Context::default(),
+        AbortRecordingFactory {
+            events: events.clone(),
+        },
+    );
+    let policy_ctx = with_host_call_policy(&base_ctx, allow_all_host_calls);
+    let call_ctx = with_host_call_policy_observer(&policy_ctx, {
+        let events = events.clone();
+        move |_ctx: &Context, observation: HostCallPolicyObservation| {
+            events.lock().expect("events poisoned").push(format!(
+                "policy:{}:{}:{}:{:?}",
+                observation.module.name().unwrap_or("<none>"),
+                observation.request.name().unwrap_or("<none>"),
+                observation.request.caller_module_name().unwrap_or("<none>"),
+                observation.decision
+            ));
+        }
+    });
+
+    let results = guest
+        .exported_function("run")
+        .unwrap()
+        .call_with_context(&call_ctx, &[41])
+        .unwrap();
+
+    assert_eq!(vec![42], results);
+    assert_eq!(
+        vec![
+            "before:run".to_string(),
+            "policy:guest:inc:guest:Allowed".to_string(),
+            "after:run".to_string(),
+        ],
+        *events.lock().expect("events poisoned")
+    );
+}
+
+#[test]
 fn denied_host_import_aborts_only_caller_listener() {
     let runtime = Runtime::new();
     runtime
