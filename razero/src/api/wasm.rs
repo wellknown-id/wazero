@@ -1062,6 +1062,21 @@ impl Function {
                     );
                 }
             };
+        let notify_fuel_event = |event: FuelEvent| {
+            let Some(remaining) = &fuel_remaining else {
+                return;
+            };
+            let remaining = remaining.load(std::sync::atomic::Ordering::SeqCst);
+            notify_fuel_observer(
+                &ctx,
+                &module,
+                event,
+                budget,
+                budget - remaining,
+                remaining,
+                0,
+            );
+        };
 
         match outcome {
             Ok(Ok(mut results)) => {
@@ -1072,21 +1087,11 @@ impl Function {
                     listener.after(&invocation_ctx, &module, &self.inner.definition, &results);
                 }
                 consume_fuel(&ctx.fuel_controller, &fuel_remaining);
+                notify_fuel_event(FuelEvent::Consumed);
                 if fuel_remaining.as_ref().is_some_and(|remaining| {
                     remaining.load(std::sync::atomic::Ordering::SeqCst) < 0
                 }) {
-                    if let Some(remaining) = &fuel_remaining {
-                        let remaining = remaining.load(std::sync::atomic::Ordering::SeqCst);
-                        notify_fuel_observer(
-                            &ctx,
-                            &module,
-                            FuelEvent::Exhausted,
-                            budget,
-                            budget - remaining,
-                            remaining,
-                            0,
-                        );
-                    }
+                    notify_fuel_event(FuelEvent::Exhausted);
                     snapshot_active.store(false, std::sync::atomic::Ordering::SeqCst);
                     return Err(RuntimeError::new("fuel exhausted"));
                 }
@@ -1098,12 +1103,14 @@ impl Function {
                     listener.abort(&invocation_ctx, &module, &self.inner.definition, &error);
                 }
                 consume_fuel(&ctx.fuel_controller, &fuel_remaining);
+                notify_fuel_event(FuelEvent::Consumed);
                 snapshot_active.store(false, std::sync::atomic::Ordering::SeqCst);
                 Err(error)
             }
             Err(payload) => {
                 if is_yield_suspend_payload(payload.as_ref()) {
                     consume_fuel(&ctx.fuel_controller, &fuel_remaining);
+                    notify_fuel_event(FuelEvent::Consumed);
                     resumer.note_fuel_checkpoint();
                     if let Some(suspended) = take_suspended_invocation() {
                         resumer.install_suspended_invocation(suspended);

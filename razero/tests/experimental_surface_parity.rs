@@ -155,7 +155,7 @@ fn aggregating_fuel_controller_total_consumed_round_trips_through_public_surface
 }
 
 #[test]
-fn fuel_observer_public_surface_emits_budgeted_notifications() {
+fn fuel_observer_public_surface_emits_budgeted_and_consumed_notifications() {
     let runtime = Runtime::new();
     let module = runtime
         .new_host_module_builder("example")
@@ -197,7 +197,10 @@ fn fuel_observer_public_surface_emits_budgeted_notifications() {
             .unwrap()
     );
     assert_eq!(
-        vec![(Some("example".to_string()), FuelEvent::Budgeted, 5, 0, 5, 0)],
+        vec![
+            (Some("example".to_string()), FuelEvent::Budgeted, 5, 0, 5, 0),
+            (Some("example".to_string()), FuelEvent::Consumed, 5, 1, 4, 0),
+        ],
         *observations.lock().expect("fuel observations poisoned")
     );
 }
@@ -250,6 +253,7 @@ fn fuel_observer_public_surface_emits_exhausted_notifications() {
     assert_eq!(
         vec![
             (FuelEvent::Budgeted, 1, 0, 1),
+            (FuelEvent::Consumed, 1, 3, -2),
             (FuelEvent::Exhausted, 1, 3, -2),
         ],
         *observations.lock().expect("fuel observations poisoned")
