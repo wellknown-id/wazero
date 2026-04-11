@@ -29,6 +29,32 @@ const SIMPLE_EXPORT_WASM: &[u8] = &[
     0x02, 0x01, 0x00, 0x07, 0x05, 0x01, 0x01, b'f', 0x00, 0x00, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x41,
     0x2a, 0x0b,
 ];
+const IMPORTED_GLOBAL_HOST_WASM: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x06, 0x06, 0x01, 0x7e, 0x01, 0x42, 0x2a, 0x0b,
+    0x07, 0x0b, 0x01, 0x07, b'c', b'o', b'u', b'n', b't', b'e', b'r', 0x03, 0x00,
+];
+const IMPORTED_GLOBAL_GUEST_WASM: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x02, 0x10, 0x01, 0x03, b'e', b'n', b'v', 0x07,
+    b'c', b'o', b'u', b'n', b't', b'e', b'r', 0x03, 0x7e, 0x01,
+];
+const IMPORTED_TABLE_HOST_WASM: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x04, 0x05, 0x01, 0x70, 0x01, 0x01, 0x02, 0x07,
+    0x09, 0x01, 0x05, b't', b'a', b'b', b'l', b'e', 0x01, 0x00,
+];
+const IMPORTED_TABLE_GUEST_WASM: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x02, 0x10, 0x01, 0x03, b'e', b'n', b'v', 0x05,
+    b't', b'a', b'b', b'l', b'e', 0x01, 0x70, 0x01, 0x01, 0x02,
+];
+const EXPORTED_GLOBAL_WASM: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x06, 0x06, 0x01, 0x7e, 0x01, 0x42, 0x2a, 0x0b,
+    0x07, 0x13, 0x02, 0x07, b'c', b'o', b'u', b'n', b't', b'e', b'r', 0x03, 0x00, 0x05, b'a', b'l',
+    b'i', b'a', b's', 0x03, 0x00,
+];
+const EXPORTED_TABLE_WASM: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x04, 0x05, 0x01, 0x70, 0x01, 0x01, 0x02, 0x07,
+    0x11, 0x02, 0x05, b't', b'a', b'b', b'l', b'e', 0x01, 0x00, 0x05, b'a', b'l', b'i', b'a', b's',
+    0x01, 0x00,
+];
 const YIELD_WASM: &[u8] = include_bytes!("../../experimental/testdata/yield.wasm");
 
 fn allow_host_calls(_ctx: &Context, _request: &razero::HostCallPolicyRequest) -> bool {
@@ -405,6 +431,106 @@ fn memory_is_guard_page_backed_reflects_instance_memory_backing() {
 }
 
 #[test]
+fn module_imported_global_definitions_round_trip_through_public_surface() {
+    let runtime = Runtime::new();
+    runtime
+        .instantiate_binary(
+            IMPORTED_GLOBAL_HOST_WASM,
+            ModuleConfig::new().with_name("env"),
+        )
+        .unwrap();
+
+    let guest = runtime
+        .instantiate_binary(
+            IMPORTED_GLOBAL_GUEST_WASM,
+            ModuleConfig::new().with_name("guest"),
+        )
+        .unwrap();
+
+    let imported = guest.imported_global_definitions();
+    assert_eq!(1, imported.len());
+    let definition = &imported[0];
+    assert_eq!(ValueType::I64, definition.value_type());
+    assert!(definition.is_mutable());
+    assert_eq!(None, definition.module_name());
+    assert_eq!(Some(("env", "counter")), definition.import());
+    assert!(definition.export_names().is_empty());
+}
+
+#[test]
+fn module_imported_table_definitions_round_trip_through_public_surface() {
+    let runtime = Runtime::new();
+    runtime
+        .instantiate_binary(
+            IMPORTED_TABLE_HOST_WASM,
+            ModuleConfig::new().with_name("env"),
+        )
+        .unwrap();
+
+    let guest = runtime
+        .instantiate_binary(
+            IMPORTED_TABLE_GUEST_WASM,
+            ModuleConfig::new().with_name("guest"),
+        )
+        .unwrap();
+
+    let imported = guest.imported_table_definitions();
+    assert_eq!(1, imported.len());
+    let definition = &imported[0];
+    assert_eq!(ValueType::FuncRef, definition.ref_type());
+    assert_eq!(1, definition.minimum());
+    assert_eq!(Some(2), definition.maximum());
+    assert_eq!(None, definition.module_name());
+    assert_eq!(Some(("env", "table")), definition.import());
+    assert!(definition.export_names().is_empty());
+}
+
+#[test]
+fn module_exported_global_definitions_round_trip_through_public_surface() {
+    let runtime = Runtime::new();
+    let guest = runtime
+        .instantiate_binary(EXPORTED_GLOBAL_WASM, ModuleConfig::new().with_name("guest"))
+        .unwrap();
+
+    let exported = guest.exported_global_definitions();
+    assert_eq!(2, exported.len());
+    let counter = exported.get("counter").unwrap();
+    let alias = exported.get("alias").unwrap();
+    assert_eq!(ValueType::I64, counter.value_type());
+    assert!(counter.is_mutable());
+    assert_eq!(Some("guest"), counter.module_name());
+    assert_eq!(None, counter.import());
+    assert_eq!(
+        &["counter".to_string(), "alias".to_string()],
+        counter.export_names()
+    );
+    assert_eq!(counter, alias);
+}
+
+#[test]
+fn module_exported_table_definitions_round_trip_through_public_surface() {
+    let runtime = Runtime::new();
+    let guest = runtime
+        .instantiate_binary(EXPORTED_TABLE_WASM, ModuleConfig::new().with_name("guest"))
+        .unwrap();
+
+    let exported = guest.exported_table_definitions();
+    assert_eq!(2, exported.len());
+    let table = exported.get("table").unwrap();
+    let alias = exported.get("alias").unwrap();
+    assert_eq!(ValueType::FuncRef, table.ref_type());
+    assert_eq!(1, table.minimum());
+    assert_eq!(Some(2), table.maximum());
+    assert_eq!(Some("guest"), table.module_name());
+    assert_eq!(None, table.import());
+    assert_eq!(
+        &["table".to_string(), "alias".to_string()],
+        table.export_names()
+    );
+    assert_eq!(table, alias);
+}
+
+#[test]
 fn linear_memory_is_empty_tracks_length() {
     let mut memory = LinearMemory::new(8, 16);
     assert!(!memory.is_empty());
@@ -613,7 +739,10 @@ fn host_call_policy_request_memory_metadata_round_trip_through_public_surface() 
         Some(("env", "memory")),
         request.memory().and_then(MemoryDefinition::import)
     );
-    assert_eq!(Some(1), request.memory().map(MemoryDefinition::minimum_pages));
+    assert_eq!(
+        Some(1),
+        request.memory().map(MemoryDefinition::minimum_pages)
+    );
     assert_eq!(
         Some(Some(2)),
         request.memory().map(MemoryDefinition::maximum_pages)
@@ -844,7 +973,10 @@ fn yield_policy_request_memory_metadata_round_trip_through_public_surface() {
         Some(("env", "memory")),
         request.memory().and_then(MemoryDefinition::import)
     );
-    assert_eq!(Some(1), request.memory().map(MemoryDefinition::minimum_pages));
+    assert_eq!(
+        Some(1),
+        request.memory().map(MemoryDefinition::minimum_pages)
+    );
     assert_eq!(
         Some(Some(2)),
         request.memory().map(MemoryDefinition::maximum_pages)
