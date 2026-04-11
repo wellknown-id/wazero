@@ -11,12 +11,14 @@ use std::{
 use razero::{
     add_fuel, get_fuel_controller, get_import_resolver, get_snapshotter, get_yielder,
     remaining_fuel, trap_cause_of, with_fuel_controller, with_fuel_observer,
-    with_function_listener_factory, with_import_resolver, with_import_resolver_config,
-    with_import_resolver_observer, with_snapshotter, with_trap_observer, with_yield_observer,
-    with_yield_policy, with_yielder, Context, CoreFeatures, FuelEvent, FuelObservation,
-    FunctionDefinition, FunctionListener, FunctionListenerFactory, ImportACL, ImportResolverConfig,
-    ImportResolverEvent, ImportResolverObservation, Module, ModuleConfig, Runtime, RuntimeConfig,
-    RuntimeError, Snapshot, TrapCause, ValueType, YieldError, YieldEvent, YieldObservation,
+    with_function_listener_factory, with_host_call_policy, with_host_call_policy_observer,
+    with_import_resolver, with_import_resolver_config, with_import_resolver_observer,
+    with_snapshotter, with_trap_observer, with_yield_observer, with_yield_policy, with_yielder,
+    Context, CoreFeatures, FuelEvent, FuelObservation, FunctionDefinition, FunctionListener,
+    FunctionListenerFactory, HostCallPolicyDecision, HostCallPolicyObservation,
+    HostCallPolicyRequest, ImportACL, ImportResolverConfig, ImportResolverEvent,
+    ImportResolverObservation, Module, ModuleConfig, Runtime, RuntimeConfig, RuntimeError,
+    Snapshot, TrapCause, ValueType, YieldError, YieldEvent, YieldObservation,
     CORE_FEATURES_THREADS, ERR_YIELDED,
 };
 
@@ -124,6 +126,14 @@ fn allow_all_yields(_ctx: &Context, _request: &razero::YieldPolicyRequest) -> bo
     true
 }
 
+fn allow_all_host_calls(_ctx: &Context, _request: &HostCallPolicyRequest) -> bool {
+    true
+}
+
+fn deny_hook_impl_host_call(_ctx: &Context, request: &HostCallPolicyRequest) -> bool {
+    request.name() != Some("hook_impl")
+}
+
 fn record_trap_observations(
     observations: Arc<Mutex<Vec<(TrapCause, String)>>>,
 ) -> impl Fn(&Context, razero::TrapObservation) + Send + Sync + 'static {
@@ -146,6 +156,31 @@ fn record_yield_observations(
                 observation.event,
                 observation.yield_count,
                 observation.expected_host_results,
+            ));
+    }
+}
+
+fn record_host_call_policy_observations(
+    observations: Arc<
+        Mutex<
+            Vec<(
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                HostCallPolicyDecision,
+            )>,
+        >,
+    >,
+) -> impl Fn(&Context, HostCallPolicyObservation) + Send + Sync + 'static {
+    move |_ctx: &Context, observation: HostCallPolicyObservation| {
+        observations
+            .lock()
+            .expect("host call policy observations poisoned")
+            .push((
+                observation.module.name().map(str::to_string),
+                observation.request.name().map(str::to_string),
+                observation.request.caller_module_name().map(str::to_string),
+                observation.decision,
             ));
     }
 }
@@ -447,6 +482,110 @@ fn yield_policy_denial_notifies_trap_observer_via_public_resume_path() {
             "policy denied: cooperative yield".to_string()
         )],
         *observations.lock().expect("trap observations poisoned")
+    );
+}
+
+#[test]
+fn host_call_policy_observer_reports_direct_host_export_denial_before_trap() {
+    let runtime = Runtime::new();
+    let host_call_observations = Arc::new(Mutex::new(Vec::new()));
+    let trap_observations = Arc::new(Mutex::new(Vec::new()));
+    let module = runtime
+        .new_host_module_builder("env")
+        .new_function_builder()
+        .with_func(
+            |_ctx, _module, params| Ok(vec![params[0]]),
+            &[ValueType::I32],
+            &[ValueType::I32],
+        )
+        .with_name("hook_impl")
+        .export("hook")
+        .instantiate(&Context::default())
+        .unwrap();
+
+    let ctx = with_trap_observer(
+        &with_host_call_policy_observer(
+            &with_host_call_policy(&Context::default(), deny_hook_impl_host_call),
+            record_host_call_policy_observations(host_call_observations.clone()),
+        ),
+        record_trap_observations(trap_observations.clone()),
+    );
+
+    let err = module
+        .exported_function("hook")
+        .unwrap()
+        .call_with_context(&ctx, &[1])
+        .unwrap_err();
+
+    assert_eq!("policy denied: host call", err.to_string());
+    assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+    assert_eq!(
+        vec![(
+            Some("env".to_string()),
+            Some("hook_impl".to_string()),
+            Some("env".to_string()),
+            HostCallPolicyDecision::Denied,
+        )],
+        *host_call_observations
+            .lock()
+            .expect("host call policy observations poisoned")
+    );
+    assert_eq!(
+        vec![(
+            TrapCause::PolicyDenied,
+            "policy denied: host call".to_string()
+        )],
+        *trap_observations
+            .lock()
+            .expect("trap observations poisoned")
+    );
+}
+
+#[test]
+fn host_call_policy_observer_reports_allowed_guest_import_metadata() {
+    let runtime = Runtime::new();
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    runtime
+        .new_host_module_builder("env")
+        .new_function_builder()
+        .with_func(
+            |_ctx, _module, params| Ok(vec![params[0] + 1]),
+            &[ValueType::I32],
+            &[ValueType::I32],
+        )
+        .with_name("inc")
+        .export("inc")
+        .instantiate(&Context::default())
+        .unwrap();
+    let guest = runtime
+        .instantiate_binary(
+            GUEST_IMPORT_INC_WASM,
+            ModuleConfig::new().with_name("guest"),
+        )
+        .unwrap();
+    let ctx = with_host_call_policy_observer(
+        &with_host_call_policy(&Context::default(), allow_all_host_calls),
+        record_host_call_policy_observations(observations.clone()),
+    );
+
+    assert_eq!(
+        vec![42],
+        guest
+            .exported_function("run")
+            .unwrap()
+            .call_with_context(&ctx, &[41])
+            .unwrap()
+    );
+    assert_eq!(
+        vec![(
+            Some("guest".to_string()),
+            Some("inc".to_string()),
+            Some("guest".to_string()),
+            HostCallPolicyDecision::Allowed,
+        )],
+        *observations
+            .lock()
+            .expect("host call policy observations poisoned")
     );
 }
 

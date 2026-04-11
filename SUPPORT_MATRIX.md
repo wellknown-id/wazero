@@ -90,6 +90,9 @@ These rules cover the currently shipped observer/policy/config surfaces:
      host function.
 - `HostCallPolicy` therefore runs before the host function executes and before
   any yield attempt. If it denies the call, `YieldPolicy` is never consulted.
+- `HostCallPolicyObserver`, when present, reports the allow/deny decision with
+  the resolved host-function name and caller-module metadata before any
+  resulting `TrapObserver` notification for denied host calls.
 - `FunctionListener.Before` for an imported host function runs only after
   `HostCallPolicy` allows that call. A denied host import therefore reports the
   policy decision and aborts only the caller listener.
