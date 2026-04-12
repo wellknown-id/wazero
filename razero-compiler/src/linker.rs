@@ -790,12 +790,30 @@ fn validate_hello_host_metadata(metadata: &AotCompiledMetadata) -> Result<(), Na
 }
 
 fn active_data_offset(segment: &AotDataSegmentMetadata) -> Result<usize, NativeLinkError> {
+    let mut reads_globals = false;
+    let mut uses_ref_func = false;
     let (values, ty) = evaluate_const_expr(
         &ConstExpr::new(segment.offset_expression.clone()),
-        |_index| unreachable!("packaged host-import data offsets must not read globals"),
-        |_index| unreachable!("packaged host-import data offsets must not use ref.func"),
+        |_index| {
+            reads_globals = true;
+            Ok((ValueType::I32, 0, 0))
+        },
+        |_index| {
+            uses_ref_func = true;
+            Ok(Some(0))
+        },
     )
     .map_err(|err| NativeLinkError::new(err.to_string()))?;
+    if reads_globals {
+        return Err(NativeLinkError::new(
+            "packaged host-import data offsets must not read globals",
+        ));
+    }
+    if uses_ref_func {
+        return Err(NativeLinkError::new(
+            "packaged host-import data offsets must not use ref.func",
+        ));
+    }
     match ty {
         ValueType::I32 | ValueType::I64 => Ok(values.first().copied().unwrap_or_default() as usize),
         _ => Err(NativeLinkError::new(
@@ -2161,6 +2179,52 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "read reference type for ref.null: unexpected end of constant expression"
+        );
+    }
+
+    #[test]
+    fn link_hello_host_executable_rejects_global_get_data_offset_expression() {
+        let module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
+        let mut metadata = compile_module_metadata(&module);
+        let segment = metadata
+            .data_segments
+            .first_mut()
+            .expect("hello-host should include one data segment");
+        segment.offset_expression = vec![0x23, 0x00, 0x0b];
+
+        let err = super::link_hello_host_executable(
+            PathBuf::from("target/hello-host-global-get-offset"),
+            &NativeLinkModule::new("hello-host", Vec::new(), serialize_aot_metadata(&metadata)),
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "packaged host-import data offsets must not read globals"
+        );
+    }
+
+    #[test]
+    fn link_hello_host_executable_rejects_ref_func_data_offset_expression() {
+        let module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
+        let mut metadata = compile_module_metadata(&module);
+        let segment = metadata
+            .data_segments
+            .first_mut()
+            .expect("hello-host should include one data segment");
+        segment.offset_expression = vec![0xd2, 0x00, 0x0b];
+
+        let err = super::link_hello_host_executable(
+            PathBuf::from("target/hello-host-ref-func-offset"),
+            &NativeLinkModule::new("hello-host", Vec::new(), serialize_aot_metadata(&metadata)),
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "packaged host-import data offsets must not use ref.func"
         );
     }
 
