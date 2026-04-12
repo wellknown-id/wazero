@@ -1816,6 +1816,106 @@ mod tests {
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     #[test]
+    fn linked_module_rejects_inconsistent_table_counts() {
+        let mut engine = CompilerEngine::new();
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            function_section: vec![0],
+            table_section: vec![Table {
+                min: 1,
+                max: Some(1),
+                ty: RefType::FUNCREF,
+            }],
+            code_section: vec![Code {
+                body: vec![0x41, 0x07, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            ..Module::default()
+        };
+
+        engine.compile_module(&module).unwrap();
+        let compiled = engine.compiled_module(&module).unwrap();
+        let mut metadata = compiled.aot.clone();
+        metadata.module_shape.local_table_count = 0;
+        let err = LinkedModule::from_metadata_and_first_local_function(
+            metadata,
+            compiled.function_ptr(0).unwrap(),
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("linked runtime metadata has inconsistent table counts"));
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn linked_module_rejects_inconsistent_element_segment_counts() {
+        let mut engine = CompilerEngine::new();
+        let module = Module {
+            type_section: vec![
+                function_type(&[], &[ValueType::I32]),
+                function_type(&[], &[]),
+            ],
+            function_section: vec![0, 1],
+            table_section: vec![Table {
+                min: 1,
+                max: Some(1),
+                ty: RefType::FUNCREF,
+            }],
+            code_section: vec![
+                Code {
+                    body: vec![0x41, 0x07, 0x0b],
+                    ..Code::default()
+                },
+                Code {
+                    body: vec![0x0b],
+                    ..Code::default()
+                },
+            ],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            element_section: vec![ElementSegment {
+                offset_expr: ConstExpr::from_i32(0),
+                table_index: 0,
+                init: vec![ConstExpr::from_opcode(0xd2, &[1])],
+                ty: RefType::FUNCREF,
+                mode: ElementMode::Active,
+            }],
+            ..Module::default()
+        };
+
+        engine.compile_module(&module).unwrap();
+        let compiled = engine.compiled_module(&module).unwrap();
+        let mut metadata = compiled.aot.clone();
+        metadata.module_shape.element_segment_count = 0;
+        let err = LinkedModule::from_metadata_and_first_local_function(
+            metadata,
+            compiled.function_ptr(0).unwrap(),
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("linked runtime metadata has inconsistent element segment counts"));
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
     fn linked_module_rejects_missing_local_function_descriptors() {
         let mut engine = CompilerEngine::new();
         let module = Module {
