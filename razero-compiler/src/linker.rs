@@ -2119,6 +2119,52 @@ mod tests {
     }
 
     #[test]
+    fn link_hello_host_executable_rejects_invalid_data_offset_opcode() {
+        let module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
+        let mut metadata = compile_module_metadata(&module);
+        let segment = metadata
+            .data_segments
+            .first_mut()
+            .expect("hello-host should include one data segment");
+        segment.offset_expression = vec![0xff, 0x0b];
+
+        let err = super::link_hello_host_executable(
+            PathBuf::from("target/hello-host-invalid-data-offset-opcode"),
+            &NativeLinkModule::new("hello-host", Vec::new(), serialize_aot_metadata(&metadata)),
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "invalid opcode for const expression: 0xff"
+        );
+    }
+
+    #[test]
+    fn link_hello_host_executable_rejects_truncated_ref_null_data_offset() {
+        let module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
+        let mut metadata = compile_module_metadata(&module);
+        let segment = metadata
+            .data_segments
+            .first_mut()
+            .expect("hello-host should include one data segment");
+        segment.offset_expression = vec![0xd0];
+
+        let err = super::link_hello_host_executable(
+            PathBuf::from("target/hello-host-truncated-ref-null-offset"),
+            &NativeLinkModule::new("hello-host", Vec::new(), serialize_aot_metadata(&metadata)),
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "read reference type for ref.null: unexpected end of constant expression"
+        );
+    }
+
+    #[test]
     fn link_hello_host_executable_rejects_multiple_function_imports_via_packaged_host_validation() {
         let module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
         let mut metadata = compile_module_metadata(&module);

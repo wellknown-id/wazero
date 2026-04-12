@@ -190,9 +190,9 @@ that want a fully linked executable.
   sidecar metadata (including stale host-import type indexes), malformed
   host-import signatures, missing `run` exports, `run` exports that resolve to
   imports or missing type metadata, non-`() -> ()` `run` signatures, passive
-  data metadata rejected during sidecar decode, non-integer data offsets, plus
-  wrong import-count / missing-memory shapes that currently fail earlier
-  through the shared packaged-host validator.
+  data metadata rejected during sidecar decode, malformed or non-integer data
+  offsets, plus wrong import-count / missing-memory shapes that currently fail
+  earlier through the shared packaged-host validator.
 - [100%:ea77dc43] The current `hello-host` / packaged-host-import metadata
   validators now have targeted fail-closed coverage for missing host-import type
   metadata, generic packaged-host descriptor/target mismatches, plus `run`
