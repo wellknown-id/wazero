@@ -385,18 +385,22 @@ impl<I: Instr, B: Block<I>, F: Function<I, B>> Allocator<I, B, F> {
                 self.vs.clear();
                 instr.uses(&mut self.vs);
                 for use_ in self.vs.iter().copied() {
-                    if !use_.is_real_reg() {
-                        let state = self.state.get_or_allocate_vreg_state(use_);
-                        if !state.spilled {
-                            state.spilled = true;
-                            self.ss.push(use_.id());
-                        }
+                    if use_.is_real_reg() && !self.allocatable_set.has(use_.real_reg()) {
+                        continue;
+                    }
+                    let state = self.state.get_or_allocate_vreg_state(use_);
+                    if !state.spilled {
+                        state.spilled = true;
+                        self.ss.push(use_.id());
                     }
                 }
 
                 if def_is_phi {
                     if let Some(use_) = self.vs.last().copied() {
-                        if use_.valid() && use_.is_real_reg() {
+                        if use_.valid()
+                            && use_.is_real_reg()
+                            && self.allocatable_set.has(use_.real_reg())
+                        {
                             self.state.arg_real_regs.push(use_);
                         }
                     }
@@ -552,8 +556,17 @@ impl<I: Instr, B: Block<I>, F: Function<I, B>> Allocator<I, B, F> {
             self.state.reset_at(&pred_state);
         } else {
             assert!(blk.entry(), "at least one predecessor must be visited");
+            for &vreg in &live_ins {
+                if let Some(state) = self.state.get_vreg_state(vreg) {
+                    if state.v.is_real_reg() {
+                        self.state.use_real_reg(state.v.real_reg(), vreg);
+                    }
+                }
+            }
             for arg in self.state.arg_real_regs.clone() {
-                self.state.use_real_reg(arg.real_reg(), arg.id());
+                if !self.state.regs_in_use.has(arg.real_reg()) {
+                    self.state.use_real_reg(arg.real_reg(), arg.id());
+                }
             }
             start_from_pred_index = 0;
         }
@@ -595,6 +608,20 @@ impl<I: Instr, B: Block<I>, F: Function<I, B>> Allocator<I, B, F> {
         self.instrs.clear();
         blk.instructions(&mut self.instrs);
         let instrs = self.instrs.clone();
+
+        for (pc, instr) in instrs.iter().cloned().enumerate() {
+            self.vs.clear();
+            instr.uses(&mut self.vs);
+            for use_ in self.vs.iter().copied() {
+                if !use_.is_real_reg() {
+                    continue;
+                }
+                let reg = use_.real_reg();
+                if let Some(vreg) = self.state.regs_in_use.get(reg) {
+                    self.state.get_vreg_state_mut(vreg).last_use = pc as i32;
+                }
+            }
+        }
 
         for (pc, instr) in instrs.iter().cloned().enumerate() {
             self.vs.clear();
@@ -684,9 +711,17 @@ impl<I: Instr, B: Block<I>, F: Function<I, B>> Allocator<I, B, F> {
 
             for use_ in uses.iter().copied() {
                 if use_.is_real_reg() {
-                    current_used = current_used.add(use_.real_reg());
-                    if self.allocatable_set.has(use_.real_reg()) {
-                        kill_set.push(use_.real_reg());
+                    let reg = use_.real_reg();
+                    current_used = current_used.add(reg);
+                    if self.allocatable_set.has(reg)
+                        && self
+                            .state
+                            .regs_in_use
+                            .get(reg)
+                            .and_then(|vreg| self.state.get_vreg_state(vreg))
+                            .is_some_and(|state| state.last_use == pc as i32)
+                    {
+                        kill_set.push(reg);
                     }
                 } else if let Some(reg) = self.state.get_vreg_state(use_.id()).map(|vs| vs.r) {
                     if reg != REAL_REG_INVALID {
@@ -743,6 +778,7 @@ impl<I: Instr, B: Block<I>, F: Function<I, B>> Allocator<I, B, F> {
                 self.release_caller_saved_regs(addr);
             }
 
+            let live_use_regs = current_used;
             for reg in &kill_set {
                 self.state.release_real_reg(*reg);
             }
@@ -775,8 +811,14 @@ impl<I: Instr, B: Block<I>, F: Function<I, B>> Allocator<I, B, F> {
                             .map(|state| state.r)
                             .unwrap_or(REAL_REG_INVALID);
 
+                        if reg != REAL_REG_INVALID && live_use_regs.has(reg) {
+                            self.state.release_real_reg(reg);
+                            reg = REAL_REG_INVALID;
+                        }
+
                         if desired != REAL_REG_INVALID
                             && reg != desired
+                            && !live_use_regs.has(desired)
                             && (!self.state.regs_in_use.has(desired) || reg == REAL_REG_INVALID)
                         {
                             if reg != REAL_REG_INVALID {
@@ -793,6 +835,7 @@ impl<I: Instr, B: Block<I>, F: Function<I, B>> Allocator<I, B, F> {
                                     Self::inferred_copy_source(&instr).map(|src| src.real_reg());
                                 if let Some(copy_src) = copy_src {
                                     if self.allocatable_set.has(copy_src)
+                                        && !live_use_regs.has(copy_src)
                                         && !self.state.regs_in_use.has(copy_src)
                                     {
                                         reg = copy_src;
@@ -805,7 +848,7 @@ impl<I: Instr, B: Block<I>, F: Function<I, B>> Allocator<I, B, F> {
                                 .clone();
                                 reg = self.find_or_spill_allocatable(
                                     &allocatable,
-                                    RegSet::default(),
+                                    live_use_regs,
                                     REAL_REG_INVALID,
                                 );
                             }
@@ -1056,6 +1099,24 @@ impl<I: Instr, B: Block<I>, F: Function<I, B>> Allocator<I, B, F> {
             .get_vreg_state(desired_state)
             .expect("desired vreg must exist")
             .v;
+        if desired_vreg.is_real_reg() && desired_vreg.real_reg() == reg {
+            if let Some(current_vreg_id) = current_state.filter(|&id| id != desired_state) {
+                let current_vreg = self
+                    .state
+                    .get_vreg_state(current_vreg_id)
+                    .expect("current vreg must exist")
+                    .v;
+                if !current_vreg.is_real_reg() {
+                    f.store_register_before(
+                        current_vreg.set_real_reg(reg),
+                        pred.last_instr_for_insertion(),
+                    );
+                }
+                self.state.release_real_reg(reg);
+            }
+            self.state.use_real_reg(reg, desired_state);
+            return;
+        }
         if let Some(current_vreg_id) = current_state {
             let current_vreg = self
                 .state
@@ -1125,7 +1186,7 @@ impl<I: Instr, B: Block<I>, F: Function<I, B>> Allocator<I, B, F> {
                 .state
                 .vr_states
                 .get(index)
-                .map(|state| state.spilled)
+                .map(|state| state.spilled && !state.v.is_real_reg())
                 .unwrap_or(false);
             if spilled {
                 self.schedule_spill(f, index as VRegId);
@@ -1520,7 +1581,12 @@ mod tests {
         info.allocatable_registers[RegType::Int.index()] = vec![RealReg(1), RealReg(2)];
         info.callee_saved_registers = RegSet::from_regs(&[RealReg(1)]);
         info.caller_saved_registers = RegSet::from_regs(&[RealReg(1), RealReg(2)]);
-        info.real_reg_to_vreg = vec![VReg::default(), real_vreg(1), real_vreg(2)];
+        info.real_reg_to_vreg = vec![
+            VReg::default(),
+            real_vreg(1),
+            real_vreg(2),
+            real_vreg(3),
+        ];
         info.real_reg_name = |reg| reg.to_string();
         info.real_reg_type = |_| RegType::Int;
         info
@@ -1588,6 +1654,45 @@ mod tests {
     }
 
     #[test]
+    fn liveness_analysis_ignores_non_allocatable_real_register_uses() {
+        let loop_phi = int_vreg(30);
+        let reserved = real_vreg(3);
+
+        let entry = MockBlock::new(
+            0,
+            vec![
+                MockInstr::new().use_([reserved]),
+                MockInstr::new().def([loop_phi]).use_([int_vreg(100)]).copy(),
+            ],
+        )
+        .entry();
+        let header = MockBlock::new(
+            1,
+            vec![MockInstr::new().use_([reserved]), MockInstr::new().use_([loop_phi])],
+        )
+        .loop_header(vec![]);
+        header.add_block_param(loop_phi);
+        header.add_pred(entry.clone());
+        header.add_pred(header.clone());
+
+        let mut func = MockFunction::new(vec![entry, header.clone()]);
+        func.lnf_roots = vec![header.clone()];
+
+        let mut alloc = Allocator::<MockInstr, MockBlock, MockFunction>::new(reg_info());
+        alloc.liveness_analysis(&func);
+
+        let live_ins = alloc
+            .block_states
+            .get(Allocator::<MockInstr, MockBlock, MockFunction>::block_state_key(
+                header.id(),
+            ))
+            .unwrap()
+            .live_ins
+            .clone();
+        assert_eq!(live_ins, vec![loop_phi.id()]);
+    }
+
+    #[test]
     fn find_or_spill_allocatable_prefers_requested_free_register() {
         let mut alloc = Allocator::<MockInstr, MockBlock, MockFunction>::new(reg_info());
         alloc
@@ -1628,5 +1733,22 @@ mod tests {
         assert!(func.befores.is_empty());
         assert!(func.afters.is_empty());
         assert_eq!(func.clobbered, vec![real_vreg(1)]);
+    }
+
+    #[test]
+    fn do_allocation_keeps_single_def_distinct_from_last_use_register() {
+        let i1 = MockInstr::new().def([int_vreg(1)]);
+        let i2 = MockInstr::new().use_([int_vreg(1)]).def([int_vreg(2)]);
+        let i3 = MockInstr::new().use_([int_vreg(2)]);
+        let b0 = MockBlock::new(0, vec![i1.clone(), i2.clone(), i3.clone()]).entry();
+        let mut func = MockFunction::new(vec![b0]);
+
+        let mut alloc = Allocator::<MockInstr, MockBlock, MockFunction>::new(reg_info());
+        alloc.do_allocation(&mut func);
+
+        let i2_data = i2.0.borrow();
+        assert!(i2_data.uses[0].is_real_reg());
+        assert!(i2_data.defs[0].is_real_reg());
+        assert_ne!(i2_data.uses[0].real_reg(), i2_data.defs[0].real_reg());
     }
 }

@@ -1271,6 +1271,9 @@ impl<'a> Compiler<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::compiler::Compiler as BackendCompiler;
+    use crate::backend::isa::amd64::Amd64Machine;
+    use crate::backend::machine::Machine;
     use crate::frontend::{signature_for_wasm_function_type, Compiler};
     use crate::ssa::{Builder, Signature, SignatureId, Type};
     use crate::wazevoapi::ModuleContextOffsetData;
@@ -1310,6 +1313,23 @@ mod tests {
             false,
             false,
             false,
+            memory_isolation_enabled,
+        )
+    }
+
+    fn compiler_for_with_fuel_and_memory_isolation(
+        module: &Module,
+        fuel_enabled: bool,
+        memory_isolation_enabled: bool,
+    ) -> Compiler<'_> {
+        Compiler::new(
+            module,
+            Builder::new(),
+            Some(ModuleContextOffsetData::new(module, false)),
+            false,
+            false,
+            false,
+            fuel_enabled,
             memory_isolation_enabled,
         )
     }
@@ -1533,6 +1553,33 @@ mod tests {
         assert!(formatted.contains("ExitIfTrueWithCode"));
         assert!(formatted.contains("fuel_exhausted"));
         assert!(formatted.contains("Jump blk_ret"));
+    }
+
+    #[test]
+    fn lowers_amd64_secure_fuel_loop_without_bogus_rbp_reloads() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![OPCODE_LOOP, 0x40, OPCODE_BR, 0, OPCODE_END, OPCODE_END],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+
+        let mut frontend = compiler_for_with_fuel_and_memory_isolation(&module, true, true);
+        frontend.init_with_module_function(0, false);
+        frontend.lower_to_ssa();
+
+        let builder = std::mem::take(frontend.builder_mut());
+        let mut backend = BackendCompiler::new(Amd64Machine::new(), builder);
+        backend.compile().unwrap();
+
+        let formatted = backend.machine().format();
+        assert!(formatted.contains("pushq %rbp"));
+        assert!(formatted.contains("movq %rsp, %rbp"));
+        assert!(!formatted.contains("-8(%rbp)"));
+        assert!(!formatted.contains("-16(%rbp)"));
     }
 
     #[test]

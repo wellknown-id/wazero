@@ -34,6 +34,7 @@ pub fn amd64_register_info() -> RegisterInfo {
     }
     RegisterInfo {
         allocatable_registers: [
+            vec![],
             vec![
                 rr(RAX),
                 rr(RCX),
@@ -67,7 +68,6 @@ pub fn amd64_register_info() -> RegisterInfo {
                 rr(XMM14),
                 rr(XMM15),
             ],
-            vec![],
         ],
         callee_saved_registers: RegSet::from_regs(&[
             rr(RDX),
@@ -179,5 +179,18 @@ mod tests {
         assert!(info
             .caller_saved_registers
             .has(crate::backend::regalloc::RealReg(1)));
+    }
+
+    #[test]
+    fn regalloc_info_indexes_int_and_float_registers_by_reg_type() {
+        let info = amd64_register_info();
+        assert_eq!(
+            info.allocatable_registers[crate::backend::regalloc::RegType::Int.index()][0],
+            crate::backend::regalloc::RealReg(1)
+        );
+        assert_eq!(
+            info.allocatable_registers[crate::backend::regalloc::RegType::Float.index()][0],
+            crate::backend::regalloc::RealReg(17)
+        );
     }
 }

@@ -16,12 +16,13 @@ use super::abi_entry_preamble::compile_entry_preamble;
 use super::abi_host_call::compile_host_function_trampoline;
 use super::cond::Cond;
 use super::ext::ExtMode;
-use super::instr::Amd64Instr;
+use super::instr::{AluRmiROpcode, Amd64Instr};
 use super::lower_constant::lower_constant;
 use super::lower_mem::mem_operand_from_base;
 use super::machine_pro_epi_logue::{append_epilogue, append_prologue};
 use super::machine_regalloc::do_regalloc;
 use super::operands::{AddressMode, Label, Operand};
+use super::reg::{vreg_for_real_reg, RSP};
 use super::SseOpcode;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -47,6 +48,7 @@ pub struct Amd64Machine {
     pub spill_slots: BTreeMap<u32, i64>,
     pub spill_slot_size: i64,
     pub stack_check_disabled: bool,
+    frame_layout_finalized: bool,
 }
 
 impl Amd64Machine {
@@ -70,6 +72,34 @@ impl Amd64Machine {
     pub(crate) fn current_block_mut(&mut self) -> &mut Amd64Block {
         let idx = self.current_block.expect("no current block");
         &mut self.blocks[idx]
+    }
+
+    fn finalize_frame_layout(&mut self) {
+        if self.frame_layout_finalized {
+            return;
+        }
+        self.frame_layout_finalized = true;
+        if self.spill_slot_size <= 0 {
+            return;
+        }
+
+        let frame_size = ((self.spill_slot_size + 15) / 16) * 16;
+        for block in &mut self.blocks {
+            if let Some(index) = block.instructions.windows(2).position(|pair| {
+                pair[0].to_string() == "pushq %rbp" && pair[1].to_string() == "movq %rsp, %rbp"
+            }) {
+                block.instructions.splice(
+                    (index + 2)..(index + 2),
+                    [Amd64Instr::alu_rmi_r(
+                        AluRmiROpcode::Sub,
+                        Operand::imm32(frame_size as u32),
+                        vreg_for_real_reg(RSP),
+                        true,
+                    )],
+                );
+                break;
+            }
+        }
     }
 
     fn ensure_block(&mut self, block: BasicBlock) -> usize {
@@ -551,6 +581,7 @@ impl BackendMachine for Amd64Machine {
         }
         self.current_block = None;
         self.spill_slot_size = 0;
+        self.frame_layout_finalized = false;
     }
 
     fn link_adjacent_blocks(&mut self, prev: BasicBlock, next: BasicBlock) {
@@ -1809,7 +1840,7 @@ impl BackendMachine for Amd64Machine {
     }
 
     fn insert_return(&mut self) {
-        self.push(Amd64Instr::ret());
+        append_epilogue(self);
     }
 
     fn insert_load_constant_block_arg(&mut self, instr: &Instruction, dst: VReg) {
@@ -1852,6 +1883,7 @@ impl BackendMachine for Amd64Machine {
     }
 
     fn encode(&mut self) -> Result<(), BackendError> {
+        self.finalize_frame_layout();
         let bytes = self.encode_all()?;
         if let Some(mut compiler) = self.compiler {
             unsafe {
@@ -1883,6 +1915,7 @@ impl BackendMachine for Amd64Machine {
     fn lower_params(&mut self, params: &[Value]) {
         let abi = self.current_abi.clone();
         let mut lowered = Vec::new();
+        append_prologue(self);
         for (value, arg) in params.iter().copied().zip(&abi.args) {
             if !value.valid() {
                 continue;
@@ -2152,7 +2185,10 @@ mod tests {
         m.push(Amd64Instr::jmp(Operand::label(Label(0))));
 
         let bytes = m.encode_all().unwrap();
-        assert_eq!(bytes, vec![0xC3, 0xE9, 0xFA, 0xFF, 0xFF, 0xFF]);
+        assert_eq!(
+            bytes,
+            vec![0x48, 0x89, 0xEC, 0x5D, 0xC3, 0xE9, 0xF6, 0xFF, 0xFF, 0xFF]
+        );
     }
 
     fn lower_int_binary_opcode(opcode: Opcode) -> String {

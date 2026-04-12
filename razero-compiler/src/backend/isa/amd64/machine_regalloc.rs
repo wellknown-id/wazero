@@ -337,7 +337,8 @@ impl Function<Amd64Instr, Amd64Block> for Amd64Machine {
 mod tests {
     use super::{do_regalloc, regalloc_register_info};
     use crate::backend::compiler::Compiler;
-    use crate::backend::isa::amd64::{Amd64Instr, Amd64Machine, RAX};
+    use crate::backend::isa::amd64::operands::{AddressMode, Operand};
+    use crate::backend::isa::amd64::{Amd64Instr, Amd64Machine, AluRmiROpcode, R15, RAX};
     use crate::backend::machine::Machine;
     use crate::backend::{RegType, VReg};
     use crate::ssa::{BasicBlockId, Builder, Signature, SignatureId, Type, Values};
@@ -437,5 +438,38 @@ mod tests {
         ));
         do_regalloc(&mut machine);
         assert!(!machine.format().contains('?'));
+    }
+
+    #[test]
+    fn machine_regalloc_keeps_load_def_distinct_from_memory_base() {
+        let exec_ctx = VReg::from_real_reg(R15, RegType::Int);
+        let loaded = VReg(128).set_reg_type(RegType::Int);
+        let decremented = VReg(129).set_reg_type(RegType::Int);
+        let mem = Operand::mem(AddressMode::imm_reg(0x4a0, exec_ctx));
+        let mut machine = Amd64Machine::new();
+        Machine::start_lowering_function(&mut machine, BasicBlockId(0));
+        Machine::start_block(&mut machine, BasicBlockId(0));
+        machine.push(Amd64Instr::mov64_mr(mem.clone(), loaded));
+        machine.push(Amd64Instr::mov_rr(loaded, decremented, true));
+        machine.push(Amd64Instr::alu_rmi_r(
+            AluRmiROpcode::Sub,
+            Operand::imm32(1),
+            decremented,
+            true,
+        ));
+        machine.push(Amd64Instr::mov_rm(decremented, mem, 8));
+
+        do_regalloc(&mut machine);
+
+        let load = &machine.blocks[0].instructions[0];
+        let mut uses = Vec::new();
+        Amd64Instr::uses(load, &mut uses);
+        let mut defs = Vec::new();
+        Amd64Instr::defs(load, &mut defs);
+        assert_eq!(uses.len(), 1);
+        assert_eq!(defs.len(), 1);
+        assert!(uses[0].is_real_reg());
+        assert!(defs[0].is_real_reg());
+        assert_ne!(uses[0].real_reg(), defs[0].real_reg());
     }
 }
