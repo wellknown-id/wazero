@@ -6303,6 +6303,66 @@ mod tests {
     }
 
     #[test]
+    fn yield_reyield_uses_fresh_resumer() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("example")
+            .new_function_builder()
+            .with_func(
+                |ctx, _module, _params| {
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .with_name("async_work")
+            .export("async_work")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                include_bytes!("../../experimental/testdata/yield.wasm"),
+                ModuleConfig::new(),
+            )
+            .unwrap();
+
+        let err = guest
+            .exported_function("run_twice")
+            .unwrap()
+            .call_with_context(&with_yielder(&Context::default()), &[])
+            .unwrap_err();
+        let RuntimeError::Yield(first_yield) = err else {
+            panic!("expected initial yield error");
+        };
+        let first_resumer = first_yield.resumer().expect("resumer should be present");
+
+        let err = first_resumer
+            .resume(&with_yielder(&Context::default()), &[40])
+            .unwrap_err();
+        let RuntimeError::Yield(second_yield) = err else {
+            panic!("expected second yield error");
+        };
+        let second_resumer = second_yield.resumer().expect("resumer should be present");
+
+        first_resumer.cancel();
+        let err = first_resumer
+            .resume(&with_yielder(&Context::default()), &[1])
+            .unwrap_err();
+        assert_eq!("cannot resume: resumer has already been used", err.to_string());
+
+        assert_eq!(
+            vec![42],
+            second_resumer
+                .resume(&with_yielder(&Context::default()), &[2])
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn memory_supports_read_write_and_grow() {
         let runtime = Runtime::new();
         let bytes = [
