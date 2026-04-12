@@ -2037,6 +2037,88 @@ mod tests {
     }
 
     #[test]
+    fn link_hello_host_executable_rejects_run_export_with_non_void_signature() {
+        let module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
+        let mut metadata = compile_module_metadata(&module);
+        let wrong_type_index = metadata.types.len() as u32;
+        metadata.types.push(AotFunctionTypeMetadata {
+            params: vec![ValueType::I32],
+            results: vec![],
+            param_num_in_u64: 1,
+            result_num_in_u64: 0,
+        });
+        let run_export = metadata
+            .exports
+            .iter()
+            .find(|export| export.ty.0 == 0 && export.name == "run")
+            .expect("hello-host should export run");
+        let run_function = metadata
+            .functions
+            .iter_mut()
+            .find(|function| function.wasm_function_index == run_export.index)
+            .expect("run export should resolve to a local function");
+        run_function.type_index = wrong_type_index;
+
+        let err = super::link_hello_host_executable(
+            PathBuf::from("target/hello-host-run-non-void"),
+            &NativeLinkModule::new("hello-host", Vec::new(), serialize_aot_metadata(&metadata)),
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "hello-host run export must use the () -> () signature"
+        );
+    }
+
+    #[test]
+    fn link_hello_host_executable_rejects_passive_data_segments() {
+        let module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
+        let mut metadata = compile_module_metadata(&module);
+        let segment = metadata
+            .data_segments
+            .first_mut()
+            .expect("hello-host should include one data segment");
+        segment.passive = true;
+
+        let err = super::link_hello_host_executable(
+            PathBuf::from("target/hello-host-passive-data"),
+            &NativeLinkModule::new("hello-host", Vec::new(), serialize_aot_metadata(&metadata)),
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "aot metadata: passive data segment with offset expression"
+        );
+    }
+
+    #[test]
+    fn link_hello_host_executable_rejects_non_integer_data_offset_expression() {
+        let module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
+        let mut metadata = compile_module_metadata(&module);
+        let segment = metadata
+            .data_segments
+            .first_mut()
+            .expect("hello-host should include one data segment");
+        segment.offset_expression = vec![0xd0, 0x70, 0x0b];
+
+        let err = super::link_hello_host_executable(
+            PathBuf::from("target/hello-host-non-integer-data-offset"),
+            &NativeLinkModule::new("hello-host", Vec::new(), serialize_aot_metadata(&metadata)),
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "packaged host-import data offsets must evaluate to i32/i64"
+        );
+    }
+
+    #[test]
     fn link_hello_host_executable_rejects_multiple_function_imports_via_packaged_host_validation() {
         let module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
         let mut metadata = compile_module_metadata(&module);
