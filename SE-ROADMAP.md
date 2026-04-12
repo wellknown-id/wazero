@@ -149,7 +149,8 @@ that want a fully linked executable.
   table/element types, and inconsistent table/global/data/element metadata
   counts, mismatched global initializer types, and malformed data offset const
   expressions, malformed `global.get` initializers, and malformed
-  element-segment `ref.func` initializers.
+  element-segment `ref.func` initializers, including non-integer data offsets
+  and invalid `ref.null` offset types.
 - [100%:04af62a8] Linked runtime-plan bounds and metadata-shape rejection for
   packaged local memory / table initialization are now pinned by targeted tests
   too, so obvious segment-overflow, segment-kind/type, element-initializer,
