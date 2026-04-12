@@ -159,7 +159,7 @@ that want a fully linked executable.
   supported scalar C ABI exports while dropping unsupported signatures instead
   of rejecting the whole module once at least one supported export remains, and
   stale local function type metadata currently shrinks that export surface the
-  same way.
+  same way; wrapper generation follows the same filtered export set.
 - [100%:ea77dc43] The current native-link entrypoint now has targeted pre-link
   rejection coverage for corrupt sidecar metadata (including stale
   export/start/import-type indexes), unsupported target architectures, and

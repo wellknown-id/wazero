@@ -7236,6 +7236,97 @@ int main(void) {
     }
 
     #[test]
+    fn module_exports_keeps_supported_exports_when_other_functions_have_missing_type_metadata() {
+        let exports = module_exports(
+            "guest",
+            &AotCompiledMetadata {
+                types: vec![crate::aot::AotFunctionTypeMetadata {
+                    params: vec![ValueType::I32],
+                    results: vec![ValueType::I32],
+                    param_num_in_u64: 1,
+                    result_num_in_u64: 1,
+                }],
+                functions: vec![
+                    crate::aot::AotFunctionMetadata {
+                        local_function_index: 0,
+                        wasm_function_index: 0,
+                        type_index: 0,
+                        executable_offset: 0,
+                        executable_len: 4,
+                    },
+                    crate::aot::AotFunctionMetadata {
+                        local_function_index: 1,
+                        wasm_function_index: 1,
+                        type_index: 99,
+                        executable_offset: 4,
+                        executable_len: 4,
+                    },
+                ],
+                ..AotCompiledMetadata::default()
+            },
+        );
+
+        assert_eq!(
+            exports,
+            vec![NativeCAbiExport {
+                module_name: "guest".to_string(),
+                wasm_function_index: 0,
+                symbol_name: cabi_wrapper_symbol_name("guest", 0),
+                params: vec![ValueType::I32],
+                results: vec![ValueType::I32],
+            }]
+        );
+    }
+
+    #[test]
+    fn build_wrapper_source_skips_unsupported_exports_when_supported_ones_remain() {
+        let source = build_wrapper_source(
+            &[ModuleSpec {
+                sanitized_name: "guest".to_string(),
+                metadata: AotCompiledMetadata {
+                    types: vec![
+                        crate::aot::AotFunctionTypeMetadata {
+                            params: vec![ValueType::I32],
+                            results: vec![ValueType::I32],
+                            param_num_in_u64: 1,
+                            result_num_in_u64: 1,
+                        },
+                        crate::aot::AotFunctionTypeMetadata {
+                            params: vec![ValueType::V128],
+                            results: vec![],
+                            param_num_in_u64: 2,
+                            result_num_in_u64: 0,
+                        },
+                    ],
+                    functions: vec![
+                        crate::aot::AotFunctionMetadata {
+                            local_function_index: 0,
+                            wasm_function_index: 0,
+                            type_index: 0,
+                            executable_offset: 0,
+                            executable_len: 4,
+                        },
+                        crate::aot::AotFunctionMetadata {
+                            local_function_index: 1,
+                            wasm_function_index: 1,
+                            type_index: 1,
+                            executable_offset: 4,
+                            executable_len: 4,
+                        },
+                    ],
+                    ..AotCompiledMetadata::default()
+                },
+            }],
+            64,
+            current_native_packaging_target().unwrap(),
+        )
+        .unwrap();
+
+        assert!(source.contains(&cabi_wrapper_symbol_name("guest", 0)));
+        assert!(!source.contains(&cabi_wrapper_symbol_name("guest", 1)));
+    }
+
+    #[test]
     fn build_wrapper_source_rejects_missing_local_start_function_metadata() {
         let err = build_wrapper_source(
             &[ModuleSpec {
