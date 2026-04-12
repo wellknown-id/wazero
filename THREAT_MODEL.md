@@ -110,6 +110,54 @@ The razero store, engine, compilation caches, and type registries are shared acr
 
 **Mitigation**: `call_indirect` performs runtime type checking via `FunctionTypeID` comparison. A mismatch triggers `ErrRuntimeIndirectCallTypeMismatch` (a trap). This is enforced in both interpreter and compiler paths.
 
+## Crate coupling taxonomy
+
+The razero workspace is organized into two coupling tiers that determine how
+OS-level dependencies flow through the build graph:
+
+### Tier 1 — libc-free core (no OS coupling)
+
+These crates have **zero** dependency on `razero-platform`, `libc`, or any
+system-level crate in their default build configuration. They can be compiled
+for any target that `std` supports without pulling in POSIX or platform-specific
+syscalls:
+
+| Crate | Role | Notes |
+| --- | --- | --- |
+| `razero-features` | Feature flags | Leaf crate, zero dependencies |
+| `razero-decoder` | Wasm binary decoder | Pure Rust, no OS interaction |
+| `razero-wasm` | Wasm data model, store, module instances | Guard-page memory optional via `secure-memory` feature |
+| `razero-interp` | Wasm interpreter | Depends only on `razero-wasm` (without `secure-memory`) |
+
+### Tier 2 — platform-aware infrastructure (inherently OS-coupled)
+
+These crates legitimately require OS-level primitives for JIT compilation,
+virtual memory management, signal handling, or clock access. All OS-level
+syscalls and platform-conditional code are centralized in `razero-platform`;
+
+no other crate depends on `libc` directly.
+
+| Crate | Role | OS primitives used |
+| --- | --- | --- |
+| `razero-platform` | Centralized OS abstraction | `libc`: mmap/mprotect/munmap, rt_sigaction, clock_gettime, CPUID/MRS |
+| `razero-secmem` | Guard-page allocation | Delegates to `razero-platform` |
+| `razero-compiler` | JIT compiler, codegen, linker | `razero-platform`: code-segment mmap, SIGSEGV handler, CPU feature detection |
+| `razero` | Facade / runtime API | Enables `secure-memory` feature for full builds |
+| `razero-ffi` | C ABI integration surface | Uses `razero-platform` for `compiler_supported()` |
+
+### Security implications
+
+- An embedder that only needs the interpreter can depend on `razero-interp`
+  alone, which has **no** `libc` in its dependency tree. This eliminates
+  kernel-level attack surface from JIT mmap, signal handlers, and virtual
+  memory manipulation.
+- The compiler and secure-memory paths pull in `razero-platform` and `libc`
+  by design — these components require kernel cooperation for W^X code
+  segments, guard-page-backed linear memory, and SIGSEGV fault recovery.
+- The coupling boundary is enforced by Cargo features: `secure-memory` on
+  `razero-wasm` gates `razero-secmem`, and `filecache` on `razero` gates
+  filesystem I/O.
+
 ## Operational limitations and tradeoffs
 
 - **Secure mode is still opt-in**. The default runtime configuration remains the

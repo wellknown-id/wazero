@@ -2,6 +2,7 @@
 
 use std::ops::{Deref, DerefMut};
 
+#[cfg(feature = "secure-memory")]
 use razero_secmem::{GuardedAllocation, SecMemError};
 
 use crate::memory_definition::MemoryDefinition;
@@ -14,6 +15,7 @@ pub const MEMORY_PAGE_SIZE_IN_BITS: u32 = 16;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemoryBytes {
     Plain(Vec<u8>),
+    #[cfg(feature = "secure-memory")]
     Guarded {
         allocation: GuardedAllocation,
         len: usize,
@@ -38,6 +40,7 @@ impl Deref for MemoryBytes {
     fn deref(&self) -> &Self::Target {
         match self {
             Self::Plain(bytes) => bytes,
+            #[cfg(feature = "secure-memory")]
             Self::Guarded { allocation, len } => &allocation.as_slice()[..*len],
         }
     }
@@ -47,6 +50,7 @@ impl DerefMut for MemoryBytes {
     fn deref_mut(&mut self) -> &mut Self::Target {
         match self {
             Self::Plain(bytes) => bytes,
+            #[cfg(feature = "secure-memory")]
             Self::Guarded { allocation, len } => &mut allocation.as_mut_slice()[..*len],
         }
     }
@@ -56,6 +60,7 @@ impl MemoryBytes {
     pub fn len(&self) -> usize {
         match self {
             Self::Plain(bytes) => bytes.len(),
+            #[cfg(feature = "secure-memory")]
             Self::Guarded { len, .. } => *len,
         }
     }
@@ -63,6 +68,7 @@ impl MemoryBytes {
     pub fn is_empty(&self) -> bool {
         match self {
             Self::Plain(bytes) => bytes.is_empty(),
+            #[cfg(feature = "secure-memory")]
             Self::Guarded { len, .. } => *len == 0,
         }
     }
@@ -70,6 +76,7 @@ impl MemoryBytes {
     pub fn resize(&mut self, new_len: usize, value: u8) {
         match self {
             Self::Plain(bytes) => bytes.resize(new_len, value),
+            #[cfg(feature = "secure-memory")]
             Self::Guarded { allocation, len } => {
                 let old_len = *len;
                 if new_len > allocation.len() {
@@ -94,6 +101,7 @@ impl MemoryBytes {
     pub fn reserved_len(&self) -> usize {
         match self {
             Self::Plain(bytes) => bytes.len(),
+            #[cfg(feature = "secure-memory")]
             Self::Guarded { allocation, .. } => allocation.len(),
         }
     }
@@ -103,6 +111,7 @@ impl MemoryBytes {
     }
 }
 
+#[cfg(feature = "secure-memory")]
 impl MemoryBytes {
     pub fn guarded(allocation: GuardedAllocation, len: usize) -> Self {
         let reserved_len = allocation.len();
@@ -155,6 +164,7 @@ impl MemoryInstance {
         }
     }
 
+    #[cfg(feature = "secure-memory")]
     pub fn new_guarded(memory: &Memory) -> Result<Self, SecMemError> {
         let min_bytes = memory_pages_to_bytes_num(memory.min) as usize;
         let cap = memory.max.max(memory.cap).max(memory.min);
@@ -463,7 +473,7 @@ mod tests {
         assert_eq!(pages_to_unit_of_bytes(u32::MAX), "3 Ti");
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "secure-memory"))]
     #[test]
     fn guarded_constructor_uses_guarded_backing() {
         let memory = Memory {
@@ -479,7 +489,7 @@ mod tests {
         assert_eq!(2, guarded.cap);
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "secure-memory"))]
     #[test]
     fn guarded_memory_grow_preserves_backing_and_zero_fills_new_pages() {
         let memory = Memory {

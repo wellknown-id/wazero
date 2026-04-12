@@ -7,6 +7,7 @@ use std::sync::{
     Arc,
 };
 
+#[cfg(feature = "secure-memory")]
 use razero_secmem::SecMemError;
 
 use crate::const_expr::{
@@ -366,6 +367,7 @@ impl ModuleInstance {
         self.memory_instance = Some(MemoryInstance::new(memory));
     }
 
+    #[cfg(feature = "secure-memory")]
     pub fn define_memory_guarded(&mut self, memory: &Memory) -> Result<(), SecMemError> {
         self.memory_type = Some(memory.clone());
         self.memory_instance = Some(MemoryInstance::new_guarded(memory)?);

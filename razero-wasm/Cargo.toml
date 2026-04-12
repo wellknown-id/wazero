@@ -8,6 +8,10 @@ version.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = []
+secure-memory = ["razero-secmem"]
+
 [dependencies]
 razero-features = { workspace = true }
-razero-secmem = { workspace = true }
+razero-secmem = { workspace = true, optional = true }

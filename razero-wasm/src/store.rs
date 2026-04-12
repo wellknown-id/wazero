@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(feature = "secure-memory")]
 use razero_secmem::{GuardPageError, SecMemError};
 
 use crate::engine::{
@@ -487,6 +488,7 @@ impl<E> Store<E> {
 
         if instance.memory_instance.is_none() {
             if let Some(memory) = &source.memory_section {
+                #[cfg(feature = "secure-memory")]
                 if self.secure_memory {
                     match instance.define_memory_guarded(memory) {
                         Ok(()) => {}
@@ -502,6 +504,8 @@ impl<E> Store<E> {
                 } else {
                     instance.define_memory(memory);
                 }
+                #[cfg(not(feature = "secure-memory"))]
+                instance.define_memory(memory);
             }
         }
 
@@ -832,7 +836,7 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "secure-memory"))]
     #[test]
     fn instantiate_with_secure_memory_uses_guarded_backing_when_supported() {
         let mut store = Store::<NullEngine>::default();
@@ -860,7 +864,7 @@ mod tests {
         ));
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(not(target_os = "linux"), feature = "secure-memory"))]
     #[test]
     fn instantiate_with_secure_memory_falls_back_to_plain_backing_when_guard_pages_unsupported() {
         let mut store = Store::<NullEngine>::default();

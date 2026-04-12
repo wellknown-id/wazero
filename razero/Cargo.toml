@@ -10,7 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 razero-features = { workspace = true }
-razero-wasm = { workspace = true }
+razero-wasm = { workspace = true, features = ["secure-memory"] }
 razero-decoder = { workspace = true }
 razero-compiler = { workspace = true }
 razero-interp = { workspace = true }

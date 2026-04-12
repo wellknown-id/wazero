@@ -28,25 +28,35 @@ without WASI.
 
 ## Platform-coupling guardrails
 
-The core crates (`razero-wasm`, `razero-interp`, `razero-decoder`,
-`razero-features`, `razero`) should not import directly from `razero-platform`.
-Platform-specific functionality (mmap, signals, CPU detection) is intentionally
-centralized behind `razero-platform`, and core crates access it only through
-re-exports from crates that legitimately need it (`razero-compiler` for JIT,
-`razero-secmem` for guard-page allocation).
+The core crates are organized into two coupling tiers:
+
+**Tier 1 — libc-free crates** (no `razero-platform` or `libc` in their dependency tree
+when built without optional features):
+- `razero-features` (leaf crate, zero dependencies)
+- `razero-wasm` (Wasm data model; guard-page memory behind the `secure-memory` feature)
+- `razero-interp` (interpreter; depends only on `razero-wasm`)
+- `razero-decoder` (binary decoder)
+
+**Tier 2 — platform-aware crates** (legitimately depend on `razero-platform` and `libc`):
+- `razero-platform` (centralized OS abstraction: mmap, signals, CPU detection, time)
+- `razero-secmem` (guard-page allocation via `razero-platform`)
+- `razero-compiler` (JIT codegen, mmap, signal handling; no direct `libc` — uses `razero-platform`)
+- `razero` (facade; enables `secure-memory` for full-featured builds)
+- `razero-ffi` (static-lib integration surface)
 
 When adding new platform-dependent behavior:
 
-- do not add `use razero_platform::...` to `razero-wasm`, `razero-interp`,
-  `razero-decoder`, or `razero-features`;
+- do not add `use razero_platform::...` to Tier 1 crates;
 - do not add `std::fs`, `std::net`, `std::process`, `std::env`, or
-  `std::path` imports to core crates in production code;
-- if a core crate needs a platform type (e.g. `GuardPageError`), get it from
-  `razero-secmem` rather than `razero-platform` directly;
+  `std::path` imports to Tier 1 crates in production code;
+- if a Tier 1 crate needs a platform type (e.g. `GuardPageError`), gate it
+  behind an optional Cargo feature that pulls in the platform-aware crate;
 - the `razero` crate's `filecache` module is gated behind the `filecache`
   Cargo feature and is the only core surface that performs filesystem I/O;
 - the `razero-compiler` crate legitimately uses `razero-platform` for JIT
-  codegen, mmap, and signal handling — this is expected and acceptable.
+  codegen, mmap, and signal handling — this is expected and acceptable;
+- all `libc` syscalls must live in `razero-platform` only. No other crate
+  should depend on `libc` directly.
 
 ## Benchmarks
 

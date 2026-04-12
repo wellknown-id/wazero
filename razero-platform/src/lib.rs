@@ -5,6 +5,7 @@ pub mod crypto;
 pub mod guard;
 pub mod mmap;
 pub mod path;
+pub mod signal;
 pub mod time;
 
 #[cfg(target_os = "linux")]
@@ -24,6 +25,7 @@ pub use mmap::{
     map_code_segment, protect_code_segment, unmap_code_segment, CodeSegment, MmapError,
 };
 pub use path::to_posix_path;
+pub use signal::{install_sigsegv_handler, read_sigsegv_handler, Sigaction, SignalError};
 pub use time::{
     nanosleep, nanotime, new_fake_nanotime, new_fake_walltime, walltime, FAKE_EPOCH_NANOS,
 };

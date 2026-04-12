@@ -3,6 +3,8 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use razero_platform::signal::{install_sigsegv_handler, read_sigsegv_handler};
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct JitCodeRange {
@@ -11,15 +13,6 @@ pub struct JitCodeRange {
 }
 
 pub const MAX_JIT_CODE_RANGES: usize = 4096;
-
-#[derive(Clone, Copy, Default)]
-#[repr(C)]
-struct LinuxSigaction {
-    handler: usize,
-    flags: u64,
-    restorer: usize,
-    mask: u64,
-}
 
 #[no_mangle]
 pub static razero_jit_range_count: AtomicU32 = AtomicU32::new(0);
@@ -53,41 +46,11 @@ fn install_signal_handler_impl(handler_addr: usize) {
         return;
     }
 
-    let mut old = LinuxSigaction::default();
-    let rc = unsafe {
-        libc::syscall(
-            libc::SYS_rt_sigaction as libc::c_long,
-            libc::SIGSEGV,
-            std::ptr::null::<LinuxSigaction>(),
-            &mut old as *mut LinuxSigaction,
-            8usize,
-        )
-    };
-    if rc == -1 {
-        panic!(
-            "wazevo: failed to read SIGSEGV handler: {}",
-            std::io::Error::last_os_error()
-        );
-    }
-
-    razero_saved_go_handler.store(old.handler, Ordering::Release);
-
-    let mut act = old;
-    act.handler = handler_addr;
-    let rc = unsafe {
-        libc::syscall(
-            libc::SYS_rt_sigaction as libc::c_long,
-            libc::SIGSEGV,
-            &act as *const LinuxSigaction,
-            std::ptr::null_mut::<LinuxSigaction>(),
-            8usize,
-        )
-    };
-    if rc == -1 {
-        panic!(
-            "wazevo: failed to install SIGSEGV handler: {}",
-            std::io::Error::last_os_error()
-        );
+    match install_sigsegv_handler(handler_addr) {
+        Ok(old) => {
+            razero_saved_go_handler.store(old.handler, Ordering::Release);
+        }
+        Err(e) => panic!("wazevo: failed to install SIGSEGV handler: {}", e),
     }
 
     SIGNAL_HANDLER_INSTALLED.store(true, Ordering::Release);
@@ -142,23 +105,10 @@ pub(crate) fn signal_handler_installed() -> bool {
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) fn current_sigsegv_handler() -> usize {
     let _guard = state_lock().lock().unwrap();
-    let mut current = LinuxSigaction::default();
-    let rc = unsafe {
-        libc::syscall(
-            libc::SYS_rt_sigaction as libc::c_long,
-            libc::SIGSEGV,
-            std::ptr::null::<LinuxSigaction>(),
-            &mut current as *mut LinuxSigaction,
-            8usize,
-        )
-    };
-    if rc == -1 {
-        panic!(
-            "wazevo: failed to read current SIGSEGV handler: {}",
-            std::io::Error::last_os_error()
-        );
+    match read_sigsegv_handler() {
+        Ok(current) => current.handler,
+        Err(e) => panic!("wazevo: failed to read current SIGSEGV handler: {}", e),
     }
-    current.handler
 }
 
 #[cfg(test)]
