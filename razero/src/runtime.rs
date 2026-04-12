@@ -6596,6 +6596,65 @@ mod tests {
     }
 
     #[test]
+    fn yield_cancel_does_not_emit_trap_observer_event() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("example")
+            .new_function_builder()
+            .with_callback(
+                |ctx, _module, _params| {
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .export("async_work")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                include_bytes!("../../experimental/testdata/yield.wasm"),
+                ModuleConfig::new(),
+            )
+            .unwrap();
+
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let ctx = with_trap_observer(&with_yielder(&Context::default()), {
+            let observations = observations.clone();
+            move |_ctx: &Context, observation: TrapObservation| {
+                observations
+                    .lock()
+                    .expect("trap observations poisoned")
+                    .push((observation.cause, observation.err.to_string()));
+            }
+        });
+
+        let err = guest
+            .exported_function("run")
+            .unwrap()
+            .call_with_context(&ctx, &[])
+            .unwrap_err();
+        let RuntimeError::Yield(yield_error) = err else {
+            panic!("expected yield error");
+        };
+        yield_error
+            .resumer()
+            .expect("resumer should be present")
+            .cancel();
+
+        assert!(
+            observations
+                .lock()
+                .expect("trap observations poisoned")
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn yield_policy_context_overrides_runtime_config_policy() {
         let runtime = Runtime::with_config(RuntimeConfig::new().with_yield_policy(deny_all_yields));
         runtime
