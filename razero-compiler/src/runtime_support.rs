@@ -2695,6 +2695,211 @@ mod tests {
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     #[test]
+    fn linked_module_rejects_empty_element_initializer() {
+        let mut engine = CompilerEngine::new();
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            function_section: vec![0],
+            memory_section: Some(razero_wasm::module::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                ..razero_wasm::module::Memory::default()
+            }),
+            global_section: vec![Global {
+                ty: GlobalType {
+                    val_type: ValueType::I32,
+                    mutable: false,
+                },
+                init: ConstExpr::from_i32(0),
+            }],
+            table_section: vec![Table {
+                min: 1,
+                max: Some(1),
+                ty: RefType::FUNCREF,
+            }],
+            code_section: vec![Code {
+                body: vec![0x41, 0x07, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            data_section: vec![DataSegment {
+                offset_expression: ConstExpr::from_i32(0),
+                init: vec![0xaa],
+                passive: false,
+            }],
+            element_section: vec![ElementSegment {
+                offset_expr: ConstExpr::from_i32(0),
+                table_index: 0,
+                init: vec![ConstExpr::from_opcode(0xd2, &[0])],
+                ty: RefType::FUNCREF,
+                mode: ElementMode::Active,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+
+        engine.compile_module(&module).unwrap();
+        let compiled = engine.compiled_module(&module).unwrap();
+        let mut metadata = compiled.aot.clone();
+        metadata.element_segments[0].init_expressions = vec![Vec::new()];
+        let err = LinkedModule::from_metadata_and_first_local_function(
+            metadata,
+            compiled.function_ptr(0).unwrap(),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("element[0].init[0] is empty"));
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn linked_module_rejects_invalid_ref_null_element_initializer() {
+        let mut engine = CompilerEngine::new();
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            function_section: vec![0],
+            memory_section: Some(razero_wasm::module::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                ..razero_wasm::module::Memory::default()
+            }),
+            global_section: vec![Global {
+                ty: GlobalType {
+                    val_type: ValueType::I32,
+                    mutable: false,
+                },
+                init: ConstExpr::from_i32(0),
+            }],
+            table_section: vec![Table {
+                min: 1,
+                max: Some(1),
+                ty: RefType::FUNCREF,
+            }],
+            code_section: vec![Code {
+                body: vec![0x41, 0x07, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            data_section: vec![DataSegment {
+                offset_expression: ConstExpr::from_i32(0),
+                init: vec![0xaa],
+                passive: false,
+            }],
+            element_section: vec![ElementSegment {
+                offset_expr: ConstExpr::from_i32(0),
+                table_index: 0,
+                init: vec![ConstExpr::from_opcode(0xd2, &[0])],
+                ty: RefType::FUNCREF,
+                mode: ElementMode::Active,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+
+        engine.compile_module(&module).unwrap();
+        let compiled = engine.compiled_module(&module).unwrap();
+        let mut metadata = compiled.aot.clone();
+        metadata.element_segments[0].init_expressions = vec![vec![0xd0, 0x70]];
+        let err = LinkedModule::from_metadata_and_first_local_function(
+            metadata,
+            compiled.function_ptr(0).unwrap(),
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("element[0].init[0] has an invalid ref.null encoding"));
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn linked_module_rejects_ref_func_initializer_with_trailing_bytes() {
+        let mut engine = CompilerEngine::new();
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            function_section: vec![0],
+            memory_section: Some(razero_wasm::module::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                ..razero_wasm::module::Memory::default()
+            }),
+            global_section: vec![Global {
+                ty: GlobalType {
+                    val_type: ValueType::I32,
+                    mutable: false,
+                },
+                init: ConstExpr::from_i32(0),
+            }],
+            table_section: vec![Table {
+                min: 1,
+                max: Some(1),
+                ty: RefType::FUNCREF,
+            }],
+            code_section: vec![Code {
+                body: vec![0x41, 0x07, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            data_section: vec![DataSegment {
+                offset_expression: ConstExpr::from_i32(0),
+                init: vec![0xaa],
+                passive: false,
+            }],
+            element_section: vec![ElementSegment {
+                offset_expr: ConstExpr::from_i32(0),
+                table_index: 0,
+                init: vec![ConstExpr::from_opcode(0xd2, &[0])],
+                ty: RefType::FUNCREF,
+                mode: ElementMode::Active,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+
+        engine.compile_module(&module).unwrap();
+        let compiled = engine.compiled_module(&module).unwrap();
+        let mut metadata = compiled.aot.clone();
+        metadata.element_segments[0].init_expressions = vec![vec![0xd2, 0x00, 0x00, 0x0b]];
+        let err = LinkedModule::from_metadata_and_first_local_function(
+            metadata,
+            compiled.function_ptr(0).unwrap(),
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("element[0].init[0] has trailing bytes"));
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
     fn linked_module_rejects_missing_local_function_descriptors() {
         let mut engine = CompilerEngine::new();
         let module = Module {
