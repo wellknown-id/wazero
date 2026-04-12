@@ -1644,8 +1644,9 @@ fn cursor_remaining(cursor: &Cursor<&[u8]>) -> usize {
 mod tests {
     use super::{
         append_path_suffix, build_wrapper_source, deserialize_native_package_metadata_bundle,
-        link_native_executable, serialize_native_package_metadata_bundle,
-        validate_hello_host_metadata, AotImportDescMetadata, HelloHostSpec, ModuleSpec,
+        current_native_packaging_target, link_native_executable,
+        serialize_native_package_metadata_bundle, validate_hello_host_metadata,
+        validate_host_import_metadata, AotImportDescMetadata, HelloHostSpec, ModuleSpec,
         NativeLinkModule, NativePackageMetadataBundle, NativePackageMetadataEntry,
         NativePackagingTarget, PackagedHostImportDescriptor, NATIVE_PACKAGE_MAGIC,
     };
@@ -1958,6 +1959,38 @@ mod tests {
 
         let err = validate_hello_host_metadata(&metadata).unwrap_err();
         assert_eq!(err.to_string(), "hello-host import type metadata is missing");
+    }
+
+    #[test]
+    fn validate_host_import_metadata_rejects_target_architecture_mismatch() {
+        let module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
+        let mut metadata = compile_module_metadata(&module);
+        let current = current_native_packaging_target().unwrap();
+        metadata.target.architecture = match current.architecture {
+            AotTargetArchitecture::X86_64 => AotTargetArchitecture::Aarch64,
+            AotTargetArchitecture::Aarch64 => AotTargetArchitecture::X86_64,
+            AotTargetArchitecture::Unknown => AotTargetArchitecture::X86_64,
+        };
+
+        let err = validate_host_import_metadata(&metadata, 1, current).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "packaged host-import linker only supports Linux artifacts matching the native linker architecture"
+        );
+    }
+
+    #[test]
+    fn validate_host_import_metadata_rejects_missing_function_import_descriptors() {
+        let module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
+        let mut metadata = compile_module_metadata(&module);
+        metadata.imports.clear();
+
+        let err = validate_host_import_metadata(&metadata, 1, current_native_packaging_target().unwrap())
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "packaged host-import linker expected a descriptor for every imported function"
+        );
     }
 
     #[test]

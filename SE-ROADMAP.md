@@ -157,8 +157,8 @@ that want a fully linked executable.
   setup.
 - [100%:ea77dc43] The current `hello-host` / packaged-host-import metadata
   validators now have targeted fail-closed coverage for missing host-import type
-  metadata plus `run` exports that either resolve to imports or point at
-  missing type metadata.
+  metadata, generic packaged-host descriptor/target mismatches, plus `run`
+  exports that either resolve to imports or point at missing type metadata.
 - [100%:04af62a8] The current packaging flow emits a package metadata bundle alongside the
   executable (`.razero-package`) and is covered by end-to-end tests.
 
