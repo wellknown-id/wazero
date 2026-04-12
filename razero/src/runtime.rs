@@ -1923,11 +1923,12 @@ mod tests {
             add_fuel, get_snapshotter, get_yielder, remaining_fuel, trap_cause_of,
             with_close_notifier, with_compilation_workers, with_fuel_controller,
             with_function_listener_factory, with_host_call_policy, with_host_call_policy_observer,
-            with_snapshotter, with_trap_observer, with_yield_policy, with_yield_policy_observer,
-            with_yielder, CloseNotifier, FuelController, FunctionListener, FunctionListenerFactory,
-            HostCallPolicyDecision, HostCallPolicyObservation, HostCallPolicyRequest, Snapshot,
-            StackIterator, TrapCause, TrapObservation, YieldPolicyDecision, YieldPolicyObservation,
-            YieldPolicyRequest,
+            with_snapshotter, with_trap_observer, with_yield_observer, with_yield_policy,
+            with_yield_policy_observer, with_yielder, CloseNotifier, FuelController,
+            FunctionListener, FunctionListenerFactory, HostCallPolicyDecision,
+            HostCallPolicyObservation, HostCallPolicyRequest, Snapshot, StackIterator, TrapCause,
+            TrapObservation, YieldEvent, YieldObservation, YieldPolicyDecision,
+            YieldPolicyObservation, YieldPolicyRequest,
         },
         CompiledModule, RuntimeConfig,
     };
@@ -4610,6 +4611,98 @@ mod tests {
             *observations
                 .lock()
                 .expect("host-call observer observations poisoned")
+        );
+    }
+
+    #[test]
+    fn host_call_policy_denial_short_circuits_yield_policy_and_yield_observer() {
+        let runtime = Runtime::new();
+        let called = Arc::new(AtomicU32::new(0));
+        let yield_policy_events = Arc::new(Mutex::new(Vec::new()));
+        let yield_observer_events = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .new_host_module_builder("env")
+            .new_function_builder()
+            .with_callback(
+                {
+                    let called = called.clone();
+                    move |ctx, _module, _params| {
+                        called.fetch_add(1, Ordering::SeqCst);
+                        get_yielder(&ctx)
+                            .expect("yielder should be injected")
+                            .r#yield();
+                        Ok(Vec::new())
+                    }
+                },
+                &[],
+                &[],
+            )
+            .with_name("hook_impl")
+            .export("hook")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                &[
+                    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
+                    0x00, 0x02, 0x0c, 0x01, 0x03, b'e', b'n', b'v', 0x04, b'h', b'o', b'o', b'k',
+                    0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n',
+                    0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+                ],
+                ModuleConfig::new().with_name("guest"),
+            )
+            .unwrap();
+
+        let policy_ctx =
+            with_host_call_policy(&with_yielder(&Context::default()), deny_hook_impl_host_call);
+        let yield_policy_ctx = with_yield_policy(&policy_ctx, allow_all_yields);
+        let yield_policy_observer_ctx = with_yield_policy_observer(&yield_policy_ctx, {
+            let yield_policy_events = yield_policy_events.clone();
+            move |_ctx: &Context, observation: YieldPolicyObservation| {
+                yield_policy_events
+                    .lock()
+                    .expect("yield-policy events poisoned")
+                    .push((
+                        observation.module.name().map(str::to_string),
+                        observation.request.name().map(str::to_string),
+                        observation.decision,
+                    ));
+            }
+        });
+        let ctx = with_yield_observer(&yield_policy_observer_ctx, {
+            let yield_observer_events = yield_observer_events.clone();
+            move |_ctx: &Context, observation: YieldObservation| {
+                yield_observer_events
+                    .lock()
+                    .expect("yield observer events poisoned")
+                    .push((
+                        observation.module.name().map(str::to_string),
+                        observation.event,
+                        observation.yield_count,
+                    ));
+            }
+        });
+
+        let err = guest
+            .exported_function("run")
+            .unwrap()
+            .call_with_context(&ctx, &[])
+            .unwrap_err();
+        assert_eq!("policy denied: host call", err.to_string());
+        assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+        assert_eq!(0, called.load(Ordering::SeqCst));
+        assert!(
+            yield_policy_events
+                .lock()
+                .expect("yield-policy events poisoned")
+                .is_empty()
+        );
+        assert!(
+            yield_observer_events
+                .lock()
+                .expect("yield observer events poisoned")
+                .is_empty()
         );
     }
 
