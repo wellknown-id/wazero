@@ -6780,6 +6780,48 @@ int main(void) {
     }
 
     #[test]
+    fn link_native_executable_rejects_invalid_import_type_index_in_sidecar_before_linking() {
+        let output_path =
+            test_workspace("package-link-driver-invalid-import-type-index").join("native-bin");
+        let metadata = AotCompiledMetadata {
+            import_function_count: 1,
+            imports: vec![crate::aot::AotImportMetadata {
+                ty: ExternType::FUNC,
+                module: "env".to_string(),
+                name: "print".to_string(),
+                desc: AotImportDescMetadata::Func(99),
+                index_per_type: 0,
+            }],
+            module_shape: crate::aot::AotModuleShapeMetadata {
+                import_function_count: 1,
+                ..crate::aot::AotModuleShapeMetadata::default()
+            },
+            ..AotCompiledMetadata::default()
+        };
+
+        let err = link_native_executable(
+            &output_path,
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "aot metadata: invalid import function type index"
+        );
+
+        let work_dir = append_path_suffix(&output_path, ".razero-link");
+        if work_dir.exists() {
+            fs::remove_dir_all(&work_dir).unwrap();
+        }
+    }
+
+    #[test]
     fn link_native_executable_rejects_architecture_mismatch_before_linking() {
         let current = current_native_packaging_target().unwrap();
         let mismatched_architecture = match current.architecture {
