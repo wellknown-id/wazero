@@ -7788,6 +7788,117 @@ mod tests {
     }
 
     #[test]
+    fn yield_observer_resume_context_receives_subsequent_resume_events() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("example")
+            .new_function_builder()
+            .with_func(
+                |ctx, _module, _params| {
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .with_name("async_work")
+            .export("async_work")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                include_bytes!("../../experimental/testdata/yield.wasm"),
+                ModuleConfig::new(),
+            )
+            .unwrap();
+
+        let initial_observations = Arc::new(Mutex::new(Vec::new()));
+        let resumed_observations = Arc::new(Mutex::new(Vec::new()));
+        let initial_ctx = with_yield_observer(&with_yielder(&Context::default()), {
+            let initial_observations = initial_observations.clone();
+            move |_ctx: &Context, observation: YieldObservation| {
+                initial_observations
+                    .lock()
+                    .expect("initial yield observations poisoned")
+                    .push((
+                        observation.event,
+                        observation.yield_count,
+                        observation.expected_host_results,
+                    ));
+            }
+        });
+
+        let err = guest
+            .exported_function("run_twice")
+            .unwrap()
+            .call_with_context(&initial_ctx, &[])
+            .unwrap_err();
+        let RuntimeError::Yield(first_yield) = err else {
+            panic!("expected initial yield error");
+        };
+
+        let resumed_ctx = with_yield_observer(&with_yielder(&Context::default()), {
+            let resumed_observations = resumed_observations.clone();
+            move |_ctx: &Context, observation: YieldObservation| {
+                resumed_observations
+                    .lock()
+                    .expect("resumed yield observations poisoned")
+                    .push((
+                        observation.event,
+                        observation.yield_count,
+                        observation.expected_host_results,
+                    ));
+            }
+        });
+
+        let err = first_yield
+            .resumer()
+            .expect("resumer should be present")
+            .resume(&resumed_ctx, &[40])
+            .unwrap_err();
+        let RuntimeError::Yield(second_yield) = err else {
+            panic!("expected second yield error");
+        };
+
+        let final_ctx = with_yield_observer(&with_yielder(&Context::default()), {
+            let resumed_observations = resumed_observations.clone();
+            move |_ctx: &Context, observation: YieldObservation| {
+                resumed_observations
+                    .lock()
+                    .expect("resumed yield observations poisoned")
+                    .push((
+                        observation.event,
+                        observation.yield_count,
+                        observation.expected_host_results,
+                    ));
+            }
+        });
+
+        let results = second_yield
+            .resumer()
+            .expect("resumer should be present")
+            .resume(&final_ctx, &[2])
+            .unwrap();
+
+        assert_eq!(vec![42], results);
+        assert_eq!(
+            vec![(YieldEvent::Yielded, 1, 1)],
+            *initial_observations
+                .lock()
+                .expect("initial yield observations poisoned")
+        );
+        assert_eq!(
+            vec![(YieldEvent::Resumed, 1, 1), (YieldEvent::Resumed, 1, 1)],
+            *resumed_observations
+                .lock()
+                .expect("resumed yield observations poisoned")
+        );
+    }
+
+    #[test]
     fn yield_observer_does_not_persist_when_resume_context_omits_observer() {
         let runtime = Runtime::new();
         runtime
