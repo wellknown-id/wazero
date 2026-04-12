@@ -1042,6 +1042,87 @@ mod tests {
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     #[test]
+    fn linked_module_start_rejects_non_function_start_export() {
+        let mut engine = CompilerEngine::new();
+        let module = Module {
+            type_section: vec![function_type(&[], &[])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![0x0b],
+                ..Code::default()
+            }],
+            global_section: vec![Global {
+                ty: GlobalType {
+                    val_type: ValueType::I32,
+                    mutable: false,
+                },
+                init: ConstExpr::from_i32(0),
+            }],
+            export_section: vec![Export {
+                ty: ExternType::GLOBAL,
+                name: "_start".to_string(),
+                index: 0,
+            }],
+            ..Module::default()
+        };
+
+        engine.compile_module(&module).unwrap();
+        let compiled = engine.compiled_module(&module).unwrap();
+        let linked = LinkedModule::from_metadata_and_first_local_function(compiled.aot.clone(), 0)
+            .unwrap();
+
+        let err = linked.start().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("linked module metadata has no start function"));
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn linked_module_start_rejects_start_export_without_local_function_metadata() {
+        let mut engine = CompilerEngine::new();
+        let module = Module {
+            type_section: vec![function_type(&[], &[])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "_start".to_string(),
+                index: 0,
+            }],
+            ..Module::default()
+        };
+
+        engine.compile_module(&module).unwrap();
+        let compiled = engine.compiled_module(&module).unwrap();
+        let mut metadata = compiled.aot.clone();
+        let start_export = metadata
+            .exports
+            .iter_mut()
+            .find(|export| export.ty == ExternType::FUNC && export.name == "_start")
+            .unwrap();
+        start_export.index = 7;
+        let linked =
+            LinkedModule::from_metadata_and_first_local_function(metadata, compiled.function_ptr(0).unwrap())
+                .unwrap();
+
+        let err = linked.start().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("linked module metadata has no local function for wasm index 7"));
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
     fn linked_module_start_rejects_parameterized_start_export() {
         let mut engine = CompilerEngine::new();
         let module = Module {
@@ -1109,6 +1190,43 @@ mod tests {
         assert!(err
             .to_string()
             .contains("linked module metadata is missing type 7"));
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn linked_module_start_rejects_missing_entry_preamble_for_start_export() {
+        let mut engine = CompilerEngine::new();
+        let module = Module {
+            type_section: vec![function_type(&[], &[])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "_start".to_string(),
+                index: 0,
+            }],
+            ..Module::default()
+        };
+
+        engine.compile_module(&module).unwrap();
+        let compiled = engine.compiled_module(&module).unwrap();
+        let mut linked = LinkedModule::from_metadata_and_first_local_function(
+            compiled.aot.clone(),
+            compiled.function_ptr(0).unwrap(),
+        )
+        .unwrap();
+        linked.entry_preamble_offsets.clear();
+
+        let err = linked.start().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("linked module metadata is missing an entry preamble for type 0"));
     }
 
     #[cfg(all(

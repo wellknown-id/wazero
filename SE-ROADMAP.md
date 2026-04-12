@@ -141,7 +141,9 @@ that want a fully linked executable.
   metadata-driven linked startup/call surface for Linux ELF AOT modules with the
   supported runtime-state slice, and its public fail-closed constructor /
   `call_export` / `start` error paths, eager start-signature/type validation,
-  plus repeated-call runtime-state behavior are now pinned by targeted tests.
+  plus repeated-call runtime-state behavior are now pinned by targeted tests,
+  including `_start` fallback rejection for non-function exports, missing local
+  function metadata, and missing cached entry preambles.
 - [100%:04af62a8] Linked runtime-plan bounds and metadata-shape rejection for
   packaged local memory / table initialization are now pinned by targeted tests
   too, so obvious segment-overflow, segment-kind/type, element-initializer,
