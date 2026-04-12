@@ -1,4 +1,7 @@
-use std::{env, hint::black_box, process::Command, sync::Arc, sync::OnceLock};
+use std::{env, hint::black_box, process::Command, sync::OnceLock};
+
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 
 use criterion::Criterion;
 use razero::{
@@ -22,6 +25,8 @@ const GROUP_MEMORY_ALLOCATE: &str = "secbench/memory_allocate";
 const GROUP_GUARD_PAGE_ALLOCATOR_GROW: &str = "secbench/guard_page_allocator_grow";
 const GROUP_FUEL_OVERHEAD: &str = "secbench/fuel_overhead";
 const GROUP_FUEL_CONTROLLER_OVERHEAD: &str = "secbench/fuel_controller_overhead";
+const GROUP_FUEL_COMPILE_OVERHEAD: &str = "secbench/fuel_compile_overhead";
+const GROUP_FUEL_ACCOUNTING: &str = "secbench/fuel_accounting";
 
 static FAC_EXECUTION_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
@@ -288,6 +293,110 @@ fn benchmark_fuel_controller_overhead(c: &mut Criterion) {
     runtime.close(&ctx).expect("runtime close should succeed");
 }
 
+fn benchmark_fuel_compile_overhead(c: &mut Criterion) {
+    let mut group = c.benchmark_group(GROUP_FUEL_COMPILE_OVERHEAD);
+
+    for (name, fuel) in [("no_fuel", 0), ("fuel_enabled", 1_000_000)] {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let ctx = Context::default();
+                let runtime = Runtime::with_config(runtime_config().with_fuel(fuel));
+                let compiled = runtime
+                    .compile(FAC_WASM)
+                    .expect("factorial module should compile");
+                black_box(compiled.bytes().len());
+                compiled.close();
+                runtime.close(&ctx).expect("runtime close should succeed");
+            });
+        });
+    }
+
+    group.finish();
+}
+
+struct AccountingFuelController {
+    budget: i64,
+    consumed: Arc<AtomicI64>,
+}
+
+impl AccountingFuelController {
+    fn new(budget: i64, consumed: Arc<AtomicI64>) -> Self {
+        consumed.store(0, Ordering::SeqCst);
+        Self { budget, consumed }
+    }
+}
+
+impl razero::FuelController for AccountingFuelController {
+    fn budget(&self) -> i64 {
+        self.budget
+    }
+
+    fn consumed(&self, amount: i64) {
+        self.consumed.fetch_add(amount, Ordering::SeqCst);
+    }
+}
+
+fn benchmark_fuel_accounting(c: &mut Criterion) {
+    if !fac_execution_available() {
+        skip_fac_dependent_group(GROUP_FUEL_ACCOUNTING);
+        return;
+    }
+
+    {
+        let ctx = Context::default();
+        let runtime = Runtime::with_config(runtime_config().with_fuel(1));
+        let module = runtime
+            .instantiate_binary(FAC_WASM, ModuleConfig::new())
+            .expect("factorial module should instantiate");
+        let fac = module
+            .exported_function("fac-ssa")
+            .expect("fac-ssa export should exist");
+
+        let consumed = Arc::new(AtomicI64::new(0));
+        let controller = AccountingFuelController::new(10_000_000, consumed.clone());
+        let call_ctx = with_fuel_controller(&Context::default(), controller);
+        let results = fac
+            .call_with_context(&call_ctx, &[FAC_BENCH_ARG])
+            .expect("fac-ssa should execute");
+        black_box(results);
+        eprintln!(
+            "secbench/fuel_accounting: fac(20) consumed {} fuel units",
+            consumed.load(Ordering::SeqCst)
+        );
+
+        drop(call_ctx);
+        module.close(&ctx).expect("module close should succeed");
+        runtime.close(&ctx).expect("runtime close should succeed");
+    }
+
+    let mut group = c.benchmark_group(GROUP_FUEL_ACCOUNTING);
+
+    group.bench_function("fuel_exhaustion_path", |b| {
+        b.iter(|| {
+            let ctx = Context::default();
+            let runtime = Runtime::with_config(runtime_config().with_fuel(1));
+            let module = runtime
+                .instantiate_binary(FAC_WASM, ModuleConfig::new())
+                .expect("factorial module should instantiate");
+            let fac = module
+                .exported_function("fac-ssa")
+                .expect("fac-ssa export should exist");
+
+            let call_ctx = with_fuel_controller(&Context::default(), SimpleFuelController::new(1));
+            let err = fac
+                .call_with_context(&call_ctx, &[FAC_BENCH_ARG])
+                .expect_err("should exhaust fuel");
+            black_box(err);
+
+            drop(call_ctx);
+            module.close(&ctx).expect("module close should succeed");
+            runtime.close(&ctx).expect("runtime close should succeed");
+        });
+    });
+
+    group.finish();
+}
+
 fn run_fac_probe() -> i32 {
     let runtime = Runtime::with_config(runtime_config());
     let module = match runtime.instantiate_binary(FAC_WASM, ModuleConfig::new()) {
@@ -324,5 +433,7 @@ fn main() {
     benchmark_guard_page_allocator_grow(&mut criterion);
     benchmark_fuel_overhead(&mut criterion);
     benchmark_fuel_controller_overhead(&mut criterion);
+    benchmark_fuel_compile_overhead(&mut criterion);
+    benchmark_fuel_accounting(&mut criterion);
     criterion.final_summary();
 }

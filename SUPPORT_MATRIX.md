@@ -250,6 +250,25 @@ Instead, the current experimental contract is:
   today’s fuel values as runtime-version-specific accounting units rather than a
   stable cross-version “instruction count”.
 
+### Measured overhead (Linux amd64, optimized build)
+
+These measurements are from `cargo bench -p razero --bench secbench` using the
+`fac(20)` factorial workload. They are representative of a compute-bound guest
+with function entries and loop iterations:
+
+| Metric | Value |
+| --- | --- |
+| Compile-time overhead (fuel injection) | ~8.5% (18.0 µs → 19.6 µs) |
+| Execution overhead (fuel enabled vs disabled) | ~0-1% (within measurement noise) |
+| Fuel exhaustion trap path | ~10% over normal execution |
+| Accounting determinism | fac(20) consumes exactly 100 fuel units across runs |
+
+The compile-time overhead comes from emitting ~5 additional SSA instructions
+(load/sub/store/cmp/branch) at each function entry and loop header. The
+execution overhead is negligible because the fuel check is a simple sequential
+decrement against a hot cache line. The fuel exhaustion trap path includes the
+cost of the exit-to-engine round trip plus the trap error construction.
+
 ### What embedders can rely on today
 
 - Fuel is best treated as a **deterministic execution budget**, not as an exact
