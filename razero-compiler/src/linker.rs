@@ -7453,6 +7453,104 @@ int main(void) {
     }
 
     #[test]
+    fn link_native_executable_rejects_unknown_element_table_reference() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            table_section: vec![Table {
+                min: 1,
+                max: Some(1),
+                ty: RefType::FUNCREF,
+            }],
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            element_section: vec![ElementSegment {
+                offset_expr: ConstExpr::from_i32(0),
+                table_index: 0,
+                init: vec![ConstExpr::from_opcode(0xd2, &[0])],
+                ty: RefType::FUNCREF,
+                mode: ElementMode::Active,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let mut metadata = compile_module_metadata(&module);
+        metadata.element_segments[0].table_index = 1;
+
+        let err = link_native_executable(
+            PathBuf::from("target/unknown-element-table-native-bin"),
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "aot metadata: invalid element table index"
+        );
+    }
+
+    #[test]
+    fn link_native_executable_rejects_non_funcref_element_segments() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            table_section: vec![Table {
+                min: 1,
+                max: Some(1),
+                ty: RefType::FUNCREF,
+            }],
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            element_section: vec![ElementSegment {
+                offset_expr: ConstExpr::from_i32(0),
+                table_index: 0,
+                init: vec![ConstExpr::from_opcode(0xd2, &[0])],
+                ty: RefType::FUNCREF,
+                mode: ElementMode::Active,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let mut metadata = compile_module_metadata(&module);
+        metadata.element_segments[0].ty = RefType::EXTERNREF;
+
+        let err = link_native_executable(
+            PathBuf::from("target/non-funcref-element-native-bin"),
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "aot metadata: active element ref type mismatch"
+        );
+    }
+
+    #[test]
     fn link_native_executable_rejects_empty_module_list() {
         let err =
             link_native_executable(PathBuf::from("target/empty-native-bin"), &[], &[]).unwrap_err();
