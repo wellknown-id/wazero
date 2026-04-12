@@ -2013,6 +2013,27 @@ mod tests {
     }
 
     #[test]
+    fn link_hello_host_executable_rejects_invalid_host_import_type_index_in_sidecar() {
+        let module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
+        let mut metadata = compile_module_metadata(&module);
+        let func_import = metadata
+            .imports
+            .iter_mut()
+            .find(|import| matches!(&import.desc, AotImportDescMetadata::Func(_)))
+            .unwrap();
+        func_import.desc = AotImportDescMetadata::Func(99);
+
+        let err = super::link_hello_host_executable(
+            PathBuf::from("target/hello-host-missing-import-type"),
+            &NativeLinkModule::new("hello-host", Vec::new(), serialize_aot_metadata(&metadata)),
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "aot metadata: invalid import function type index");
+    }
+
+    #[test]
     fn link_hello_host_executable_rejects_multiple_function_imports_via_packaged_host_validation() {
         let module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
         let mut metadata = compile_module_metadata(&module);
