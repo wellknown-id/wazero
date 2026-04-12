@@ -2013,6 +2013,56 @@ mod tests {
     }
 
     #[test]
+    fn link_hello_host_executable_rejects_multiple_function_imports_via_packaged_host_validation() {
+        let module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
+        let mut metadata = compile_module_metadata(&module);
+        let mut extra_import = metadata.imports[0].clone();
+        extra_import.name = "extra".to_string();
+        extra_import.index_per_type = 1;
+        metadata.imports.push(extra_import);
+        metadata.import_function_count = 2;
+        metadata.module_shape.import_function_count = 2;
+
+        let err = super::link_hello_host_executable(
+            PathBuf::from("target/hello-host-extra-import"),
+            &NativeLinkModule::new("hello-host", Vec::new(), serialize_aot_metadata(&metadata)),
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "packaged host-import linker currently expects explicit function imports, one local memory, no globals/tables/start, and no element segments"
+        );
+    }
+
+    #[test]
+    fn link_hello_host_executable_rejects_missing_local_memory_via_packaged_host_validation() {
+        let module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
+        let mut metadata = compile_module_metadata(&module);
+        metadata.memory = None;
+        metadata
+            .exports
+            .retain(|export| !(export.ty.0 == 2 && export.name == "memory"));
+        metadata.data_segments.clear();
+        metadata.module_shape.has_local_memory = false;
+        metadata.module_shape.has_any_memory = false;
+        metadata.module_shape.data_segment_count = 0;
+
+        let err = super::link_hello_host_executable(
+            PathBuf::from("target/hello-host-no-memory"),
+            &NativeLinkModule::new("hello-host", Vec::new(), serialize_aot_metadata(&metadata)),
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "packaged host-import linker currently expects explicit function imports, one local memory, no globals/tables/start, and no element segments"
+        );
+    }
+
+    #[test]
     fn validate_host_import_metadata_rejects_target_architecture_mismatch() {
         let module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
         let mut metadata = compile_module_metadata(&module);
