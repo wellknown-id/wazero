@@ -134,8 +134,8 @@ allowed host function later calls `Yield()`.
     context itself installs a `YieldObserver`**.
 - `YieldEvent::Cancelled` exists in the public enum, but the current runtime
   path does **not** emit a `YieldObserver` callback on `Cancel`.
-- Validation errors before resume starts (for example a missing resume context or
-  wrong host result count) do not emit `resumed` and do not spend the resumer.
+- Validation errors before resume starts (for example wrong host result count)
+  do not emit `resumed` and do not spend the resumer.
 - Resume uses the resume context for subsequent host-call state. That means a
   resumed execution can swap in a new `TrapObserver`, `HostCallPolicy`, or
   `YieldPolicy`. A `YieldObserver` attached to the resume context receives the
