@@ -771,6 +771,63 @@ mod tests {
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     #[test]
+    fn linked_module_construction_runs_start_once_and_start_is_idempotent() {
+        let mut engine = CompilerEngine::new();
+        let module = Module {
+            type_section: vec![function_type(&[], &[]), function_type(&[], &[ValueType::I32])],
+            function_section: vec![0, 1],
+            memory_section: Some(razero_wasm::module::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                ..razero_wasm::module::Memory::default()
+            }),
+            code_section: vec![
+                Code {
+                    body: vec![
+                        0x41, 0x00, // i32.const 0
+                        0x41, 0x00, // i32.const 0
+                        0x28, 0x02, 0x00, // i32.load align=2 offset=0
+                        0x41, 0x01, // i32.const 1
+                        0x6a, // i32.add
+                        0x36, 0x02, 0x00, // i32.store align=2 offset=0
+                        0x0b,
+                    ],
+                    ..Code::default()
+                },
+                Code {
+                    body: vec![0x41, 0x00, 0x28, 0x02, 0x00, 0x0b],
+                    ..Code::default()
+                },
+            ],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 1,
+            }],
+            start_section: Some(0),
+            ..Module::default()
+        };
+
+        engine.compile_module(&module).unwrap();
+        let compiled = engine.compiled_module(&module).unwrap();
+        let linked = LinkedModule::from_metadata_and_first_local_function(
+            compiled.aot.clone(),
+            compiled.function_ptr(0).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(linked.call_export("run", &[]).unwrap(), vec![1]);
+        linked.start().unwrap();
+        assert_eq!(linked.call_export("run", &[]).unwrap(), vec![1]);
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
     fn linked_module_start_rejects_missing_start_entrypoint() {
         let mut engine = CompilerEngine::new();
         let module = Module {
