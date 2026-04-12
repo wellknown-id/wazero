@@ -1645,9 +1645,9 @@ mod tests {
     use super::{
         append_path_suffix, build_wrapper_source, deserialize_native_package_metadata_bundle,
         link_native_executable, serialize_native_package_metadata_bundle,
-        validate_hello_host_metadata, HelloHostSpec, ModuleSpec, NativeLinkModule,
-        NativePackageMetadataBundle, NativePackageMetadataEntry, NativePackagingTarget,
-        PackagedHostImportDescriptor, NATIVE_PACKAGE_MAGIC,
+        validate_hello_host_metadata, AotImportDescMetadata, HelloHostSpec, ModuleSpec,
+        NativeLinkModule, NativePackageMetadataBundle, NativePackageMetadataEntry,
+        NativePackagingTarget, PackagedHostImportDescriptor, NATIVE_PACKAGE_MAGIC,
     };
     use std::{
         fs,
@@ -1943,6 +1943,60 @@ mod tests {
             err.to_string(),
             "hello-host linker does not support passive data segments"
         );
+    }
+
+    #[test]
+    fn validate_hello_host_metadata_rejects_missing_host_import_type_metadata() {
+        let module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
+        let mut metadata = compile_module_metadata(&module);
+        let func_import = metadata
+            .imports
+            .iter_mut()
+            .find(|import| matches!(import.desc, AotImportDescMetadata::Func(_)))
+            .expect("hello-host should have one function import");
+        func_import.desc = AotImportDescMetadata::Func(99);
+
+        let err = validate_hello_host_metadata(&metadata).unwrap_err();
+        assert_eq!(err.to_string(), "hello-host import type metadata is missing");
+    }
+
+    #[test]
+    fn hello_host_spec_rejects_run_export_that_points_to_import() {
+        let module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
+        let mut metadata = compile_module_metadata(&module);
+        let run_export = metadata
+            .exports
+            .iter_mut()
+            .find(|export| export.ty.0 == 0 && export.name == "run")
+            .expect("hello-host should export run");
+        run_export.index = 0;
+
+        let err = HelloHostSpec::from_metadata("hello-host", &metadata).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "hello-host run export must resolve to a local function"
+        );
+    }
+
+    #[test]
+    fn hello_host_spec_rejects_run_export_with_missing_type_metadata() {
+        let module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
+        let mut metadata = compile_module_metadata(&module);
+        let run_export_index = metadata
+            .exports
+            .iter()
+            .find(|export| export.ty.0 == 0 && export.name == "run")
+            .expect("hello-host should export run")
+            .index;
+        let run_function = metadata
+            .functions
+            .iter_mut()
+            .find(|function| function.wasm_function_index == run_export_index)
+            .expect("run export should resolve to a local function");
+        run_function.type_index = 99;
+
+        let err = HelloHostSpec::from_metadata("hello-host", &metadata).unwrap_err();
+        assert_eq!(err.to_string(), "hello-host run export is missing type metadata");
     }
 
     #[cfg(all(
