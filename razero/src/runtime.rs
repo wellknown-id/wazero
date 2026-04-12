@@ -3849,6 +3849,90 @@ mod tests {
     }
 
     #[test]
+    fn fuel_controller_override_takes_precedence_in_host_calls() {
+        let runtime = Runtime::new();
+        let module = runtime
+            .new_host_module_builder("env")
+            .new_function_builder()
+            .with_func(
+                |ctx, _module, _params| {
+                    let controller = get_fuel_controller(&ctx).expect("fuel controller should exist");
+                    Ok(vec![
+                        controller.budget() as u64,
+                        remaining_fuel(&ctx).unwrap() as u64,
+                    ])
+                },
+                &[],
+                &[ValueType::I64, ValueType::I64],
+            )
+            .with_name("inspect")
+            .export("inspect")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let parent = with_fuel_controller(
+            &Context::default(),
+            TestFuelController {
+                budget: 100,
+                consumed: Arc::new(AtomicI64::new(0)),
+            },
+        );
+        let overridden = with_fuel_controller(
+            &parent,
+            TestFuelController {
+                budget: 2,
+                consumed: Arc::new(AtomicI64::new(0)),
+            },
+        );
+
+        let results = module
+            .exported_function("inspect")
+            .unwrap()
+            .call_with_context(&overridden, &[])
+            .unwrap();
+
+        assert_eq!(vec![2, 1], results);
+    }
+
+    #[test]
+    fn fuel_exhaustion_after_host_debit_traps_call() {
+        let runtime = Runtime::new();
+        let module = runtime
+            .new_host_module_builder("env")
+            .new_function_builder()
+            .with_func(
+                |ctx, _module, _params| {
+                    assert_eq!(0, remaining_fuel(&ctx).unwrap());
+                    add_fuel(&ctx, -2).unwrap();
+                    Ok(vec![1])
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .with_name("burn")
+            .export("burn")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let err = module
+            .exported_function("burn")
+            .unwrap()
+            .call_with_context(
+                &with_fuel_controller(
+                    &Context::default(),
+                    TestFuelController {
+                        budget: 1,
+                        consumed: Arc::new(AtomicI64::new(0)),
+                    },
+                ),
+                &[],
+            )
+            .unwrap_err();
+
+        assert_eq!("fuel exhausted", err.to_string());
+    }
+
+    #[test]
     fn listener_abort_runs_when_host_function_errors() {
         let runtime = Runtime::new();
         let module = runtime
