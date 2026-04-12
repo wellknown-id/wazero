@@ -1109,4 +1109,35 @@ mod tests {
         let err = build_linked_runtime_plan(&metadata).unwrap_err();
         assert!(err.contains("read index of global:"));
     }
+
+    #[test]
+    fn linked_runtime_plan_rejects_invalid_ref_null_offset_type() {
+        let mut metadata = metadata_with_one_table_global_data_and_element();
+        metadata.data_segments[0].offset_expression = vec![0xd0, 0x00, 0x0b];
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains("invalid type for ref.null: 0x0"));
+    }
+
+    #[test]
+    fn linked_runtime_plan_rejects_truncated_ref_null_offset_expression() {
+        let mut metadata = metadata_with_one_table_global_data_and_element();
+        metadata.data_segments[0].offset_expression = vec![0xd0];
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains(
+            "read reference type for ref.null: unexpected end of constant expression"
+        ));
+    }
+
+    #[test]
+    fn linked_runtime_plan_rejects_multi_value_const_expression() {
+        let mut metadata = metadata_with_one_table_global_data_and_element();
+        metadata.data_segments[0].offset_expression = vec![0x41, 0x00, 0x41, 0x01, 0x0b];
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains(
+            "stack has more than one value at end of constant expression"
+        ));
+    }
 }
