@@ -1643,14 +1643,16 @@ fn cursor_remaining(cursor: &Cursor<&[u8]>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_path_suffix, build_wrapper_source, cabi_wrapper_symbol_name,
-        current_native_packaging_target, deserialize_native_package_metadata_bundle,
-        link_native_executable, module_exports, serialize_native_package_metadata_bundle,
+        append_path_suffix, build_preamble_object, build_wrapper_source,
+        cabi_wrapper_symbol_name, current_native_packaging_target,
+        deserialize_native_package_metadata_bundle, link_native_executable, module_exports,
+        preamble_symbol_name, serialize_native_package_metadata_bundle,
         validate_hello_host_metadata, validate_host_import_metadata, AotImportDescMetadata,
         HelloHostSpec, ModuleSpec, NativeCAbiExport, NativeLinkModule,
         NativePackageMetadataBundle, NativePackageMetadataEntry, NativePackagingTarget,
         PackagedHostImportDescriptor, NATIVE_PACKAGE_MAGIC,
     };
+    use object::Object;
     use std::{
         fs,
         path::PathBuf,
@@ -7324,6 +7326,42 @@ int main(void) {
 
         assert!(source.contains(&cabi_wrapper_symbol_name("guest", 0)));
         assert!(!source.contains(&cabi_wrapper_symbol_name("guest", 1)));
+    }
+
+    #[test]
+    fn build_preamble_object_skips_unsupported_signatures_when_supported_ones_remain() {
+        let object_bytes = build_preamble_object(
+            &[ModuleSpec {
+                sanitized_name: "guest".to_string(),
+                metadata: AotCompiledMetadata {
+                    types: vec![
+                        crate::aot::AotFunctionTypeMetadata {
+                            params: vec![ValueType::I32],
+                            results: vec![ValueType::I32],
+                            param_num_in_u64: 1,
+                            result_num_in_u64: 1,
+                        },
+                        crate::aot::AotFunctionTypeMetadata {
+                            params: vec![ValueType::V128],
+                            results: vec![],
+                            param_num_in_u64: 2,
+                            result_num_in_u64: 0,
+                        },
+                    ],
+                    ..AotCompiledMetadata::default()
+                },
+            }],
+            current_native_packaging_target().unwrap(),
+        )
+        .unwrap();
+
+        let file = object::File::parse(object_bytes.as_slice()).unwrap();
+        assert!(file
+            .symbol_by_name(&preamble_symbol_name("guest", 0))
+            .is_some());
+        assert!(file
+            .symbol_by_name(&preamble_symbol_name("guest", 1))
+            .is_none());
     }
 
     #[test]
