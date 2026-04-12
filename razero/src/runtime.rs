@@ -1920,8 +1920,8 @@ mod tests {
         config::ModuleConfig,
         ctx_keys::Context,
         experimental::{
-            add_fuel, get_snapshotter, get_time_provider, get_yielder, remaining_fuel,
-            trap_cause_of,
+            add_fuel, get_fuel_controller, get_snapshotter, get_time_provider, get_yielder,
+            remaining_fuel, trap_cause_of,
             with_close_notifier, with_compilation_workers, with_fuel_controller,
             with_function_listener_factory, with_host_call_policy, with_host_call_policy_observer,
             with_snapshotter, with_time_provider, with_trap_observer, with_yield_observer,
@@ -5878,6 +5878,175 @@ mod tests {
                 .resume(&with_yielder(&Context::default()), &[2])
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn fuel_controller_resume_context_overrides_follow_on_host_call() {
+        let runtime = Runtime::new();
+        let seen_budgets = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .new_host_module_builder("example")
+            .new_function_builder()
+            .with_func(
+                {
+                    let seen_budgets = seen_budgets.clone();
+                    move |ctx, _module, _params| {
+                        let controller =
+                            get_fuel_controller(&ctx).expect("fuel controller should exist");
+                        seen_budgets
+                            .lock()
+                            .expect("seen budgets poisoned")
+                            .push(controller.budget());
+                        get_yielder(&ctx)
+                            .expect("yielder should be injected")
+                            .r#yield();
+                        Ok(vec![0])
+                    }
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .with_name("async_work")
+            .export("async_work")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                include_bytes!("../../experimental/testdata/yield.wasm"),
+                ModuleConfig::new(),
+            )
+            .unwrap();
+        let initial_consumed = Arc::new(AtomicI64::new(0));
+        let resume_consumed = Arc::new(AtomicI64::new(0));
+
+        let err = guest
+            .exported_function("run_twice")
+            .unwrap()
+            .call_with_context(
+                &with_fuel_controller(
+                    &with_yielder(&Context::default()),
+                    TestFuelController {
+                        budget: 10,
+                        consumed: initial_consumed.clone(),
+                    },
+                ),
+                &[],
+            )
+            .unwrap_err();
+        let RuntimeError::Yield(first_yield) = err else {
+            panic!("expected initial yield error");
+        };
+
+        let err = first_yield
+            .resumer()
+            .expect("resumer should be present")
+            .resume(
+                &with_fuel_controller(
+                    &with_yielder(&Context::default()),
+                    TestFuelController {
+                        budget: 1,
+                        consumed: resume_consumed.clone(),
+                    },
+                ),
+                &[40],
+            )
+            .unwrap_err();
+        let RuntimeError::Yield(second_yield) = err else {
+            panic!("expected second yield error");
+        };
+
+        assert_eq!(
+            vec![42],
+            second_yield
+                .resumer()
+                .expect("resumer should be present")
+                .resume(&with_yielder(&Context::default()), &[2])
+                .unwrap()
+        );
+        assert_eq!(vec![10, 1], *seen_budgets.lock().expect("seen budgets poisoned"));
+        assert!(initial_consumed.load(Ordering::SeqCst) > 0);
+        assert_eq!(0, resume_consumed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn fuel_controller_initial_context_does_not_persist_when_resume_omits_one() {
+        let runtime = Runtime::new();
+        let seen_budgets = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .new_host_module_builder("example")
+            .new_function_builder()
+            .with_func(
+                {
+                    let seen_budgets = seen_budgets.clone();
+                    move |ctx, _module, _params| {
+                        let budget = get_fuel_controller(&ctx).map(|controller| controller.budget());
+                        seen_budgets
+                            .lock()
+                            .expect("seen budgets poisoned")
+                            .push(budget);
+                        get_yielder(&ctx)
+                            .expect("yielder should be injected")
+                            .r#yield();
+                        Ok(vec![0])
+                    }
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .with_name("async_work")
+            .export("async_work")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                include_bytes!("../../experimental/testdata/yield.wasm"),
+                ModuleConfig::new(),
+            )
+            .unwrap();
+        let consumed = Arc::new(AtomicI64::new(0));
+
+        let err = guest
+            .exported_function("run_twice")
+            .unwrap()
+            .call_with_context(
+                &with_fuel_controller(
+                    &with_yielder(&Context::default()),
+                    TestFuelController {
+                        budget: 10,
+                        consumed: consumed.clone(),
+                    },
+                ),
+                &[],
+            )
+            .unwrap_err();
+        let RuntimeError::Yield(first_yield) = err else {
+            panic!("expected initial yield error");
+        };
+
+        let err = first_yield
+            .resumer()
+            .expect("resumer should be present")
+            .resume(&with_yielder(&Context::default()), &[40])
+            .unwrap_err();
+        let RuntimeError::Yield(second_yield) = err else {
+            panic!("expected second yield error");
+        };
+
+        assert_eq!(
+            vec![42],
+            second_yield
+                .resumer()
+                .expect("resumer should be present")
+                .resume(&with_yielder(&Context::default()), &[2])
+                .unwrap()
+        );
+        assert_eq!(
+            vec![Some(10), None],
+            *seen_budgets.lock().expect("seen budgets poisoned")
+        );
+        assert!(consumed.load(Ordering::SeqCst) > 0);
     }
 
     #[test]
