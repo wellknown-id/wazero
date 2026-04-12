@@ -6655,6 +6655,51 @@ mod tests {
     }
 
     #[test]
+    fn host_panic_does_not_emit_trap_observer_event() {
+        let runtime = Runtime::new();
+        let module = runtime
+            .new_host_module_builder("env")
+            .new_function_builder()
+            .with_func(
+                |_ctx, _module, _params| -> Result<Vec<u64>, RuntimeError> {
+                    panic!("boom");
+                },
+                &[],
+                &[],
+            )
+            .with_name("panic")
+            .export("panic")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let ctx = with_trap_observer(&Context::default(), {
+            let observations = observations.clone();
+            move |_ctx: &Context, observation: TrapObservation| {
+                observations
+                    .lock()
+                    .expect("trap observations poisoned")
+                    .push((observation.cause, observation.err.to_string()));
+            }
+        });
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = module
+                .exported_function("panic")
+                .unwrap()
+                .call_with_context(&ctx, &[]);
+        }));
+
+        assert!(panic.is_err());
+        assert!(
+            observations
+                .lock()
+                .expect("trap observations poisoned")
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn yield_policy_context_overrides_runtime_config_policy() {
         let runtime = Runtime::with_config(RuntimeConfig::new().with_yield_policy(deny_all_yields));
         runtime
