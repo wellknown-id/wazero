@@ -3939,6 +3939,68 @@ mod tests {
     }
 
     #[test]
+    fn host_fuel_overdraw_reports_after_then_consumed_then_exhausted() {
+        let runtime = Runtime::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let module = runtime
+            .new_host_module_builder("env")
+            .new_function_builder()
+            .with_func(
+                |ctx, _module, _params| {
+                    assert_eq!(0, remaining_fuel(&ctx).unwrap());
+                    add_fuel(&ctx, -2).unwrap();
+                    Ok(vec![1])
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .with_name("burn")
+            .export("burn")
+            .instantiate(&Context::default())
+            .unwrap();
+        let base_ctx = with_function_listener_factory(
+            &Context::default(),
+            RecordingListenerFactory {
+                events: events.clone(),
+            },
+        );
+        let controller_ctx = with_fuel_controller(
+            &base_ctx,
+            TestFuelController {
+                budget: 1,
+                consumed: Arc::new(AtomicI64::new(0)),
+            },
+        );
+        let call_ctx = with_fuel_observer(&controller_ctx, {
+            let events = events.clone();
+            move |_ctx: &Context, observation: FuelObservation| {
+                events
+                    .lock()
+                    .expect("events poisoned")
+                    .push(format!("fuel:{:?}", observation.event));
+            }
+        });
+
+        let err = module
+            .exported_function("burn")
+            .unwrap()
+            .call_with_context(&call_ctx, &[])
+            .unwrap_err();
+
+        assert_eq!("fuel exhausted", err.to_string());
+        assert_eq!(
+            vec![
+                "fuel:Budgeted".to_string(),
+                "before:burn:[]:burn@0:0".to_string(),
+                "after:burn:[1]".to_string(),
+                "fuel:Consumed".to_string(),
+                "fuel:Exhausted".to_string(),
+            ],
+            *events.lock().expect("events poisoned")
+        );
+    }
+
+    #[test]
     fn listener_abort_runs_when_host_function_errors() {
         let runtime = Runtime::new();
         let module = runtime
