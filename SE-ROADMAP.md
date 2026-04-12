@@ -155,6 +155,9 @@ that want a fully linked executable.
   native packaging rejects exported functions with non-scalar params,
   non-scalar results, or more than one result rather than silently widening
   the surface.
+- [100%:ea77dc43] The current export selector is pinned too: mixed modules keep
+  supported scalar C ABI exports while dropping unsupported signatures instead
+  of rejecting the whole module once at least one supported export remains.
 - [100%:ea77dc43] The current native-link entrypoint now has targeted pre-link
   rejection coverage for corrupt sidecar metadata (including stale
   export/start/import-type indexes), unsupported target architectures, and

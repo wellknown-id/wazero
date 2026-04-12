@@ -1643,12 +1643,13 @@ fn cursor_remaining(cursor: &Cursor<&[u8]>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_path_suffix, build_wrapper_source, deserialize_native_package_metadata_bundle,
-        current_native_packaging_target, link_native_executable,
-        serialize_native_package_metadata_bundle, validate_hello_host_metadata,
-        validate_host_import_metadata, AotImportDescMetadata, HelloHostSpec, ModuleSpec,
-        NativeLinkModule, NativePackageMetadataBundle, NativePackageMetadataEntry,
-        NativePackagingTarget, PackagedHostImportDescriptor, NATIVE_PACKAGE_MAGIC,
+        append_path_suffix, build_wrapper_source, cabi_wrapper_symbol_name,
+        current_native_packaging_target, deserialize_native_package_metadata_bundle,
+        link_native_executable, module_exports, serialize_native_package_metadata_bundle,
+        validate_hello_host_metadata, validate_host_import_metadata, AotImportDescMetadata,
+        HelloHostSpec, ModuleSpec, NativeCAbiExport, NativeLinkModule,
+        NativePackageMetadataBundle, NativePackageMetadataEntry, NativePackagingTarget,
+        PackagedHostImportDescriptor, NATIVE_PACKAGE_MAGIC,
     };
     use std::{
         fs,
@@ -7126,6 +7127,57 @@ int main(void) {
 
         assert!(source.contains("razero_arm64_entrypoint"));
         assert!(!source.contains("razero_amd64_entrypoint"));
+    }
+
+    #[test]
+    fn module_exports_keeps_supported_exports_when_mixed_with_unsupported_signatures() {
+        let exports = module_exports(
+            "guest",
+            &AotCompiledMetadata {
+                types: vec![
+                    crate::aot::AotFunctionTypeMetadata {
+                        params: vec![ValueType::I32],
+                        results: vec![ValueType::I32],
+                        param_num_in_u64: 1,
+                        result_num_in_u64: 1,
+                    },
+                    crate::aot::AotFunctionTypeMetadata {
+                        params: vec![ValueType::V128],
+                        results: vec![],
+                        param_num_in_u64: 2,
+                        result_num_in_u64: 0,
+                    },
+                ],
+                functions: vec![
+                    crate::aot::AotFunctionMetadata {
+                        local_function_index: 0,
+                        wasm_function_index: 0,
+                        type_index: 0,
+                        executable_offset: 0,
+                        executable_len: 4,
+                    },
+                    crate::aot::AotFunctionMetadata {
+                        local_function_index: 1,
+                        wasm_function_index: 1,
+                        type_index: 1,
+                        executable_offset: 4,
+                        executable_len: 4,
+                    },
+                ],
+                ..AotCompiledMetadata::default()
+            },
+        );
+
+        assert_eq!(
+            exports,
+            vec![NativeCAbiExport {
+                module_name: "guest".to_string(),
+                wasm_function_index: 0,
+                symbol_name: cabi_wrapper_symbol_name("guest", 0),
+                params: vec![ValueType::I32],
+                results: vec![ValueType::I32],
+            }]
+        );
     }
 
     #[test]
