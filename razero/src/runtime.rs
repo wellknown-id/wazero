@@ -4615,6 +4615,104 @@ mod tests {
     }
 
     #[test]
+    fn host_call_policy_observer_fires_before_trap_for_denied_guest_host_callbacks() {
+        let runtime = Runtime::new();
+        let called = Arc::new(AtomicU32::new(0));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .new_host_module_builder("env")
+            .new_function_builder()
+            .with_func(
+                {
+                    let called = called.clone();
+                    move |_ctx, _module, _params| {
+                        called.fetch_add(1, Ordering::SeqCst);
+                        Ok(vec![7])
+                    }
+                },
+                &[ValueType::I32],
+                &[ValueType::I32],
+            )
+            .with_name("hook_impl")
+            .export("hook")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                &[
+                    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01,
+                    0x7f, 0x01, 0x7f, 0x02, 0x0c, 0x01, 0x03, b'e', b'n', b'v', 0x04, b'h', b'o',
+                    b'o', b'k', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r',
+                    b'u', b'n', 0x00, 0x01, 0x0a, 0x08, 0x01, 0x06, 0x00, 0x41, 0x2a, 0x10, 0x00,
+                    0x0b,
+                ],
+                ModuleConfig::new().with_name("guest"),
+            )
+            .unwrap();
+
+        let policy_ctx = with_host_call_policy(&Context::default(), deny_env_host_calls);
+        let observer_ctx = with_host_call_policy_observer(&policy_ctx, {
+            let events = events.clone();
+            move |_ctx: &Context, observation: HostCallPolicyObservation| {
+                events
+                    .lock()
+                    .expect("host-call observer events poisoned")
+                    .push((
+                        "policy".to_string(),
+                        observation.module.name().map(str::to_string),
+                        observation.request.name().map(str::to_string),
+                        observation.request.caller_module_name().map(str::to_string),
+                        observation.decision,
+                    ));
+            }
+        });
+        let ctx = with_trap_observer(&observer_ctx, {
+            let events = events.clone();
+            move |_ctx: &Context, observation: TrapObservation| {
+                events
+                    .lock()
+                    .expect("host-call observer events poisoned")
+                    .push((
+                        "trap".to_string(),
+                        observation.module.name().map(str::to_string),
+                        None,
+                        None,
+                        HostCallPolicyDecision::Denied,
+                    ));
+            }
+        });
+
+        let err = guest
+            .exported_function("run")
+            .unwrap()
+            .call_with_context(&ctx, &[0])
+            .unwrap_err();
+        assert_eq!("policy denied: host call", err.to_string());
+        assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+        assert_eq!(0, called.load(Ordering::SeqCst));
+        assert_eq!(
+            vec![
+                (
+                    "policy".to_string(),
+                    Some("guest".to_string()),
+                    Some("hook_impl".to_string()),
+                    Some("guest".to_string()),
+                    HostCallPolicyDecision::Denied,
+                ),
+                (
+                    "trap".to_string(),
+                    Some("guest".to_string()),
+                    None,
+                    None,
+                    HostCallPolicyDecision::Denied,
+                ),
+            ],
+            *events.lock().expect("host-call observer events poisoned")
+        );
+    }
+
+    #[test]
     fn host_call_policy_denial_short_circuits_yield_policy_and_yield_observer() {
         let runtime = Runtime::new();
         let called = Arc::new(AtomicU32::new(0));
