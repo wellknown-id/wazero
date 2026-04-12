@@ -43,6 +43,58 @@ pub fn get_host_call_policy_observer(ctx: &Context) -> Option<Arc<dyn HostCallPo
     ctx.host_call_policy_observer.clone()
 }
 
+pub struct CallPolicyCounter {
+    allowed: std::sync::atomic::AtomicU64,
+    denied: std::sync::atomic::AtomicU64,
+}
+
+impl CallPolicyCounter {
+    pub fn new() -> Self {
+        Self {
+            allowed: std::sync::atomic::AtomicU64::new(0),
+            denied: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    pub fn allowed(&self) -> u64 {
+        self.allowed.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn denied(&self) -> u64 {
+        self.denied.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn total(&self) -> u64 {
+        self.allowed() + self.denied()
+    }
+
+    pub fn reset(&self) {
+        self.allowed.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.denied.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl Default for CallPolicyCounter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HostCallPolicyObserver for CallPolicyCounter {
+    fn observe_host_call_policy(&self, _ctx: &Context, observation: HostCallPolicyObservation) {
+        match observation.decision {
+            HostCallPolicyDecision::Allowed => {
+                self.allowed
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            HostCallPolicyDecision::Denied => {
+                self.denied
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+}
+
 pub(crate) fn notify_host_call_policy_observer(
     ctx: &Context,
     module: &Module,

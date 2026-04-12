@@ -39,8 +39,8 @@ pub use host_call_policy::{
     IntoHostCallPolicy,
 };
 pub use host_call_policy_observer::{
-    get_host_call_policy_observer, with_host_call_policy_observer, HostCallPolicyDecision,
-    HostCallPolicyObservation, HostCallPolicyObserver,
+    get_host_call_policy_observer, with_host_call_policy_observer, CallPolicyCounter,
+    HostCallPolicyDecision, HostCallPolicyObservation, HostCallPolicyObserver,
 };
 pub use import_resolver::{
     get_import_resolver, get_import_resolver_config, with_import_resolver,
@@ -67,7 +67,8 @@ pub use r#yield::{
 pub use table::Table;
 pub use time_provider::{get_time_provider, with_time_provider, IntoTimeProvider, TimeProvider};
 pub use trap::{
-    get_trap_observer, trap_cause_of, with_trap_observer, TrapCause, TrapObservation, TrapObserver,
+    get_trap_observer, trap_cause_of, with_trap_observer, TrapCause, TrapCauseCounter,
+    TrapObservation, TrapObserver,
 };
 pub use yield_observer::{
     get_yield_observer, with_yield_observer, YieldEvent, YieldObservation, YieldObserver,

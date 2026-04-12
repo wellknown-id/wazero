@@ -1921,16 +1921,17 @@ mod tests {
         config::ModuleConfig,
         ctx_keys::Context,
         experimental::{
-            add_fuel, get_fuel_controller, get_snapshotter, get_time_provider, get_yielder,
-            remaining_fuel, trap_cause_of, with_close_notifier, with_compilation_workers,
-            with_fuel_controller, with_fuel_observer, with_function_listener_factory,
-            with_host_call_policy, with_host_call_policy_observer, with_snapshotter,
-            with_time_provider, with_trap_observer, with_yield_observer, with_yield_policy,
-            with_yield_policy_observer, with_yielder, CloseNotifier, FuelController, FuelEvent,
-            FuelObservation, FunctionListener, FunctionListenerFactory, HostCallPolicyDecision,
-            HostCallPolicyObservation, HostCallPolicyRequest, Snapshot, StackIterator,
-            TimeProvider, TrapCause, TrapObservation, YieldEvent, YieldObservation,
-            YieldPolicyDecision, YieldPolicyObservation, YieldPolicyRequest,
+            add_fuel, get_fuel_controller, get_host_call_policy_observer, get_snapshotter,
+            get_time_provider, get_yielder, remaining_fuel, trap_cause_of, with_close_notifier,
+            with_compilation_workers, with_fuel_controller, with_fuel_observer,
+            with_function_listener_factory, with_host_call_policy, with_host_call_policy_observer,
+            with_snapshotter, with_time_provider, with_trap_observer, with_yield_observer,
+            with_yield_policy, with_yield_policy_observer, with_yielder, CallPolicyCounter,
+            CloseNotifier, FuelController, FuelEvent, FuelObservation, FunctionListener,
+            FunctionListenerFactory, HostCallPolicyDecision, HostCallPolicyObservation,
+            HostCallPolicyObserver, HostCallPolicyRequest, Snapshot, StackIterator, TimeProvider,
+            TrapCause, TrapCauseCounter, TrapObservation, TrapObserver, YieldEvent,
+            YieldObservation, YieldPolicyDecision, YieldPolicyObservation, YieldPolicyRequest,
         },
         CompiledModule, RuntimeConfig,
     };
@@ -9794,5 +9795,259 @@ mod tests {
 
         let results = func.call(&[]).unwrap();
         assert_eq!(vec![42], results);
+    }
+
+    #[test]
+    fn guest_function_remains_callable_after_yield_resume_cycle() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("example")
+            .new_function_builder()
+            .with_callback(
+                |ctx, _module, _params| {
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![10])
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .export("async_work")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                include_bytes!("../../experimental/testdata/yield.wasm"),
+                ModuleConfig::new(),
+            )
+            .unwrap();
+        let run = guest.exported_function("run").unwrap();
+
+        let err = run
+            .call_with_context(&with_yielder(&Context::default()), &[])
+            .unwrap_err();
+        let RuntimeError::Yield(yield_error) = err else {
+            panic!("expected yield error");
+        };
+        let resumer = yield_error.resumer().expect("resumer should be present");
+
+        assert!(
+            guest.exported_function("run").is_some(),
+            "exported function should still be accessible while suspended"
+        );
+        assert!(
+            guest.exported_memory("memory").is_some(),
+            "exported memory should still be accessible while suspended"
+        );
+
+        let results = resumer
+            .resume(&with_yielder(&Context::default()), &[32])
+            .expect("resume should succeed");
+
+        assert!(
+            guest.exported_function("run").is_some(),
+            "exported function should be accessible after resume"
+        );
+
+        let second_run = guest.exported_function("run").unwrap();
+        let err = second_run
+            .call_with_context(&with_yielder(&Context::default()), &[])
+            .unwrap_err();
+        let RuntimeError::Yield(yield_error2) = err else {
+            panic!("expected yield on second run");
+        };
+        let results2 = yield_error2
+            .resumer()
+            .expect("resumer should be present")
+            .resume(&with_yielder(&Context::default()), &[7])
+            .expect("second resume should succeed");
+
+        assert_ne!(
+            results, results2,
+            "two runs should produce different results"
+        );
+    }
+
+    #[test]
+    fn cross_module_yield_does_not_block_other_module() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("example")
+            .new_function_builder()
+            .with_callback(
+                |ctx, _module, _params| {
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .export("async_work")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest_a = runtime
+            .instantiate_binary(
+                include_bytes!("../../experimental/testdata/yield.wasm"),
+                ModuleConfig::new().with_name("guest_a"),
+            )
+            .unwrap();
+
+        let simple_wasm: &[u8] = &[
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01,
+            0x7f, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, 0x61, 0x64, 0x64, 0x00, 0x00,
+            0x0a, 0x09, 0x01, 0x07, 0x00, 0x41, 0x2a, 0x41, 0x13, 0x6a, 0x0b,
+        ];
+        let guest_b = runtime
+            .instantiate_binary(simple_wasm, ModuleConfig::new().with_name("guest_b"))
+            .unwrap();
+
+        let run_a = guest_a.exported_function("run").unwrap();
+        let add_b = guest_b.exported_function("add").unwrap();
+
+        let err = run_a
+            .call_with_context(&with_yielder(&Context::default()), &[])
+            .unwrap_err();
+        let RuntimeError::Yield(yield_error) = err else {
+            panic!("expected yield error");
+        };
+        let resumer = yield_error.resumer().expect("resumer should be present");
+
+        let results = add_b.call(&[]).expect("guest_b should be callable");
+        assert_eq!(vec![61u64], results);
+
+        resumer
+            .resume(&with_yielder(&Context::default()), &[42])
+            .expect("resume should succeed");
+    }
+
+    #[test]
+    fn resume_with_too_many_host_results_is_rejected() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("example")
+            .new_function_builder()
+            .with_callback(
+                |ctx, _module, _params| {
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .export("async_work")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                include_bytes!("../../experimental/testdata/yield.wasm"),
+                ModuleConfig::new(),
+            )
+            .unwrap();
+        let run = guest.exported_function("run").unwrap();
+
+        let err = run
+            .call_with_context(&with_yielder(&Context::default()), &[])
+            .unwrap_err();
+        let RuntimeError::Yield(yield_error) = err else {
+            panic!("expected yield error");
+        };
+        let resumer = yield_error.resumer().expect("resumer should be present");
+
+        let err = resumer
+            .resume(&with_yielder(&Context::default()), &[42, 99])
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("expected 1 host results, but got 2"),
+            "unexpected error: {err}"
+        );
+
+        resumer
+            .resume(&with_yielder(&Context::default()), &[42])
+            .expect("retry with correct count should succeed");
+    }
+
+    #[test]
+    fn trap_cause_counter_aggregates_by_cause() {
+        let counter = Arc::new(TrapCauseCounter::new());
+        let runtime = Runtime::new();
+        let ctx = with_trap_observer(&Context::default(), {
+            let counter = counter.clone();
+            move |_ctx: &Context, observation: TrapObservation| {
+                counter.observe_trap(_ctx, observation);
+            }
+        });
+
+        let oob_wasm: &[u8] = include_bytes!("../../testdata/oob_load.wasm");
+        let compiled = runtime.compile(oob_wasm).unwrap();
+        let module = runtime.instantiate(&compiled, ModuleConfig::new()).unwrap();
+        let oob = module.exported_function("oob").unwrap();
+
+        let _ = oob.call_with_context(&ctx, &[]);
+        let _ = oob.call_with_context(&ctx, &[]);
+        let _ = oob.call_with_context(&ctx, &[]);
+
+        assert_eq!(3, counter.get(TrapCause::OutOfBoundsMemoryAccess));
+        assert_eq!(0, counter.get(TrapCause::FuelExhausted));
+        assert_eq!(3, counter.total());
+    }
+
+    #[test]
+    fn call_policy_counter_tracks_allowed_and_denied() {
+        let counter = Arc::new(CallPolicyCounter::new());
+        let ctx = with_host_call_policy_observer(&Context::default(), {
+            let counter = counter.clone();
+            move |_ctx: &Context, observation: HostCallPolicyObservation| {
+                counter.observe_host_call_policy(_ctx, observation);
+            }
+        });
+
+        let observer = get_host_call_policy_observer(&ctx).unwrap();
+        let runtime = Runtime::new();
+        let compiled = runtime
+            .compile(&[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            ])
+            .unwrap();
+        let module = runtime
+            .instantiate(&compiled, ModuleConfig::new().with_name("guest"))
+            .unwrap();
+
+        observer.observe_host_call_policy(
+            &ctx,
+            HostCallPolicyObservation {
+                module: module.clone(),
+                request: HostCallPolicyRequest::new().with_caller_module_name("caller"),
+                decision: HostCallPolicyDecision::Allowed,
+            },
+        );
+        observer.observe_host_call_policy(
+            &ctx,
+            HostCallPolicyObservation {
+                module: module.clone(),
+                request: HostCallPolicyRequest::new().with_caller_module_name("caller"),
+                decision: HostCallPolicyDecision::Allowed,
+            },
+        );
+        observer.observe_host_call_policy(
+            &ctx,
+            HostCallPolicyObservation {
+                module,
+                request: HostCallPolicyRequest::new().with_caller_module_name("caller"),
+                decision: HostCallPolicyDecision::Denied,
+            },
+        );
+
+        assert_eq!(2, counter.allowed());
+        assert_eq!(1, counter.denied());
+        assert_eq!(3, counter.total());
     }
 }

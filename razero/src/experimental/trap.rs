@@ -24,6 +24,22 @@ pub enum TrapCause {
     MemoryFault,
 }
 
+impl TrapCause {
+    pub const VARIANTS: [TrapCause; 11] = [
+        TrapCause::InvalidConversionToInteger,
+        TrapCause::IntegerOverflow,
+        TrapCause::IntegerDivideByZero,
+        TrapCause::Unreachable,
+        TrapCause::OutOfBoundsMemoryAccess,
+        TrapCause::InvalidTableAccess,
+        TrapCause::IndirectCallTypeMismatch,
+        TrapCause::UnalignedAtomic,
+        TrapCause::FuelExhausted,
+        TrapCause::PolicyDenied,
+        TrapCause::MemoryFault,
+    ];
+}
+
 #[derive(Clone)]
 pub struct TrapObservation {
     pub module: Module,
@@ -52,6 +68,49 @@ pub fn with_trap_observer(ctx: &Context, observer: impl TrapObserver + 'static) 
 
 pub fn get_trap_observer(ctx: &Context) -> Option<Arc<dyn TrapObserver>> {
     ctx.trap_observer.clone()
+}
+
+pub struct TrapCauseCounter {
+    counts: [std::sync::atomic::AtomicU64; TrapCause::VARIANTS.len()],
+}
+
+impl TrapCauseCounter {
+    pub fn new() -> Self {
+        Self {
+            counts: std::array::from_fn(|_| std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+
+    pub fn get(&self, cause: TrapCause) -> u64 {
+        let index = cause as usize;
+        self.counts[index].load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn total(&self) -> u64 {
+        self.counts
+            .iter()
+            .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+            .sum()
+    }
+
+    pub fn reset(&self) {
+        for c in &self.counts {
+            c.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+impl Default for TrapCauseCounter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TrapObserver for TrapCauseCounter {
+    fn observe_trap(&self, _ctx: &Context, observation: TrapObservation) {
+        let index = observation.cause as usize;
+        self.counts[index].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 pub fn trap_cause_of(err: &RuntimeError) -> Option<TrapCause> {
