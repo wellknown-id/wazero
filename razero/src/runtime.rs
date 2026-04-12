@@ -1947,6 +1947,12 @@ mod tests {
         0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x00, 0x0a, 0x09, 0x01,
         0x07, 0x00, 0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b,
     ];
+    const GUEST_IMPORT_INC_WASM: &[u8] = &[
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01,
+        0x7f, 0x02, 0x0b, 0x01, 0x03, b'e', b'n', b'v', 0x03, b'i', b'n', b'c', 0x00, 0x00, 0x03,
+        0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x01, 0x0a, 0x08, 0x01,
+        0x06, 0x00, 0x20, 0x00, 0x10, 0x00, 0x0b,
+    ];
     use razero_wasm::memory::MemoryBytes;
 
     fn close_on_context_done_runtime_configs() -> Vec<RuntimeConfig> {
@@ -9635,6 +9641,65 @@ mod tests {
         let err = func.call_with_context(&ctx, &[]).unwrap_err();
         assert_eq!("fuel exhausted", err.to_string());
         assert_eq!(Some(TrapCause::FuelExhausted), trap_cause_of(&err));
+    }
+
+    #[test]
+    fn interpreter_guest_host_callbacks_can_observe_runtime_fuel() {
+        let runtime = Runtime::with_config(RuntimeConfig::new_interpreter().with_fuel(2));
+        runtime
+            .new_host_module_builder("env")
+            .new_function_builder()
+            .with_func(
+                |ctx, _module, params| {
+                    assert_eq!(1, remaining_fuel(&ctx).unwrap());
+                    Ok(vec![params[0] + 1])
+                },
+                &[ValueType::I32],
+                &[ValueType::I32],
+            )
+            .export("inc")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(GUEST_IMPORT_INC_WASM, ModuleConfig::new())
+            .unwrap();
+
+        assert_eq!(
+            vec![42],
+            guest.exported_function("run").unwrap().call(&[41]).unwrap()
+        );
+    }
+
+    #[test]
+    fn interpreter_guest_loops_trap_when_fuel_exhausts() {
+        let runtime = Runtime::with_config(RuntimeConfig::new_interpreter().with_fuel(1));
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let guest = runtime
+            .instantiate_binary(LOOP_EXPORT_WASM, ModuleConfig::new())
+            .unwrap();
+        let ctx = with_trap_observer(&Context::default(), {
+            let observations = observations.clone();
+            move |_ctx: &Context, observation: TrapObservation| {
+                observations
+                    .lock()
+                    .expect("trap observations poisoned")
+                    .push((observation.cause, observation.err.to_string()));
+            }
+        });
+
+        let err = guest
+            .exported_function("run")
+            .unwrap()
+            .call_with_context(&ctx, &[])
+            .unwrap_err();
+
+        assert_eq!("fuel exhausted", err.to_string());
+        assert_eq!(Some(TrapCause::FuelExhausted), trap_cause_of(&err));
+        assert_eq!(
+            vec![(TrapCause::FuelExhausted, "fuel exhausted".to_string())],
+            *observations.lock().expect("trap observations poisoned")
+        );
     }
 
     #[test]
