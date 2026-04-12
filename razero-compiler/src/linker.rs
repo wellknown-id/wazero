@@ -1993,6 +1993,26 @@ mod tests {
     }
 
     #[test]
+    fn link_hello_host_executable_rejects_wrong_host_import_signature() {
+        let module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
+        let mut metadata = compile_module_metadata(&module);
+        metadata.types[0].results.push(ValueType::I32);
+        metadata.types[0].result_num_in_u64 = 1;
+
+        let err = super::link_hello_host_executable(
+            PathBuf::from("target/hello-host-wrong-import-signature"),
+            &NativeLinkModule::new("hello-host", Vec::new(), serialize_aot_metadata(&metadata)),
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "hello-host linker expects its host import to use the (i32, i32) -> () signature"
+        );
+    }
+
+    #[test]
     fn validate_host_import_metadata_rejects_target_architecture_mismatch() {
         let module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
         let mut metadata = compile_module_metadata(&module);
