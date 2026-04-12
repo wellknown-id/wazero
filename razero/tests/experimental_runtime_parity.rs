@@ -643,6 +643,29 @@ fn yield_policy_denies_follow_on_suspension_via_public_resume_path() {
 }
 
 #[test]
+fn yield_policy_initial_context_does_not_persist_when_resume_omits_policy() {
+    let (_runtime, guest) =
+        setup_yield_runtime_with_config(RuntimeConfig::new().with_yield_policy(deny_all_yields));
+
+    let err = guest
+        .exported_function("run_twice")
+        .unwrap()
+        .call_with_context(
+            &with_yield_policy(&with_yielder(&Context::default()), allow_all_yields),
+            &[],
+        )
+        .unwrap_err();
+    let resumer = yielded(err).resumer().expect("resumer should be present");
+
+    let err = resumer
+        .resume(&with_yielder(&Context::default()), &[40])
+        .unwrap_err();
+
+    assert_eq!("policy denied: cooperative yield", err.to_string());
+    assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+}
+
+#[test]
 fn trap_observer_resume_context_receives_follow_on_policy_denial() {
     let (_runtime, guest) = setup_yield_runtime();
     let initial_observations = Arc::new(Mutex::new(Vec::new()));
