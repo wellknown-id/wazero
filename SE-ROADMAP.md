@@ -151,6 +151,9 @@ that want a fully linked executable.
 - [95%:04af62a8] `razero_compiler::linker::link_native_executable(...)` packages one or
   more relocatable Wasm objects into a native executable for the current C ABI-first
   surface.
+- [100%:ea77dc43] The current native-link entrypoint now has targeted pre-link
+  rejection coverage for unsupported target architectures and linked-runtime
+  metadata that falls outside the packaged slice.
 - [100%:ea77dc43] `razero_compiler::linker::link_hello_host_executable(...)` provides a
   **specialized** native-link flow for the existing `hello-host` example,
   including its single explicit `(i32, i32) -> ()` host import and local memory

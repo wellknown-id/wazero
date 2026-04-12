@@ -6486,6 +6486,114 @@ int main(void) {
     }
 
     #[test]
+    fn link_native_executable_rejects_architecture_mismatch_before_linking() {
+        let current = current_native_packaging_target().unwrap();
+        let mismatched_architecture = match current.architecture {
+            AotTargetArchitecture::X86_64 => AotTargetArchitecture::Aarch64,
+            AotTargetArchitecture::Aarch64 => AotTargetArchitecture::X86_64,
+            AotTargetArchitecture::Unknown => AotTargetArchitecture::X86_64,
+        };
+        let metadata = AotCompiledMetadata {
+            target: AotTarget {
+                architecture: mismatched_architecture,
+                operating_system: AotTargetOperatingSystem::Linux,
+            },
+            functions: vec![crate::aot::AotFunctionMetadata {
+                local_function_index: 0,
+                wasm_function_index: 0,
+                type_index: 0,
+                executable_offset: 0,
+                executable_len: 4,
+            }],
+            types: vec![crate::aot::AotFunctionTypeMetadata {
+                params: vec![ValueType::I32],
+                results: vec![ValueType::I32],
+                param_num_in_u64: 1,
+                result_num_in_u64: 1,
+            }],
+            module_shape: crate::aot::AotModuleShapeMetadata {
+                local_function_count: 1,
+                ..crate::aot::AotModuleShapeMetadata::default()
+            },
+            ..AotCompiledMetadata::default()
+        };
+
+        let err = link_native_executable(
+            PathBuf::from("target/unsupported-arch-native-bin"),
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "module 'guest' targets {}, but this linker instance packages {} artifacts",
+                mismatched_architecture.name(),
+                current.architecture.name()
+            )
+        );
+    }
+
+    #[test]
+    fn link_native_executable_rejects_modules_outside_linked_runtime_slice() {
+        let current = current_native_packaging_target().unwrap();
+        let metadata = AotCompiledMetadata {
+            target: AotTarget {
+                architecture: current.architecture,
+                operating_system: AotTargetOperatingSystem::Linux,
+            },
+            functions: vec![crate::aot::AotFunctionMetadata {
+                local_function_index: 0,
+                wasm_function_index: 0,
+                type_index: 0,
+                executable_offset: 0,
+                executable_len: 4,
+            }],
+            types: vec![crate::aot::AotFunctionTypeMetadata {
+                params: vec![ValueType::I32],
+                results: vec![ValueType::I32],
+                param_num_in_u64: 1,
+                result_num_in_u64: 1,
+            }],
+            memory: Some(crate::aot::AotMemoryMetadata {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                is_shared: true,
+            }),
+            module_shape: crate::aot::AotModuleShapeMetadata {
+                local_function_count: 1,
+                has_local_memory: true,
+                has_any_memory: true,
+                ..crate::aot::AotModuleShapeMetadata::default()
+            },
+            ..AotCompiledMetadata::default()
+        };
+
+        let err = link_native_executable(
+            PathBuf::from("target/shared-memory-native-bin"),
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "module 'guest' is outside the packaged linked-runtime slice: linked runtime packaging does not support shared memories or atomics integration"
+        );
+    }
+
+    #[test]
     fn link_native_executable_rejects_empty_module_list() {
         let err =
             link_native_executable(PathBuf::from("target/empty-native-bin"), &[], &[]).unwrap_err();
