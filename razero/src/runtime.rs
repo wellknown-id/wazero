@@ -6363,6 +6363,57 @@ mod tests {
     }
 
     #[test]
+    fn yield_spent_resumer_cannot_be_reused() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("example")
+            .new_function_builder()
+            .with_func(
+                |ctx, _module, _params| {
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .with_name("async_work")
+            .export("async_work")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                include_bytes!("../../experimental/testdata/yield.wasm"),
+                ModuleConfig::new(),
+            )
+            .unwrap();
+
+        let err = guest
+            .exported_function("run")
+            .unwrap()
+            .call_with_context(&with_yielder(&Context::default()), &[])
+            .unwrap_err();
+        let RuntimeError::Yield(yield_error) = err else {
+            panic!("expected yield error");
+        };
+        let resumer = yield_error.resumer().expect("resumer should be present");
+
+        assert_eq!(
+            vec![142],
+            resumer
+                .resume(&with_yielder(&Context::default()), &[42])
+                .unwrap()
+        );
+
+        let err = resumer
+            .resume(&with_yielder(&Context::default()), &[42])
+            .unwrap_err();
+        assert_eq!("cannot resume: resumer has already been used", err.to_string());
+    }
+
+    #[test]
     fn memory_supports_read_write_and_grow() {
         let runtime = Runtime::new();
         let bytes = [
