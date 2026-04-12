@@ -448,6 +448,7 @@ fn native_compile_entry_preamble(ty: &AotFunctionTypeMetadata) -> Result<Vec<u8>
 mod tests {
     use razero_features::CoreFeatures;
     use razero_wasm::engine::Engine;
+    use razero_wasm::memory::MEMORY_PAGE_SIZE;
     use razero_wasm::module::{
         Code, ConstExpr, DataSegment, ElementMode, ElementSegment, Export, ExternType,
         FunctionType, Global, GlobalType, Module, RefType, Table, ValueType,
@@ -2893,6 +2894,145 @@ mod tests {
         assert!(err
             .to_string()
             .contains("element[0].init[0] has trailing bytes"));
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn linked_module_rejects_data_segment_past_memory_end() {
+        let mut engine = CompilerEngine::new();
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            function_section: vec![0],
+            memory_section: Some(razero_wasm::module::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                ..razero_wasm::module::Memory::default()
+            }),
+            code_section: vec![Code {
+                body: vec![0x41, 0x07, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            data_section: vec![DataSegment {
+                offset_expression: ConstExpr::from_i32(MEMORY_PAGE_SIZE as i32),
+                init: vec![0xaa],
+                passive: false,
+            }],
+            ..Module::default()
+        };
+
+        engine.compile_module(&module).unwrap();
+        let compiled = engine.compiled_module(&module).unwrap();
+        let err = LinkedModule::from_metadata_and_first_local_function(
+            compiled.aot.clone(),
+            compiled.function_ptr(0).unwrap(),
+        )
+        .unwrap_err();
+
+        let err = err.to_string();
+        assert!(err.contains("data[0] range"));
+        assert!(err.contains("exceeds memory length"));
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn linked_module_rejects_element_segment_past_table_end() {
+        let mut engine = CompilerEngine::new();
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            function_section: vec![0],
+            table_section: vec![Table {
+                min: 1,
+                max: Some(1),
+                ty: RefType::FUNCREF,
+            }],
+            code_section: vec![Code {
+                body: vec![0x41, 0x07, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            element_section: vec![ElementSegment {
+                offset_expr: ConstExpr::from_i32(1),
+                table_index: 0,
+                init: vec![ConstExpr::from_opcode(0xd2, &[0])],
+                ty: RefType::FUNCREF,
+                mode: ElementMode::Active,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+
+        engine.compile_module(&module).unwrap();
+        let compiled = engine.compiled_module(&module).unwrap();
+        let err = LinkedModule::from_metadata_and_first_local_function(
+            compiled.aot.clone(),
+            compiled.function_ptr(0).unwrap(),
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("element[0] range 1..2 exceeds table length 1"));
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn linked_module_rejects_inconsistent_global_initializer_count() {
+        let mut engine = CompilerEngine::new();
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            function_section: vec![0],
+            global_section: vec![Global {
+                ty: GlobalType {
+                    val_type: ValueType::I32,
+                    mutable: false,
+                },
+                init: ConstExpr::from_i32(0),
+            }],
+            code_section: vec![Code {
+                body: vec![0x41, 0x07, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            ..Module::default()
+        };
+
+        engine.compile_module(&module).unwrap();
+        let compiled = engine.compiled_module(&module).unwrap();
+        let mut metadata = compiled.aot.clone();
+        metadata.global_initializers.clear();
+        let err = LinkedModule::from_metadata_and_first_local_function(
+            metadata,
+            compiled.function_ptr(0).unwrap(),
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("linked runtime metadata has 1 globals but 0 global initializers"));
     }
 
     #[cfg(all(

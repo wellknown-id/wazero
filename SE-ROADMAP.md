@@ -154,7 +154,8 @@ that want a fully linked executable.
   expressions, unsupported element initializer opcodes, missing local
   function references in element initializers, empty element initializers,
   invalid element `ref.null` encodings, and trailing bytes in `ref.func`
-  initializers.
+  initializers, plus data-segment / element-segment bounds overflow and
+  global-initializer count mismatch.
 - [100%:04af62a8] Linked runtime-plan bounds and metadata-shape rejection for
   packaged local memory / table initialization are now pinned by targeted tests
   too, so obvious segment-overflow, segment-kind/type, element-initializer,
