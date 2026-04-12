@@ -1921,13 +1921,14 @@ mod tests {
         ctx_keys::Context,
         experimental::{
             add_fuel, get_fuel_controller, get_snapshotter, get_time_provider, get_yielder,
-            remaining_fuel, trap_cause_of,
+            remaining_fuel, trap_cause_of, with_fuel_observer,
             with_close_notifier, with_compilation_workers, with_fuel_controller,
             with_function_listener_factory, with_host_call_policy, with_host_call_policy_observer,
             with_snapshotter, with_time_provider, with_trap_observer, with_yield_observer,
             with_yield_policy,
             with_yield_policy_observer, with_yielder, CloseNotifier, FuelController,
-            FunctionListener, FunctionListenerFactory, HostCallPolicyDecision,
+            FuelEvent, FuelObservation, FunctionListener, FunctionListenerFactory,
+            HostCallPolicyDecision,
             HostCallPolicyObservation, HostCallPolicyRequest, Snapshot, StackIterator, TrapCause,
             TimeProvider, TrapObservation, YieldEvent, YieldObservation, YieldPolicyDecision,
             YieldPolicyObservation, YieldPolicyRequest,
@@ -5648,6 +5649,64 @@ mod tests {
     }
 
     #[test]
+    fn host_call_policy_resume_context_controls_follow_on_host_call() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("example")
+            .new_function_builder()
+            .with_func(
+                |ctx, _module, _params| {
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .with_name("async_work")
+            .export("async_work")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                include_bytes!("../../experimental/testdata/yield.wasm"),
+                ModuleConfig::new(),
+            )
+            .unwrap();
+
+        let err = guest
+            .exported_function("run_twice")
+            .unwrap()
+            .call_with_context(
+                &with_host_call_policy(&with_yielder(&Context::default()), allow_all_host_calls),
+                &[],
+            )
+            .unwrap_err();
+        let RuntimeError::Yield(yield_error) = err else {
+            panic!("expected initial yield error");
+        };
+
+        let err = yield_error
+            .resumer()
+            .expect("resumer should be present")
+            .resume(
+                &with_host_call_policy(
+                    &with_yielder(&Context::default()),
+                    |_ctx: &Context, request: &HostCallPolicyRequest| {
+                        request.name() != Some("async_work")
+                    },
+                ),
+                &[40],
+            )
+            .unwrap_err();
+
+        assert_eq!("policy denied: host call", err.to_string());
+        assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+    }
+
+    #[test]
     fn host_call_policy_initial_context_does_not_persist_when_resume_omits_policy() {
         let runtime = Runtime::with_config(RuntimeConfig::new().with_host_call_policy(
             |_ctx: &Context, request: &HostCallPolicyRequest| request.name() != Some("async_work"),
@@ -6047,6 +6106,99 @@ mod tests {
             *seen_budgets.lock().expect("seen budgets poisoned")
         );
         assert!(consumed.load(Ordering::SeqCst) > 0);
+    }
+
+    #[test]
+    fn fuel_observer_resume_context_emits_no_additional_callbacks() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("example")
+            .new_function_builder()
+            .with_func(
+                |ctx, _module, _params| {
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .with_name("async_work")
+            .export("async_work")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                include_bytes!("../../experimental/testdata/yield.wasm"),
+                ModuleConfig::new(),
+            )
+            .unwrap();
+
+        let initial_observations = Arc::new(Mutex::new(Vec::new()));
+        let resume_observations = Arc::new(Mutex::new(Vec::new()));
+        let initial_ctx = with_yielder(&with_fuel_observer(
+            &with_fuel_controller(
+                &Context::default(),
+                TestFuelController {
+                    budget: 64,
+                    consumed: Arc::new(AtomicI64::new(0)),
+                },
+            ),
+            {
+                let initial_observations = initial_observations.clone();
+                move |_ctx: &Context, observation: FuelObservation| {
+                    initial_observations
+                        .lock()
+                        .expect("initial fuel observations poisoned")
+                        .push(observation.event);
+                }
+            },
+        ));
+
+        let err = guest
+            .exported_function("run")
+            .unwrap()
+            .call_with_context(&initial_ctx, &[])
+            .unwrap_err();
+        let RuntimeError::Yield(yield_error) = err else {
+            panic!("expected yield error");
+        };
+
+        assert_eq!(
+            vec![FuelEvent::Budgeted, FuelEvent::Consumed],
+            *initial_observations
+                .lock()
+                .expect("initial fuel observations poisoned")
+        );
+
+        let resume_ctx = with_yielder(&with_fuel_observer(
+            &Context::default(),
+            {
+                let resume_observations = resume_observations.clone();
+                move |_ctx: &Context, observation: FuelObservation| {
+                    resume_observations
+                        .lock()
+                        .expect("resume fuel observations poisoned")
+                        .push(observation.event);
+                }
+            },
+        ));
+        assert_eq!(
+            vec![142],
+            yield_error
+                .resumer()
+                .expect("resumer should be present")
+                .resume(&resume_ctx, &[42])
+                .unwrap()
+        );
+        assert_eq!(
+            Vec::<FuelEvent>::new(),
+            *resume_observations
+                .lock()
+                .expect("resume fuel observations poisoned")
+        );
     }
 
     #[test]
@@ -7040,6 +7192,55 @@ mod tests {
             .resumer()
             .expect("resumer should be present")
             .resume(&resume_ctx, &[40])
+            .unwrap_err();
+        assert_eq!("policy denied: cooperative yield", err.to_string());
+        assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+    }
+
+    #[test]
+    fn yield_policy_initial_context_does_not_persist_when_resume_omits_policy() {
+        let runtime = Runtime::with_config(RuntimeConfig::new().with_yield_policy(deny_all_yields));
+        runtime
+            .new_host_module_builder("example")
+            .new_function_builder()
+            .with_func(
+                |ctx, _module, _params| {
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .with_name("async_work")
+            .export("async_work")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                include_bytes!("../../experimental/testdata/yield.wasm"),
+                ModuleConfig::new(),
+            )
+            .unwrap();
+
+        let err = guest
+            .exported_function("run_twice")
+            .unwrap()
+            .call_with_context(
+                &with_yield_policy(&with_yielder(&Context::default()), allow_all_yields),
+                &[],
+            )
+            .unwrap_err();
+        let RuntimeError::Yield(first_yield) = err else {
+            panic!("expected initial yield error");
+        };
+
+        let err = first_yield
+            .resumer()
+            .expect("resumer should be present")
+            .resume(&with_yielder(&Context::default()), &[40])
             .unwrap_err();
         assert_eq!("policy denied: cooperative yield", err.to_string());
         assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
@@ -8235,6 +8436,153 @@ mod tests {
             *resumed_observations
                 .lock()
                 .expect("resumed yield policy observations poisoned")
+        );
+    }
+
+    #[test]
+    fn snapshotter_is_not_reinjected_on_follow_on_resumed_host_call() {
+        let runtime = Runtime::new();
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .new_host_module_builder("example")
+            .new_function_builder()
+            .with_func(
+                {
+                    let observations = observations.clone();
+                    move |ctx, _module, _params| {
+                        observations
+                            .lock()
+                            .expect("snapshotter observations poisoned")
+                            .push(get_snapshotter(&ctx).is_some());
+                        get_yielder(&ctx)
+                            .expect("yielder should be injected")
+                            .r#yield();
+                        Ok(vec![0])
+                    }
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .with_name("async_work")
+            .export("async_work")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                include_bytes!("../../experimental/testdata/yield.wasm"),
+                ModuleConfig::new(),
+            )
+            .unwrap();
+
+        let err = guest
+            .exported_function("run_twice")
+            .unwrap()
+            .call_with_context(&with_snapshotter(&with_yielder(&Context::default())), &[])
+            .unwrap_err();
+        let RuntimeError::Yield(first_yield) = err else {
+            panic!("expected initial yield error");
+        };
+
+        assert_eq!(
+            vec![true],
+            *observations
+                .lock()
+                .expect("snapshotter observations poisoned")
+        );
+
+        let err = first_yield
+            .resumer()
+            .expect("resumer should be present")
+            .resume(&with_snapshotter(&with_yielder(&Context::default())), &[40])
+            .unwrap_err();
+        let RuntimeError::Yield(second_yield) = err else {
+            panic!("expected second yield error");
+        };
+
+        assert_eq!(
+            vec![true, false],
+            *observations
+                .lock()
+                .expect("snapshotter observations poisoned")
+        );
+        assert_eq!(
+            vec![42],
+            second_yield
+                .resumer()
+                .expect("resumer should be present")
+                .resume(&with_yielder(&Context::default()), &[2])
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn snapshotter_initial_context_does_not_persist_when_resume_omits_one() {
+        let runtime = Runtime::new();
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .new_host_module_builder("example")
+            .new_function_builder()
+            .with_func(
+                {
+                    let observations = observations.clone();
+                    move |ctx, _module, _params| {
+                        observations
+                            .lock()
+                            .expect("snapshotter observations poisoned")
+                            .push(get_snapshotter(&ctx).is_some());
+                        get_yielder(&ctx)
+                            .expect("yielder should be injected")
+                            .r#yield();
+                        Ok(vec![0])
+                    }
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .with_name("async_work")
+            .export("async_work")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                include_bytes!("../../experimental/testdata/yield.wasm"),
+                ModuleConfig::new(),
+            )
+            .unwrap();
+
+        let err = guest
+            .exported_function("run_twice")
+            .unwrap()
+            .call_with_context(&with_snapshotter(&with_yielder(&Context::default())), &[])
+            .unwrap_err();
+        let RuntimeError::Yield(first_yield) = err else {
+            panic!("expected initial yield error");
+        };
+
+        let err = first_yield
+            .resumer()
+            .expect("resumer should be present")
+            .resume(&with_yielder(&Context::default()), &[40])
+            .unwrap_err();
+        let RuntimeError::Yield(second_yield) = err else {
+            panic!("expected second yield error");
+        };
+
+        assert_eq!(
+            vec![true, false],
+            *observations
+                .lock()
+                .expect("snapshotter observations poisoned")
+        );
+        assert_eq!(
+            vec![42],
+            second_yield
+                .resumer()
+                .expect("resumer should be present")
+                .resume(&with_yielder(&Context::default()), &[2])
+                .unwrap()
         );
     }
 
