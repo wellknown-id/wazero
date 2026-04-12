@@ -383,6 +383,65 @@ mod tests {
         ty
     }
 
+    fn metadata_with_one_table_global_data_and_element() -> AotCompiledMetadata {
+        let module = Module {
+            type_section: vec![function_type(&[], &[])],
+            function_section: vec![0],
+            table_section: vec![Table {
+                min: 1,
+                max: Some(1),
+                ty: RefType::FUNCREF,
+            }],
+            memory_section: Some(Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                ..Memory::default()
+            }),
+            global_section: vec![Global {
+                ty: GlobalType {
+                    val_type: ValueType::I32,
+                    mutable: false,
+                },
+                init: ConstExpr::from_i32(0),
+            }],
+            code_section: vec![Code {
+                body: vec![0x0b],
+                ..Code::default()
+            }],
+            data_section: vec![DataSegment {
+                offset_expression: ConstExpr::from_i32(0),
+                init: vec![0xaa],
+                passive: false,
+            }],
+            element_section: vec![ElementSegment {
+                offset_expr: ConstExpr::from_i32(0),
+                table_index: 0,
+                init: vec![ConstExpr::from_opcode(0xd2, &[0])],
+                ty: RefType::FUNCREF,
+                mode: ElementMode::Active,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        AotCompiledMetadata::new(
+            &module,
+            Vec::new(),
+            vec![AotFunctionMetadata {
+                local_function_index: 0,
+                wasm_function_index: 0,
+                type_index: 0,
+                executable_offset: 0,
+                executable_len: 0,
+            }],
+            Vec::new(),
+            ModuleContextOffsetData::default(),
+            Vec::new(),
+            false,
+        )
+    }
+
     #[test]
     fn linked_runtime_plan_applies_global_data_and_element_initializers() {
         let module = Module {
@@ -840,5 +899,50 @@ mod tests {
         assert!(err.contains(
             "linked runtime packaging does not support runtime-injected termination helpers"
         ));
+    }
+
+    #[test]
+    fn linked_runtime_plan_rejects_missing_compiled_local_functions() {
+        let mut metadata = metadata_with_one_table_global_data_and_element();
+        metadata.functions.clear();
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains("linked module metadata does not contain any compiled local functions"));
+    }
+
+    #[test]
+    fn linked_runtime_plan_rejects_inconsistent_table_count() {
+        let mut metadata = metadata_with_one_table_global_data_and_element();
+        metadata.module_shape.local_table_count = 2;
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains("linked runtime metadata has inconsistent table counts"));
+    }
+
+    #[test]
+    fn linked_runtime_plan_rejects_inconsistent_global_count() {
+        let mut metadata = metadata_with_one_table_global_data_and_element();
+        metadata.module_shape.local_global_count = 2;
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains("linked runtime metadata has inconsistent global counts"));
+    }
+
+    #[test]
+    fn linked_runtime_plan_rejects_inconsistent_data_segment_count() {
+        let mut metadata = metadata_with_one_table_global_data_and_element();
+        metadata.module_shape.data_segment_count = 2;
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains("linked runtime metadata has inconsistent data segment counts"));
+    }
+
+    #[test]
+    fn linked_runtime_plan_rejects_inconsistent_element_segment_count() {
+        let mut metadata = metadata_with_one_table_global_data_and_element();
+        metadata.module_shape.element_segment_count = 2;
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains("linked runtime metadata has inconsistent element segment counts"));
     }
 }
