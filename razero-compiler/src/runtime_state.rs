@@ -743,4 +743,102 @@ mod tests {
         let err = build_linked_runtime_plan(&metadata).unwrap_err();
         assert!(err.contains("linked runtime metadata has 1 globals but 0 global initializers"));
     }
+
+    #[test]
+    fn linked_runtime_plan_rejects_host_module_shape() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![0x0b],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+        let mut metadata = AotCompiledMetadata::new(
+            &module,
+            Vec::new(),
+            vec![AotFunctionMetadata {
+                local_function_index: 0,
+                wasm_function_index: 0,
+                type_index: 0,
+                executable_offset: 0,
+                executable_len: 0,
+            }],
+            Vec::new(),
+            ModuleContextOffsetData::default(),
+            Vec::new(),
+            false,
+        );
+        metadata.module_shape.is_host_module = true;
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains("host modules are not supported by linked runtime packaging"));
+    }
+
+    #[test]
+    fn linked_runtime_plan_rejects_imported_runtime_shape() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![0x0b],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+        let mut metadata = AotCompiledMetadata::new(
+            &module,
+            Vec::new(),
+            vec![AotFunctionMetadata {
+                local_function_index: 0,
+                wasm_function_index: 0,
+                type_index: 0,
+                executable_offset: 0,
+                executable_len: 0,
+            }],
+            Vec::new(),
+            ModuleContextOffsetData::default(),
+            Vec::new(),
+            false,
+        );
+        metadata.module_shape.import_function_count = 1;
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains("linked runtime packaging currently requires modules without imports"));
+    }
+
+    #[test]
+    fn linked_runtime_plan_rejects_termination_helpers_metadata() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![0x0b],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+        let mut metadata = AotCompiledMetadata::new(
+            &module,
+            Vec::new(),
+            vec![AotFunctionMetadata {
+                local_function_index: 0,
+                wasm_function_index: 0,
+                type_index: 0,
+                executable_offset: 0,
+                executable_len: 0,
+            }],
+            Vec::new(),
+            ModuleContextOffsetData::default(),
+            Vec::new(),
+            false,
+        );
+        metadata.ensure_termination = true;
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains(
+            "linked runtime packaging does not support runtime-injected termination helpers"
+        ));
+    }
 }
