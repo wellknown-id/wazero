@@ -1643,8 +1643,8 @@ fn cursor_remaining(cursor: &Cursor<&[u8]>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_path_suffix, build_preamble_object, build_wrapper_source,
-        cabi_wrapper_symbol_name, current_native_packaging_target,
+        append_path_suffix, build_named_preamble_object, build_preamble_object,
+        build_wrapper_source, cabi_wrapper_symbol_name, current_native_packaging_target,
         deserialize_native_package_metadata_bundle, link_native_executable, module_exports,
         preamble_symbol_name, serialize_native_package_metadata_bundle,
         validate_hello_host_metadata, validate_host_import_metadata, AotImportDescMetadata,
@@ -1652,7 +1652,7 @@ mod tests {
         NativePackageMetadataBundle, NativePackageMetadataEntry, NativePackagingTarget,
         PackagedHostImportDescriptor, NATIVE_PACKAGE_MAGIC,
     };
-    use object::Object;
+    use object::{Object, ObjectSection};
     use std::{
         fs,
         path::PathBuf,
@@ -7362,6 +7362,80 @@ int main(void) {
         assert!(file
             .symbol_by_name(&preamble_symbol_name("guest", 1))
             .is_none());
+    }
+
+    #[test]
+    fn build_named_preamble_object_preserves_current_void_preamble_shape() {
+        let current = current_native_packaging_target().unwrap();
+        let trim_target = NativePackagingTarget {
+            trim_void_preamble_prologue: true,
+            ..current
+        };
+        let no_trim_target = NativePackagingTarget {
+            trim_void_preamble_prologue: false,
+            ..current
+        };
+        let void_ty = crate::aot::AotFunctionTypeMetadata {
+            params: vec![],
+            results: vec![],
+            param_num_in_u64: 0,
+            result_num_in_u64: 0,
+        };
+        let non_void_ty = crate::aot::AotFunctionTypeMetadata {
+            params: vec![ValueType::I32],
+            results: vec![],
+            param_num_in_u64: 1,
+            result_num_in_u64: 0,
+        };
+
+        let void_trimmed = build_named_preamble_object("trimmed_void", &void_ty, trim_target).unwrap();
+        let void_untrimmed =
+            build_named_preamble_object("untrimmed_void", &void_ty, no_trim_target).unwrap();
+        let non_void_trimmed =
+            build_named_preamble_object("trimmed_non_void", &non_void_ty, trim_target).unwrap();
+        let non_void_untrimmed =
+            build_named_preamble_object("untrimmed_non_void", &non_void_ty, no_trim_target).unwrap();
+
+        let void_trimmed_len = object::File::parse(void_trimmed.as_slice())
+            .unwrap()
+            .section_by_name(".text")
+            .unwrap()
+            .data()
+            .unwrap()
+            .len();
+        let void_untrimmed_len = object::File::parse(void_untrimmed.as_slice())
+            .unwrap()
+            .section_by_name(".text")
+            .unwrap()
+            .data()
+            .unwrap()
+            .len();
+        let non_void_trimmed_len = object::File::parse(non_void_trimmed.as_slice())
+            .unwrap()
+            .section_by_name(".text")
+            .unwrap()
+            .data()
+            .unwrap()
+            .len();
+        let non_void_untrimmed_len = object::File::parse(non_void_untrimmed.as_slice())
+            .unwrap()
+            .section_by_name(".text")
+            .unwrap()
+            .data()
+            .unwrap()
+            .len();
+
+        match current.architecture {
+            AotTargetArchitecture::X86_64 => {
+                assert_eq!(void_trimmed_len, void_untrimmed_len);
+                assert_eq!(non_void_trimmed_len, non_void_untrimmed_len);
+            }
+            AotTargetArchitecture::Aarch64 => {
+                assert_eq!(void_trimmed_len, void_untrimmed_len);
+                assert_eq!(non_void_trimmed_len, non_void_untrimmed_len);
+            }
+            AotTargetArchitecture::Unknown => panic!("unexpected native packaging architecture"),
+        }
     }
 
     #[test]

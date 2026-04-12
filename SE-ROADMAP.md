@@ -161,6 +161,9 @@ that want a fully linked executable.
   stale local function type metadata currently shrinks that export surface the
   same way; wrapper generation and preamble emission follow the same filtered
   export set.
+- [100%:ea77dc43] The current named-preamble shape is pinned too: the shipped
+  `trim_void_preamble_prologue` knob is presently a no-op on current targets
+  rather than producing a distinct void-preamble body.
 - [100%:ea77dc43] The current native-link entrypoint now has targeted pre-link
   rejection coverage for corrupt sidecar metadata (including stale
   export/start/import-type indexes), unsupported target architectures, and
