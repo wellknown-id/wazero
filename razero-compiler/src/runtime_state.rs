@@ -369,6 +369,7 @@ mod tests {
     use crate::aot::{AotCompiledMetadata, AotFunctionMetadata};
     use crate::wazevoapi::ModuleContextOffsetData;
     use razero_features::CoreFeatures;
+    use razero_wasm::memory::MEMORY_PAGE_SIZE;
     use razero_wasm::module::{
         Code, ConstExpr, DataSegment, ElementMode, ElementSegment, FunctionType, Global,
         GlobalType, Memory, Module, RefType, Table, ValueType,
@@ -573,5 +574,93 @@ mod tests {
         assert_eq!(plan.globals[1].value_lo, 9);
         assert_eq!(plan.tables[0].elements, vec![None, Some(1), None]);
         assert_eq!(plan.tables[1].elements, vec![Some(0)]);
+    }
+
+    #[test]
+    fn linked_runtime_plan_rejects_data_segment_past_memory_end() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[])],
+            function_section: vec![0],
+            memory_section: Some(Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                ..Memory::default()
+            }),
+            code_section: vec![Code {
+                body: vec![0x0b],
+                ..Code::default()
+            }],
+            data_section: vec![DataSegment {
+                offset_expression: ConstExpr::from_i32(MEMORY_PAGE_SIZE as i32),
+                init: vec![0xaa],
+                passive: false,
+            }],
+            ..Module::default()
+        };
+        let metadata = AotCompiledMetadata::new(
+            &module,
+            Vec::new(),
+            vec![AotFunctionMetadata {
+                local_function_index: 0,
+                wasm_function_index: 0,
+                type_index: 0,
+                executable_offset: 0,
+                executable_len: 0,
+            }],
+            Vec::new(),
+            ModuleContextOffsetData::default(),
+            Vec::new(),
+            false,
+        );
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains("data[0] range"));
+        assert!(err.contains("exceeds memory length"));
+    }
+
+    #[test]
+    fn linked_runtime_plan_rejects_element_segment_past_table_end() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[])],
+            function_section: vec![0],
+            table_section: vec![Table {
+                min: 1,
+                max: Some(1),
+                ty: RefType::FUNCREF,
+            }],
+            code_section: vec![Code {
+                body: vec![0x0b],
+                ..Code::default()
+            }],
+            element_section: vec![ElementSegment {
+                offset_expr: ConstExpr::from_i32(1),
+                table_index: 0,
+                init: vec![ConstExpr::from_opcode(0xd2, &[0])],
+                ty: RefType::FUNCREF,
+                mode: ElementMode::Active,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let metadata = AotCompiledMetadata::new(
+            &module,
+            Vec::new(),
+            vec![AotFunctionMetadata {
+                local_function_index: 0,
+                wasm_function_index: 0,
+                type_index: 0,
+                executable_offset: 0,
+                executable_len: 0,
+            }],
+            Vec::new(),
+            ModuleContextOffsetData::default(),
+            Vec::new(),
+            false,
+        );
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains("element[0] range 1..2 exceeds table length 1"));
     }
 }
