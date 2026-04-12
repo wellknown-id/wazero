@@ -5629,6 +5629,57 @@ mod tests {
     }
 
     #[test]
+    fn host_call_policy_initial_context_does_not_persist_when_resume_omits_policy() {
+        let runtime = Runtime::with_config(RuntimeConfig::new().with_host_call_policy(
+            |_ctx: &Context, request: &HostCallPolicyRequest| request.name() != Some("async_work"),
+        ));
+        runtime
+            .new_host_module_builder("example")
+            .new_function_builder()
+            .with_func(
+                |ctx, _module, _params| {
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .with_name("async_work")
+            .export("async_work")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                include_bytes!("../../experimental/testdata/yield.wasm"),
+                ModuleConfig::new(),
+            )
+            .unwrap();
+
+        let initial_ctx =
+            with_host_call_policy(&with_yielder(&Context::default()), allow_all_host_calls);
+        let err = guest
+            .exported_function("run_twice")
+            .unwrap()
+            .call_with_context(&initial_ctx, &[])
+            .unwrap_err();
+        let RuntimeError::Yield(yield_error) = err else {
+            panic!("expected initial yield error");
+        };
+
+        let err = yield_error
+            .resumer()
+            .expect("resumer should be present")
+            .resume(&with_yielder(&Context::default()), &[40])
+            .unwrap_err();
+
+        assert_eq!("policy denied: host call", err.to_string());
+        assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+    }
+
+    #[test]
     fn memory_supports_read_write_and_grow() {
         let runtime = Runtime::new();
         let bytes = [
