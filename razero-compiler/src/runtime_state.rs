@@ -663,4 +663,84 @@ mod tests {
         let err = build_linked_runtime_plan(&metadata).unwrap_err();
         assert!(err.contains("element[0] range 1..2 exceeds table length 1"));
     }
+
+    #[test]
+    fn linked_runtime_plan_rejects_shared_memory_metadata() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[])],
+            function_section: vec![0],
+            memory_section: Some(Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                is_shared: true,
+                ..Memory::default()
+            }),
+            code_section: vec![Code {
+                body: vec![0x0b],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+        let metadata = AotCompiledMetadata::new(
+            &module,
+            Vec::new(),
+            vec![AotFunctionMetadata {
+                local_function_index: 0,
+                wasm_function_index: 0,
+                type_index: 0,
+                executable_offset: 0,
+                executable_len: 0,
+            }],
+            Vec::new(),
+            ModuleContextOffsetData::default(),
+            Vec::new(),
+            false,
+        );
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains(
+            "linked runtime packaging does not support shared memories or atomics integration"
+        ));
+    }
+
+    #[test]
+    fn linked_runtime_plan_rejects_inconsistent_global_initializer_count() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[])],
+            function_section: vec![0],
+            global_section: vec![Global {
+                ty: GlobalType {
+                    val_type: ValueType::I32,
+                    mutable: false,
+                },
+                init: ConstExpr::from_i32(0),
+            }],
+            code_section: vec![Code {
+                body: vec![0x0b],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+        let mut metadata = AotCompiledMetadata::new(
+            &module,
+            Vec::new(),
+            vec![AotFunctionMetadata {
+                local_function_index: 0,
+                wasm_function_index: 0,
+                type_index: 0,
+                executable_offset: 0,
+                executable_len: 0,
+            }],
+            Vec::new(),
+            ModuleContextOffsetData::default(),
+            Vec::new(),
+            false,
+        );
+        metadata.global_initializers.clear();
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains("linked runtime metadata has 1 globals but 0 global initializers"));
+    }
 }

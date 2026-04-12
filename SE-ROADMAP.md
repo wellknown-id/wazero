@@ -142,10 +142,10 @@ that want a fully linked executable.
   supported runtime-state slice, and its public fail-closed constructor /
   `call_export` / `start` error paths plus repeated-call runtime-state behavior
   are now pinned by targeted tests.
-- [100%:04af62a8] Linked runtime-plan bounds rejection for packaged local memory
-  and table element initialization is now pinned by targeted tests too, so
-  obvious segment-overflow metadata regressions fail closed under direct
-  planner coverage.
+- [100%:04af62a8] Linked runtime-plan bounds and metadata-shape rejection for
+  packaged local memory / table initialization are now pinned by targeted tests
+  too, so obvious segment-overflow, shared-memory, and initializer-count
+  regressions fail closed under direct planner coverage.
 - [95%:04af62a8] `razero_compiler::linker::link_native_executable(...)` packages one or
   more relocatable Wasm objects into a native executable for the current C ABI-first
   surface.
