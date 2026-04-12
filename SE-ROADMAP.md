@@ -161,8 +161,9 @@ that want a fully linked executable.
   including its single explicit `(i32, i32) -> ()` host import and local memory
   setup, and now has direct public-entrypoint rejection coverage for invalid
   sidecar metadata, malformed host-import signatures, missing `run` exports,
-  plus wrong import-count / missing-memory shapes that currently fail earlier
-  through the shared packaged-host validator.
+  `run` exports that resolve to imports or missing type metadata, plus wrong
+  import-count / missing-memory shapes that currently fail earlier through the
+  shared packaged-host validator.
 - [100%:ea77dc43] The current `hello-host` / packaged-host-import metadata
   validators now have targeted fail-closed coverage for missing host-import type
   metadata, generic packaged-host descriptor/target mismatches, plus `run`

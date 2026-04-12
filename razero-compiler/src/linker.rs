@@ -2063,6 +2063,60 @@ mod tests {
     }
 
     #[test]
+    fn link_hello_host_executable_rejects_run_export_that_points_to_import() {
+        let module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
+        let mut metadata = compile_module_metadata(&module);
+        let run_export = metadata
+            .exports
+            .iter_mut()
+            .find(|export| export.ty.0 == 0 && export.name == "run")
+            .unwrap();
+        run_export.index = 0;
+
+        let err = super::link_hello_host_executable(
+            PathBuf::from("target/hello-host-run-points-to-import"),
+            &NativeLinkModule::new("hello-host", Vec::new(), serialize_aot_metadata(&metadata)),
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "hello-host run export must resolve to a local function"
+        );
+    }
+
+    #[test]
+    fn link_hello_host_executable_rejects_run_export_with_missing_type_metadata() {
+        let module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
+        let mut metadata = compile_module_metadata(&module);
+        let run_index = metadata
+            .exports
+            .iter()
+            .find(|export| export.ty.0 == 0 && export.name == "run")
+            .unwrap()
+            .index;
+        let run_function = metadata
+            .functions
+            .iter_mut()
+            .find(|function| function.wasm_function_index == run_index)
+            .unwrap();
+        run_function.type_index = 99;
+
+        let err = super::link_hello_host_executable(
+            PathBuf::from("target/hello-host-run-missing-type"),
+            &NativeLinkModule::new("hello-host", Vec::new(), serialize_aot_metadata(&metadata)),
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "hello-host run export is missing type metadata"
+        );
+    }
+
+    #[test]
     fn validate_host_import_metadata_rejects_target_architecture_mismatch() {
         let module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
         let mut metadata = compile_module_metadata(&module);
