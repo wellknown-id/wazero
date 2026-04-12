@@ -7092,6 +7092,42 @@ int main(void) {
     }
 
     #[test]
+    fn link_native_executable_rejects_module_with_missing_export_type_metadata() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            ..Module::default()
+        };
+        let mut metadata = compile_module_metadata(&module);
+        metadata.functions[0].type_index = 99;
+
+        let err = link_native_executable(
+            PathBuf::from("target/missing-export-type-native-bin"),
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "module 'guest' does not expose any C ABI compatible functions"
+        );
+    }
+
+    #[test]
     fn build_wrapper_source_switches_to_aarch64_entrypoint_symbols() {
         let source = build_wrapper_source(
             &[ModuleSpec {
@@ -7178,6 +7214,25 @@ int main(void) {
                 results: vec![ValueType::I32],
             }]
         );
+    }
+
+    #[test]
+    fn module_exports_skips_functions_with_missing_type_metadata() {
+        let exports = module_exports(
+            "guest",
+            &AotCompiledMetadata {
+                functions: vec![crate::aot::AotFunctionMetadata {
+                    local_function_index: 0,
+                    wasm_function_index: 0,
+                    type_index: 99,
+                    executable_offset: 0,
+                    executable_len: 4,
+                }],
+                ..AotCompiledMetadata::default()
+            },
+        );
+
+        assert!(exports.is_empty());
     }
 
     #[test]

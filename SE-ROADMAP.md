@@ -157,7 +157,9 @@ that want a fully linked executable.
   the surface.
 - [100%:ea77dc43] The current export selector is pinned too: mixed modules keep
   supported scalar C ABI exports while dropping unsupported signatures instead
-  of rejecting the whole module once at least one supported export remains.
+  of rejecting the whole module once at least one supported export remains, and
+  stale local function type metadata currently shrinks that export surface the
+  same way.
 - [100%:ea77dc43] The current native-link entrypoint now has targeted pre-link
   rejection coverage for corrupt sidecar metadata (including stale
   export/start/import-type indexes), unsupported target architectures, and
