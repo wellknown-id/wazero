@@ -1021,6 +1021,101 @@ fn denied_host_call_policy_short_circuits_yield_policy_and_yield_observers() {
 }
 
 #[test]
+fn denied_guest_host_call_policy_short_circuits_yield_policy_and_yield_observers() {
+    let runtime = Runtime::new();
+    let host_call_observations = Arc::new(Mutex::new(Vec::new()));
+    let trap_observations = Arc::new(Mutex::new(Vec::new()));
+    let yield_policy_observations = Arc::new(Mutex::new(Vec::new()));
+    let yield_observations = Arc::new(Mutex::new(Vec::new()));
+    runtime
+        .new_host_module_builder("env")
+        .new_function_builder()
+        .with_callback(
+            |ctx, _module, _params| {
+                get_yielder(&ctx)
+                    .expect("yielder should be injected")
+                    .r#yield();
+                Ok(Vec::new())
+            },
+            &[],
+            &[],
+        )
+        .with_name("hook_impl")
+        .export("hook")
+        .instantiate(&Context::default())
+        .unwrap();
+    let guest = runtime
+        .instantiate_binary(
+            &[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
+                0x00, 0x02, 0x0c, 0x01, 0x03, b'e', b'n', b'v', 0x04, b'h', b'o', b'o', b'k',
+                0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n',
+                0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+            ],
+            ModuleConfig::new().with_name("guest"),
+        )
+        .unwrap();
+
+    let base = Context::default();
+    let yielding = with_yielder(&base);
+    let host_policy = with_host_call_policy(&yielding, deny_hook_impl_host_call);
+    let host_observer = with_host_call_policy_observer(
+        &host_policy,
+        record_host_call_policy_observations(host_call_observations.clone()),
+    );
+    let yield_policy = with_yield_policy(&host_observer, allow_all_yields);
+    let yield_policy_observer = with_yield_policy_observer(
+        &yield_policy,
+        record_yield_policy_observations(yield_policy_observations.clone()),
+    );
+    let yield_observer = with_yield_observer(
+        &yield_policy_observer,
+        record_yield_observations(yield_observations.clone()),
+    );
+    let ctx = with_trap_observer(
+        &yield_observer,
+        record_trap_observations(trap_observations.clone()),
+    );
+
+    let err = guest
+        .exported_function("run")
+        .unwrap()
+        .call_with_context(&ctx, &[])
+        .unwrap_err();
+
+    assert_eq!("policy denied: host call", err.to_string());
+    assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+    assert_eq!(
+        vec![(
+            Some("guest".to_string()),
+            Some("hook_impl".to_string()),
+            Some("guest".to_string()),
+            HostCallPolicyDecision::Denied,
+        )],
+        *host_call_observations
+            .lock()
+            .expect("host call policy observations poisoned")
+    );
+    assert_eq!(
+        vec![(
+            TrapCause::PolicyDenied,
+            "policy denied: host call".to_string()
+        )],
+        *trap_observations
+            .lock()
+            .expect("trap observations poisoned")
+    );
+    assert!(yield_policy_observations
+        .lock()
+        .expect("yield policy observations poisoned")
+        .is_empty());
+    assert!(yield_observations
+        .lock()
+        .expect("yield observations poisoned")
+        .is_empty());
+}
+
+#[test]
 fn host_call_policy_observer_reports_allowed_guest_import_metadata() {
     let runtime = Runtime::new();
     let observations = Arc::new(Mutex::new(Vec::new()));
