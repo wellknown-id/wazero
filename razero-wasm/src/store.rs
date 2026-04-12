@@ -4,8 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use razero_platform::GuardPageError;
-use razero_secmem::SecMemError;
+use razero_secmem::{GuardPageError, SecMemError};
 
 use crate::engine::{
     CompileOptions, Engine as WasmEngine, EngineError, ModuleEngine as WasmModuleEngine, NullEngine,

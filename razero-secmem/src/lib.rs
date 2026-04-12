@@ -2,7 +2,9 @@
 
 use std::fmt::{Display, Formatter};
 
-use razero_platform::{GuardPageError, LinearMemory};
+use razero_platform::LinearMemory;
+
+pub use razero_platform::GuardPageError;
 
 pub type SecMemResult<T> = Result<T, SecMemError>;
 

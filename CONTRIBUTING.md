@@ -26,6 +26,28 @@ If you need a concrete reference shape, start from
 `examples/hello-host/README.md`, which demonstrates an explicit host import
 without WASI.
 
+## Platform-coupling guardrails
+
+The core crates (`razero-wasm`, `razero-interp`, `razero-decoder`,
+`razero-features`, `razero`) should not import directly from `razero-platform`.
+Platform-specific functionality (mmap, signals, CPU detection) is intentionally
+centralized behind `razero-platform`, and core crates access it only through
+re-exports from crates that legitimately need it (`razero-compiler` for JIT,
+`razero-secmem` for guard-page allocation).
+
+When adding new platform-dependent behavior:
+
+- do not add `use razero_platform::...` to `razero-wasm`, `razero-interp`,
+  `razero-decoder`, or `razero-features`;
+- do not add `std::fs`, `std::net`, `std::process`, `std::env`, or
+  `std::path` imports to core crates in production code;
+- if a core crate needs a platform type (e.g. `GuardPageError`), get it from
+  `razero-secmem` rather than `razero-platform` directly;
+- the `razero` crate's `filecache` module is gated behind the `filecache`
+  Cargo feature and is the only core surface that performs filesystem I/O;
+- the `razero-compiler` crate legitimately uses `razero-platform` for JIT
+  codegen, mmap, and signal handling — this is expected and acceptable.
+
 ## Benchmarks
 
 The manual benchmark workflow for Workstream 1 is anchored on

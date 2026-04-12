@@ -4,12 +4,12 @@ use razero_wasm::module::Module as WasmModule;
 
 #[derive(Clone, Debug)]
 pub struct BinaryCompilationArtifact {
-    pub(crate) bytes: Vec<u8>,
-    pub(crate) module: WasmModule,
+    pub bytes: Vec<u8>,
+    pub module: WasmModule,
 }
 
 impl BinaryCompilationArtifact {
-    pub(crate) fn new(bytes: Vec<u8>, module: WasmModule) -> Self {
+    pub fn new(bytes: Vec<u8>, module: WasmModule) -> Self {
         Self { bytes, module }
     }
 }

@@ -338,7 +338,7 @@ mod tests {
     use super::{do_regalloc, regalloc_register_info};
     use crate::backend::compiler::Compiler;
     use crate::backend::isa::amd64::operands::{AddressMode, Operand};
-    use crate::backend::isa::amd64::{Amd64Instr, Amd64Machine, AluRmiROpcode, R15, RAX};
+    use crate::backend::isa::amd64::{AluRmiROpcode, Amd64Instr, Amd64Machine, R15, RAX};
     use crate::backend::machine::Machine;
     use crate::backend::{RegType, VReg};
     use crate::ssa::{BasicBlockId, Builder, Signature, SignatureId, Type, Values};

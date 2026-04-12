@@ -91,7 +91,11 @@ impl Amd64Machine {
             .enumerate()
             .map(|(slot, reg)| {
                 if matches!(reg.reg_type(), RegType::Float) {
-                    Amd64Instr::xmm_mov_rm(SseOpcode::Movdqu, reg, Self::exec_ctx_saved_reg_mem(slot))
+                    Amd64Instr::xmm_mov_rm(
+                        SseOpcode::Movdqu,
+                        reg,
+                        Self::exec_ctx_saved_reg_mem(slot),
+                    )
                 } else {
                     Amd64Instr::mov_rm(reg, Self::exec_ctx_saved_reg_mem(slot), 8)
                 }
@@ -126,11 +130,15 @@ impl Amd64Machine {
         let frame_size = ((self.spill_slot_size + 15) / 16) * 16;
         let save_instrs = self.clobbered_save_instructions();
         let restore_instrs = self.clobbered_restore_instructions();
-        if let Some(entry_block_index) = self
-            .blocks
-            .iter()
-            .position(|block| block.entry)
-            .or(if self.blocks.is_empty() { None } else { Some(0) })
+        if let Some(entry_block_index) =
+            self.blocks
+                .iter()
+                .position(|block| block.entry)
+                .or(if self.blocks.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                })
         {
             let entry_block = &mut self.blocks[entry_block_index];
             let has_prologue = entry_block.instructions.windows(2).any(|pair| {
@@ -176,7 +184,8 @@ impl Amd64Machine {
                 if block.instructions[index].to_string() == "movq %rbp, %rsp"
                     && block.instructions[index + 1].to_string() == "popq %rbp"
                 {
-                    block.instructions
+                    block
+                        .instructions
                         .splice(index..index, restore_instrs.clone());
                     index += restore_instrs.len() + 2;
                 } else {

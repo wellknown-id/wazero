@@ -10,7 +10,8 @@ use std::{
 };
 
 use razero_compiler::{
-    call_engine::CallEngineError, engine::CompilerEngine, module_engine::CompilerModuleEngine,
+    call_engine::CallEngineError, compiler_supported, engine::CompilerEngine,
+    module_engine::CompilerModuleEngine, supports_guard_pages,
 };
 use razero_decoder::decoder::decode_module;
 use razero_decoder::memory::MemorySizer;
@@ -20,8 +21,7 @@ use razero_interp::{
     interpreter::{active_host_call_stack, Module as InterpRuntimeModule},
     signature::Signature as InterpSignature,
 };
-use razero_platform::{compiler_supported, supports_guard_pages};
-use razero_secmem::GuardPageAllocator;
+use razero_secmem::{GuardPageAllocator, GuardPageError};
 use razero_wasm::{
     engine::{
         Engine as WasmEngine, EngineError as WasmEngineError, ModuleEngine as WasmModuleEngine,
@@ -1097,9 +1097,9 @@ impl MemoryAllocator for GuardPageMemoryAllocator {
             Ok(allocation) => Some(crate::experimental::memory::LinearMemory::from_guarded(
                 allocation, cap, max,
             )),
-            Err(razero_secmem::SecMemError::Platform(
-                razero_platform::GuardPageError::Unsupported(_),
-            )) => DefaultMemoryAllocator.allocate(cap, max),
+            Err(razero_secmem::SecMemError::Platform(GuardPageError::Unsupported(_))) => {
+                DefaultMemoryAllocator.allocate(cap, max)
+            }
             Err(_) => None,
         }
     }
@@ -1900,9 +1900,10 @@ pub(crate) fn to_wasm_value_type(value_type: ValueType) -> WasmValueType {
 
 #[cfg(test)]
 mod tests {
-    use razero_compiler::module_engine::CompilerModuleEngine;
+    use razero_compiler::{
+        compiler_supported, module_engine::CompilerModuleEngine, supports_guard_pages,
+    };
     use razero_interp::engine::InterpModuleEngine;
-    use razero_platform::{compiler_supported, supports_guard_pages};
     use razero_wasm::engine::Engine as _;
     use std::sync::{
         atomic::{AtomicI64, AtomicU32, Ordering},
@@ -1921,17 +1922,15 @@ mod tests {
         ctx_keys::Context,
         experimental::{
             add_fuel, get_fuel_controller, get_snapshotter, get_time_provider, get_yielder,
-            remaining_fuel, trap_cause_of, with_fuel_observer,
-            with_close_notifier, with_compilation_workers, with_fuel_controller,
-            with_function_listener_factory, with_host_call_policy, with_host_call_policy_observer,
-            with_snapshotter, with_time_provider, with_trap_observer, with_yield_observer,
-            with_yield_policy,
-            with_yield_policy_observer, with_yielder, CloseNotifier, FuelController,
-            FuelEvent, FuelObservation, FunctionListener, FunctionListenerFactory,
-            HostCallPolicyDecision,
-            HostCallPolicyObservation, HostCallPolicyRequest, Snapshot, StackIterator, TrapCause,
-            TimeProvider, TrapObservation, YieldEvent, YieldObservation, YieldPolicyDecision,
-            YieldPolicyObservation, YieldPolicyRequest,
+            remaining_fuel, trap_cause_of, with_close_notifier, with_compilation_workers,
+            with_fuel_controller, with_fuel_observer, with_function_listener_factory,
+            with_host_call_policy, with_host_call_policy_observer, with_snapshotter,
+            with_time_provider, with_trap_observer, with_yield_observer, with_yield_policy,
+            with_yield_policy_observer, with_yielder, CloseNotifier, FuelController, FuelEvent,
+            FuelObservation, FunctionListener, FunctionListenerFactory, HostCallPolicyDecision,
+            HostCallPolicyObservation, HostCallPolicyRequest, Snapshot, StackIterator,
+            TimeProvider, TrapCause, TrapObservation, YieldEvent, YieldObservation,
+            YieldPolicyDecision, YieldPolicyObservation, YieldPolicyRequest,
         },
         CompiledModule, RuntimeConfig,
     };
@@ -2788,6 +2787,43 @@ mod tests {
         assert!(!err.to_string().is_empty());
         assert_eq!(
             vec![("secure-guest".to_string(), TrapCause::MemoryFault, None,)],
+            *observations.lock().expect("trap observations poisoned")
+        );
+    }
+
+    #[test]
+    fn interpreter_oob_trap_notifies_observer() {
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::with_config(RuntimeConfig::new_interpreter());
+        let compiled = runtime
+            .compile(include_bytes!("../../testdata/oob_load.wasm"))
+            .unwrap();
+        let module = runtime.instantiate(&compiled, ModuleConfig::new()).unwrap();
+        let ctx = with_trap_observer(&Context::default(), {
+            let observations = observations.clone();
+            move |_ctx: &Context, observation: TrapObservation| {
+                observations
+                    .lock()
+                    .expect("trap observations poisoned")
+                    .push((observation.cause, observation.err.to_string()));
+            }
+        });
+
+        let err = module
+            .exported_function("oob")
+            .unwrap()
+            .call_with_context(&ctx, &[])
+            .expect_err("oob should trap");
+
+        assert_eq!(
+            Some(TrapCause::OutOfBoundsMemoryAccess),
+            trap_cause_of(&err)
+        );
+        assert_eq!(
+            vec![(
+                TrapCause::OutOfBoundsMemoryAccess,
+                "out of bounds memory access".to_string()
+            )],
             *observations.lock().expect("trap observations poisoned")
         );
     }
@@ -3862,7 +3898,8 @@ mod tests {
             .new_function_builder()
             .with_func(
                 |ctx, _module, _params| {
-                    let controller = get_fuel_controller(&ctx).expect("fuel controller should exist");
+                    let controller =
+                        get_fuel_controller(&ctx).expect("fuel controller should exist");
                     Ok(vec![
                         controller.budget() as u64,
                         remaining_fuel(&ctx).unwrap() as u64,
@@ -4954,10 +4991,10 @@ mod tests {
         let ctx = with_trap_observer(&policy_ctx, {
             let events = events.clone();
             move |_ctx: &Context, observation: TrapObservation| {
-                events.lock().expect("events poisoned").push(format!(
-                    "trap:{:?}:{}",
-                    observation.cause, observation.err
-                ));
+                events
+                    .lock()
+                    .expect("events poisoned")
+                    .push(format!("trap:{:?}:{}", observation.cause, observation.err));
             }
         });
 
@@ -5151,18 +5188,14 @@ mod tests {
         assert_eq!("policy denied: host call", err.to_string());
         assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
         assert_eq!(0, called.load(Ordering::SeqCst));
-        assert!(
-            yield_policy_events
-                .lock()
-                .expect("yield-policy events poisoned")
-                .is_empty()
-        );
-        assert!(
-            yield_observer_events
-                .lock()
-                .expect("yield observer events poisoned")
-                .is_empty()
-        );
+        assert!(yield_policy_events
+            .lock()
+            .expect("yield-policy events poisoned")
+            .is_empty());
+        assert!(yield_observer_events
+            .lock()
+            .expect("yield observer events poisoned")
+            .is_empty());
     }
 
     #[test]
@@ -5744,7 +5777,9 @@ mod tests {
                 None,
                 HostCallPolicyDecision::Allowed,
             )],
-            *observations.lock().expect("host call observations poisoned")
+            *observations
+                .lock()
+                .expect("host call observations poisoned")
         );
     }
 
@@ -6235,7 +6270,10 @@ mod tests {
                 .resume(&with_yielder(&Context::default()), &[2])
                 .unwrap()
         );
-        assert_eq!(vec![10, 1], *seen_budgets.lock().expect("seen budgets poisoned"));
+        assert_eq!(
+            vec![10, 1],
+            *seen_budgets.lock().expect("seen budgets poisoned")
+        );
         assert!(initial_consumed.load(Ordering::SeqCst) > 0);
         assert_eq!(0, resume_consumed.load(Ordering::SeqCst));
     }
@@ -6251,7 +6289,8 @@ mod tests {
                 {
                     let seen_budgets = seen_budgets.clone();
                     move |ctx, _module, _params| {
-                        let budget = get_fuel_controller(&ctx).map(|controller| controller.budget());
+                        let budget =
+                            get_fuel_controller(&ctx).map(|controller| controller.budget());
                         seen_budgets
                             .lock()
                             .expect("seen budgets poisoned")
@@ -6385,18 +6424,15 @@ mod tests {
                 .expect("initial fuel observations poisoned")
         );
 
-        let resume_ctx = with_yielder(&with_fuel_observer(
-            &Context::default(),
-            {
-                let resume_observations = resume_observations.clone();
-                move |_ctx: &Context, observation: FuelObservation| {
-                    resume_observations
-                        .lock()
-                        .expect("resume fuel observations poisoned")
-                        .push(observation.event);
-                }
-            },
-        ));
+        let resume_ctx = with_yielder(&with_fuel_observer(&Context::default(), {
+            let resume_observations = resume_observations.clone();
+            move |_ctx: &Context, observation: FuelObservation| {
+                resume_observations
+                    .lock()
+                    .expect("resume fuel observations poisoned")
+                    .push(observation.event);
+            }
+        }));
         assert_eq!(
             vec![142],
             yield_error
@@ -6478,18 +6514,15 @@ mod tests {
                 .expect("initial fuel observations poisoned")
         );
 
-        let resume_ctx = with_yielder(&with_fuel_observer(
-            &Context::default(),
-            {
-                let resume_observations = resume_observations.clone();
-                move |_ctx: &Context, observation: FuelObservation| {
-                    resume_observations
-                        .lock()
-                        .expect("resume fuel observations poisoned")
-                        .push(observation.event);
-                }
-            },
-        ));
+        let resume_ctx = with_yielder(&with_fuel_observer(&Context::default(), {
+            let resume_observations = resume_observations.clone();
+            move |_ctx: &Context, observation: FuelObservation| {
+                resume_observations
+                    .lock()
+                    .expect("resume fuel observations poisoned")
+                    .push(observation.event);
+            }
+        }));
 
         assert_eq!(
             vec![142],
@@ -6564,7 +6597,10 @@ mod tests {
         let err = first_resumer
             .resume(&with_yielder(&Context::default()), &[1])
             .unwrap_err();
-        assert_eq!("cannot resume: resumer has already been used", err.to_string());
+        assert_eq!(
+            "cannot resume: resumer has already been used",
+            err.to_string()
+        );
 
         assert_eq!(
             vec![42],
@@ -6622,7 +6658,10 @@ mod tests {
         let err = resumer
             .resume(&with_yielder(&Context::default()), &[42])
             .unwrap_err();
-        assert_eq!("cannot resume: resumer has already been used", err.to_string());
+        assert_eq!(
+            "cannot resume: resumer has already been used",
+            err.to_string()
+        );
     }
 
     #[test]
@@ -7925,12 +7964,10 @@ mod tests {
             panic!("expected initial yield error");
         };
 
-        assert!(
-            initial_observations
-                .lock()
-                .expect("initial trap observations poisoned")
-                .is_empty()
-        );
+        assert!(initial_observations
+            .lock()
+            .expect("initial trap observations poisoned")
+            .is_empty());
 
         let resumed_ctx = with_trap_observer(
             &with_yield_policy(&with_yielder(&Context::default()), deny_all_yields),
@@ -7952,12 +7989,10 @@ mod tests {
 
         assert_eq!("policy denied: cooperative yield", err.to_string());
         assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
-        assert!(
-            initial_observations
-                .lock()
-                .expect("initial trap observations poisoned")
-                .is_empty()
-        );
+        assert!(initial_observations
+            .lock()
+            .expect("initial trap observations poisoned")
+            .is_empty());
         assert_eq!(
             vec![(
                 TrapCause::PolicyDenied,
@@ -8017,12 +8052,10 @@ mod tests {
             panic!("expected initial yield error");
         };
 
-        assert!(
-            observations
-                .lock()
-                .expect("trap observations poisoned")
-                .is_empty()
-        );
+        assert!(observations
+            .lock()
+            .expect("trap observations poisoned")
+            .is_empty());
 
         let err = yield_error
             .resumer()
@@ -8035,12 +8068,10 @@ mod tests {
 
         assert_eq!("policy denied: cooperative yield", err.to_string());
         assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
-        assert!(
-            observations
-                .lock()
-                .expect("trap observations poisoned")
-                .is_empty()
-        );
+        assert!(observations
+            .lock()
+            .expect("trap observations poisoned")
+            .is_empty());
     }
 
     #[test]
@@ -8288,22 +8319,19 @@ mod tests {
             .unwrap();
 
         let observations = Arc::new(Mutex::new(Vec::new()));
-        let initial_ctx = with_yield_observer(
-            &with_yielder(&Context::default()),
-            {
-                let observations = observations.clone();
-                move |_ctx: &Context, observation: YieldObservation| {
-                    observations
-                        .lock()
-                        .expect("yield observations poisoned")
-                        .push((
-                            observation.event,
-                            observation.yield_count,
-                            observation.expected_host_results,
-                        ));
-                }
-            },
-        );
+        let initial_ctx = with_yield_observer(&with_yielder(&Context::default()), {
+            let observations = observations.clone();
+            move |_ctx: &Context, observation: YieldObservation| {
+                observations
+                    .lock()
+                    .expect("yield observations poisoned")
+                    .push((
+                        observation.event,
+                        observation.yield_count,
+                        observation.expected_host_results,
+                    ));
+            }
+        });
 
         let err = guest
             .exported_function("run")
@@ -8706,12 +8734,10 @@ mod tests {
             .expect("resumer should be present")
             .cancel();
 
-        assert!(
-            observations
-                .lock()
-                .expect("trap observations poisoned")
-                .is_empty()
-        );
+        assert!(observations
+            .lock()
+            .expect("trap observations poisoned")
+            .is_empty());
     }
 
     #[test]
@@ -8751,12 +8777,10 @@ mod tests {
         }));
 
         assert!(panic.is_err());
-        assert!(
-            observations
-                .lock()
-                .expect("trap observations poisoned")
-                .is_empty()
-        );
+        assert!(observations
+            .lock()
+            .expect("trap observations poisoned")
+            .is_empty());
     }
 
     #[test]
@@ -9190,12 +9214,10 @@ mod tests {
             panic!("expected initial yield error");
         };
 
-        assert!(
-            initial_observations
-                .lock()
-                .expect("initial yield policy observations poisoned")
-                .is_empty()
-        );
+        assert!(initial_observations
+            .lock()
+            .expect("initial yield policy observations poisoned")
+            .is_empty());
 
         let resumed_ctx = with_yield_policy_observer(
             &with_yield_policy(&with_yielder(&Context::default()), deny_all_yields),
@@ -9223,12 +9245,10 @@ mod tests {
 
         assert_eq!("policy denied: cooperative yield", err.to_string());
         assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
-        assert!(
-            initial_observations
-                .lock()
-                .expect("initial yield policy observations poisoned")
-                .is_empty()
-        );
+        assert!(initial_observations
+            .lock()
+            .expect("initial yield policy observations poisoned")
+            .is_empty());
         assert_eq!(
             vec![(
                 None,

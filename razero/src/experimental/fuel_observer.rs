@@ -139,8 +139,7 @@ mod tests {
         let runtime = Runtime::new();
         let compiled = runtime
             .compile(&[
-                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
-                0x00,
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
             ])
             .unwrap();
         let module = runtime
@@ -179,13 +178,10 @@ mod tests {
         let runtime = Runtime::new();
         let compiled = runtime
             .compile(&[
-                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
-                0x00,
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
             ])
             .unwrap();
-        let module = runtime
-            .instantiate(&compiled, ModuleConfig::new())
-            .unwrap();
+        let module = runtime.instantiate(&compiled, ModuleConfig::new()).unwrap();
 
         // This should not panic even without an observer set
         super::notify_fuel_observer(
@@ -199,4 +195,3 @@ mod tests {
         );
     }
 }
-

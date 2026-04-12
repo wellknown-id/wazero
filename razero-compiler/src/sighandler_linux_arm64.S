@@ -54,9 +54,13 @@ razero_jit_sig_handler:
     ldr x11, [x10, #200]
     cbz x11, .Lnot_jit
 
+    ldr w16, [x11, #EXECCTX_EXITCODE_OFF]
+    cmp w16, #24
+    b.eq .Lrestore_context
     mov w16, #26
     str w16, [x11, #EXECCTX_EXITCODE_OFF]
 
+.Lrestore_context:
     ldr x16, [x11, #EXECCTX_ORIGSP_OFF]
     str x16, [x8, #SIGCONTEXT_SP_OFF]
     ldr x16, [x11, #EXECCTX_ORIGFP_OFF]

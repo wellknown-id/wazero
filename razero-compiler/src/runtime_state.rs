@@ -175,13 +175,12 @@ pub(crate) fn validate_linked_runtime_metadata(
     if metadata.module_shape.is_host_module {
         return Err("host modules are not supported by linked runtime packaging".to_string());
     }
-    if metadata.module_shape.import_function_count != 0
-        || metadata.module_shape.import_global_count != 0
+    if metadata.module_shape.import_global_count != 0
         || metadata.module_shape.import_memory_count != 0
         || metadata.module_shape.import_table_count != 0
     {
         return Err(
-            "linked runtime packaging currently requires modules without imports".to_string(),
+            "linked runtime packaging currently requires modules without imported globals, memory, or tables".to_string(),
         );
     }
     if metadata.ensure_termination {
@@ -861,10 +860,48 @@ mod tests {
             Vec::new(),
             false,
         );
-        metadata.module_shape.import_function_count = 1;
+        metadata.module_shape.import_global_count = 1;
 
         let err = build_linked_runtime_plan(&metadata).unwrap_err();
-        assert!(err.contains("linked runtime packaging currently requires modules without imports"));
+        assert!(err.contains("linked runtime packaging currently requires modules without imported globals, memory, or tables"));
+    }
+
+    #[test]
+    fn linked_runtime_plan_allows_function_imports() {
+        let module = Module {
+            type_section: vec![
+                function_type(&[], &[]),
+                function_type(&[ValueType::I32], &[ValueType::I32]),
+            ],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![0x0b],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+        let mut metadata = AotCompiledMetadata::new(
+            &module,
+            Vec::new(),
+            vec![AotFunctionMetadata {
+                local_function_index: 0,
+                wasm_function_index: 0,
+                type_index: 0,
+                executable_offset: 0,
+                executable_len: 0,
+            }],
+            Vec::new(),
+            ModuleContextOffsetData::default(),
+            Vec::new(),
+            false,
+        );
+        metadata.module_shape.import_function_count = 2;
+
+        let plan = build_linked_runtime_plan(&metadata);
+        assert!(
+            plan.is_ok(),
+            "modules with function imports should be accepted"
+        );
     }
 
     #[test]
@@ -907,7 +944,9 @@ mod tests {
         metadata.functions.clear();
 
         let err = build_linked_runtime_plan(&metadata).unwrap_err();
-        assert!(err.contains("linked module metadata does not contain any compiled local functions"));
+        assert!(
+            err.contains("linked module metadata does not contain any compiled local functions")
+        );
     }
 
     #[test]
@@ -1018,9 +1057,7 @@ mod tests {
         metadata.element_segments[0].init_expressions = vec![vec![0x41, 0x00, 0x0b]];
 
         let err = build_linked_runtime_plan(&metadata).unwrap_err();
-        assert!(err.contains(
-            "element[0].init[0] uses an unsupported initializer opcode 0x41"
-        ));
+        assert!(err.contains("element[0].init[0] uses an unsupported initializer opcode 0x41"));
     }
 
     #[test]
@@ -1029,9 +1066,7 @@ mod tests {
         metadata.element_segments[0].init_expressions = vec![vec![0xd2, 0x07, 0x0b]];
 
         let err = build_linked_runtime_plan(&metadata).unwrap_err();
-        assert!(err.contains(
-            "element[0].init[0] references missing local function 7"
-        ));
+        assert!(err.contains("element[0].init[0] references missing local function 7"));
     }
 
     #[test]
@@ -1049,9 +1084,7 @@ mod tests {
         metadata.element_segments[0].init_expressions = vec![vec![0xd0, 0x70]];
 
         let err = build_linked_runtime_plan(&metadata).unwrap_err();
-        assert!(err.contains(
-            "element[0].init[0] has an invalid ref.null encoding"
-        ));
+        assert!(err.contains("element[0].init[0] has an invalid ref.null encoding"));
     }
 
     #[test]
@@ -1069,9 +1102,7 @@ mod tests {
         metadata.global_initializers[0].init_expression = ConstExpr::from_i64(0).data;
 
         let err = build_linked_runtime_plan(&metadata).unwrap_err();
-        assert!(err.contains(
-            "global[0] initializer type i64 does not match declared type i32"
-        ));
+        assert!(err.contains("global[0] initializer type i64 does not match declared type i32"));
     }
 
     #[test]
@@ -1125,9 +1156,9 @@ mod tests {
         metadata.data_segments[0].offset_expression = vec![0xd0];
 
         let err = build_linked_runtime_plan(&metadata).unwrap_err();
-        assert!(err.contains(
-            "read reference type for ref.null: unexpected end of constant expression"
-        ));
+        assert!(
+            err.contains("read reference type for ref.null: unexpected end of constant expression")
+        );
     }
 
     #[test]
@@ -1136,8 +1167,6 @@ mod tests {
         metadata.data_segments[0].offset_expression = vec![0x41, 0x00, 0x41, 0x01, 0x0b];
 
         let err = build_linked_runtime_plan(&metadata).unwrap_err();
-        assert!(err.contains(
-            "stack has more than one value at end of constant expression"
-        ));
+        assert!(err.contains("stack has more than one value at end of constant expression"));
     }
 }

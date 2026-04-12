@@ -446,6 +446,7 @@ fn native_compile_entry_preamble(ty: &AotFunctionTypeMetadata) -> Result<Vec<u8>
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use razero_features::CoreFeatures;
     use razero_wasm::engine::Engine;
     use razero_wasm::memory::MEMORY_PAGE_SIZE;
@@ -775,7 +776,10 @@ mod tests {
     fn linked_module_construction_runs_start_once_and_start_is_idempotent() {
         let mut engine = CompilerEngine::new();
         let module = Module {
-            type_section: vec![function_type(&[], &[]), function_type(&[], &[ValueType::I32])],
+            type_section: vec![
+                function_type(&[], &[]),
+                function_type(&[], &[ValueType::I32]),
+            ],
             function_section: vec![0, 1],
             memory_section: Some(razero_wasm::module::Memory {
                 min: 1,
@@ -1069,8 +1073,8 @@ mod tests {
 
         engine.compile_module(&module).unwrap();
         let compiled = engine.compiled_module(&module).unwrap();
-        let linked = LinkedModule::from_metadata_and_first_local_function(compiled.aot.clone(), 0)
-            .unwrap();
+        let linked =
+            LinkedModule::from_metadata_and_first_local_function(compiled.aot.clone(), 0).unwrap();
 
         let err = linked.start().unwrap_err();
         assert!(err
@@ -1109,9 +1113,11 @@ mod tests {
             .find(|export| export.ty == ExternType::FUNC && export.name == "_start")
             .unwrap();
         start_export.index = 7;
-        let linked =
-            LinkedModule::from_metadata_and_first_local_function(metadata, compiled.function_ptr(0).unwrap())
-                .unwrap();
+        let linked = LinkedModule::from_metadata_and_first_local_function(
+            metadata,
+            compiled.function_ptr(0).unwrap(),
+        )
+        .unwrap();
 
         let err = linked.start().unwrap_err();
         assert!(err
@@ -1261,7 +1267,9 @@ mod tests {
         .unwrap();
 
         let err = linked.start().unwrap_err();
-        assert!(err.to_string().contains("start functions must not return values"));
+        assert!(err
+            .to_string()
+            .contains("start functions must not return values"));
     }
 
     #[cfg(all(
@@ -1348,7 +1356,7 @@ mod tests {
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     #[test]
-    fn linked_module_rejects_imported_runtime_shapes() {
+    fn linked_module_allows_function_imports() {
         let mut engine = CompilerEngine::new();
         let module = Module {
             type_section: vec![function_type(&[], &[])],
@@ -1369,15 +1377,47 @@ mod tests {
 
         engine.compile_module(&module).unwrap();
         let compiled = engine.compiled_module(&module).unwrap();
-        let err = LinkedModule::from_metadata_and_first_local_function(
+        let result = LinkedModule::from_metadata_and_first_local_function(
             compiled.aot.clone(),
             compiled.function_ptr(0).unwrap(),
-        )
-        .unwrap_err();
+        );
 
-        assert!(err
-            .to_string()
-            .contains("linked runtime packaging currently requires modules without imports"));
+        assert!(
+            result.is_ok(),
+            "modules with function imports should now be accepted by linked runtime packaging"
+        );
+    }
+
+    #[test]
+    fn linked_module_rejects_imported_globals() {
+        let module = Module {
+            type_section: vec![function_type(&[], &[])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![0x0b],
+                ..Code::default()
+            }],
+            ..Module::default()
+        };
+        let mut metadata = crate::aot::AotCompiledMetadata::new(
+            &module,
+            Vec::new(),
+            vec![crate::aot::AotFunctionMetadata {
+                local_function_index: 0,
+                wasm_function_index: 0,
+                type_index: 0,
+                executable_offset: 0,
+                executable_len: 0,
+            }],
+            Vec::new(),
+            crate::wazevoapi::offsetdata::ModuleContextOffsetData::default(),
+            Vec::new(),
+            false,
+        );
+        metadata.module_shape.import_global_count = 1;
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains("linked runtime packaging currently requires modules without imported globals, memory, or tables"));
     }
 
     #[cfg(all(
@@ -1419,9 +1459,9 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(err
-            .to_string()
-            .contains("linked runtime packaging does not support shared memories or atomics integration"));
+        assert!(err.to_string().contains(
+            "linked runtime packaging does not support shared memories or atomics integration"
+        ));
     }
 
     #[cfg(all(
@@ -1493,9 +1533,9 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(err
-            .to_string()
-            .contains("linked runtime packaging does not support runtime-injected termination helpers"));
+        assert!(err.to_string().contains(
+            "linked runtime packaging does not support runtime-injected termination helpers"
+        ));
     }
 
     #[cfg(all(
@@ -1542,9 +1582,9 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(err
-            .to_string()
-            .contains("data[0] is passive; linked runtime packaging only supports active data segments"));
+        assert!(err.to_string().contains(
+            "data[0] is passive; linked runtime packaging only supports active data segments"
+        ));
     }
 
     #[cfg(all(
@@ -1593,9 +1633,9 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(err
-            .to_string()
-            .contains("active data segments require a defined local memory in linked runtime packaging"));
+        assert!(err.to_string().contains(
+            "active data segments require a defined local memory in linked runtime packaging"
+        ));
     }
 
     #[cfg(all(
@@ -1709,7 +1749,9 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(err.to_string().contains("element[0] references unknown table 1"));
+        assert!(err
+            .to_string()
+            .contains("element[0] references unknown table 1"));
     }
 
     #[cfg(all(
@@ -2274,7 +2316,9 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(err.to_string().contains("element[0].init[0] ref.func index:"));
+        assert!(err
+            .to_string()
+            .contains("element[0].init[0] ref.func index:"));
     }
 
     #[cfg(all(
@@ -2410,9 +2454,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(err
-            .to_string()
-            .contains("invalid type for ref.null: 0x0"));
+        assert!(err.to_string().contains("invalid type for ref.null: 0x0"));
     }
 
     #[cfg(all(
@@ -2479,9 +2521,9 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(err.to_string().contains(
-            "read reference type for ref.null: unexpected end of constant expression"
-        ));
+        assert!(err
+            .to_string()
+            .contains("read reference type for ref.null: unexpected end of constant expression"));
     }
 
     #[cfg(all(

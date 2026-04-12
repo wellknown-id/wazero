@@ -778,4 +778,3 @@ mod tests {
         assert_eq!(handle.exec_ctx.fuel, 0);
     }
 }
-

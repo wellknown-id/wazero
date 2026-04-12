@@ -7,9 +7,9 @@ use std::{
     thread,
 };
 
-use razero::{
-    api::wasm::ValueType, Context, FileCompilationCache, ModuleConfig, Runtime, RuntimeConfig,
-};
+#[cfg(feature = "filecache")]
+use razero::FileCompilationCache;
+use razero::{api::wasm::ValueType, Context, ModuleConfig, Runtime, RuntimeConfig};
 
 const CONCURRENT_ADD_WASM: &[u8] =
     include_bytes!("../../examples/concurrent-instantiation/testdata/add.wasm");
@@ -221,6 +221,7 @@ fn multiple_results_smoke_matches_go_example() {
     );
 }
 
+#[cfg(feature = "filecache")]
 #[test]
 fn multiple_runtimes_smoke_matches_go_example() {
     let scratch = ScratchDir::new("example-multiple-runtimes");

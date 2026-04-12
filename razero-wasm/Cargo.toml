@@ -10,5 +10,4 @@ path = "src/lib.rs"
 
 [dependencies]
 razero-features = { workspace = true }
-razero-platform = { workspace = true }
 razero-secmem = { workspace = true }

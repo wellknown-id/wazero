@@ -1581,12 +1581,7 @@ mod tests {
         info.allocatable_registers[RegType::Int.index()] = vec![RealReg(1), RealReg(2)];
         info.callee_saved_registers = RegSet::from_regs(&[RealReg(1)]);
         info.caller_saved_registers = RegSet::from_regs(&[RealReg(1), RealReg(2)]);
-        info.real_reg_to_vreg = vec![
-            VReg::default(),
-            real_vreg(1),
-            real_vreg(2),
-            real_vreg(3),
-        ];
+        info.real_reg_to_vreg = vec![VReg::default(), real_vreg(1), real_vreg(2), real_vreg(3)];
         info.real_reg_name = |reg| reg.to_string();
         info.real_reg_type = |_| RegType::Int;
         info
@@ -1662,13 +1657,19 @@ mod tests {
             0,
             vec![
                 MockInstr::new().use_([reserved]),
-                MockInstr::new().def([loop_phi]).use_([int_vreg(100)]).copy(),
+                MockInstr::new()
+                    .def([loop_phi])
+                    .use_([int_vreg(100)])
+                    .copy(),
             ],
         )
         .entry();
         let header = MockBlock::new(
             1,
-            vec![MockInstr::new().use_([reserved]), MockInstr::new().use_([loop_phi])],
+            vec![
+                MockInstr::new().use_([reserved]),
+                MockInstr::new().use_([loop_phi]),
+            ],
         )
         .loop_header(vec![]);
         header.add_block_param(loop_phi);
@@ -1683,9 +1684,7 @@ mod tests {
 
         let live_ins = alloc
             .block_states
-            .get(Allocator::<MockInstr, MockBlock, MockFunction>::block_state_key(
-                header.id(),
-            ))
+            .get(Allocator::<MockInstr, MockBlock, MockFunction>::block_state_key(header.id()))
             .unwrap()
             .live_ins
             .clone();

@@ -1,5 +1,7 @@
 #![doc = "Scaffold for the razero optimizing compiler crate.\n\nSee `../AOT_PACKAGING_ABI.md` for the frozen Rust AOT packaging contract."]
 
+pub use razero_platform::{compiler_supported, supports_guard_pages};
+
 pub mod aot;
 pub mod backend;
 pub mod call_engine;

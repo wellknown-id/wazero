@@ -354,10 +354,15 @@ pub fn deserialize_native_package_metadata_bundle(
 /// This stable packaging surface currently targets scalar C ABI-compatible exported functions.
 /// The linked executable is accompanied by a `.razero-package` file containing only module names
 /// and serialized AOT metadata sidecars; object bytes and static libraries remain external inputs.
+///
+/// `host_imports` supplies host-function descriptors for modules that import host functions.
+/// Each descriptor maps a Wasm function import to a native host-call symbol. The generated
+/// wrapper code dispatches host calls through a trampoline table and exit-code loop.
 pub fn link_native_executable(
     output_path: impl AsRef<Path>,
     modules: &[NativeLinkModule],
     static_libraries: &[PathBuf],
+    host_imports: &[PackagedHostImportDescriptor],
 ) -> Result<NativeExecutablePackage, NativeLinkError> {
     if modules.is_empty() {
         return Err(NativeLinkError::new(
@@ -414,6 +419,42 @@ pub fn link_native_executable(
         });
     }
 
+    metadata_bundle.host_imports = host_imports.to_vec();
+
+    let mut host_import_specs = Vec::new();
+    for descriptor in host_imports {
+        let module_spec = module_specs
+            .iter()
+            .find(|spec| spec.sanitized_name == sanitize_identifier(&descriptor.guest_module_name))
+            .ok_or_else(|| {
+                NativeLinkError::new(format!(
+                    "host import references unknown module '{}'",
+                    descriptor.guest_module_name
+                ))
+            })?;
+        let import_type = module_spec
+            .metadata
+            .types
+            .get(descriptor.type_index as usize)
+            .ok_or_else(|| {
+                NativeLinkError::new(format!(
+                    "host import '{}.{}' references unknown type index {}",
+                    descriptor.import_module, descriptor.import_name, descriptor.type_index
+                ))
+            })?
+            .clone();
+        let trampoline_symbol = packaged_host_import_symbol_name(
+            descriptor.function_import_index,
+            &descriptor.import_module,
+            &descriptor.import_name,
+        );
+        host_import_specs.push(PackagedHostImportSpec {
+            descriptor: descriptor.clone(),
+            import_type,
+            trampoline_symbol,
+        });
+    }
+
     fs::write(
         &metadata_bundle_path,
         serialize_native_package_metadata_bundle(&metadata_bundle),
@@ -424,11 +465,24 @@ pub fn link_native_executable(
     let preamble_object_path = work_dir.join("razero-cabi-preambles.o");
     fs::write(&preamble_object_path, preamble_object_bytes).map_err(io_err)?;
 
-    let wrappers_source = build_wrapper_source(&module_specs, execution_context_size, target)?;
+    let wrappers_source = build_wrapper_source(
+        &module_specs,
+        execution_context_size,
+        target,
+        &host_import_specs,
+    )?;
     let wrappers_source_path = work_dir.join("razero-cabi-wrappers.c");
     let wrappers_object_path = work_dir.join("razero-cabi-wrappers.o");
     fs::write(&wrappers_source_path, wrappers_source).map_err(io_err)?;
     compile_c_object(&wrappers_source_path, &wrappers_object_path)?;
+
+    let mut extra_object_paths = Vec::new();
+    if !host_import_specs.is_empty() {
+        let host_import_object_bytes = build_host_import_object(&host_import_specs, target)?;
+        let host_import_object_path = work_dir.join("razero-host-imports.o");
+        fs::write(&host_import_object_path, host_import_object_bytes).map_err(io_err)?;
+        extra_object_paths.push(host_import_object_path);
+    }
 
     let entry_stem = match target.architecture {
         AotTargetArchitecture::X86_64 => "razero-amd64-entry",
@@ -450,6 +504,9 @@ pub fn link_native_executable(
         .arg(&preamble_object_path);
     for object_path in &object_paths {
         link.arg(object_path);
+    }
+    for extra_path in &extra_object_paths {
+        link.arg(extra_path);
     }
     for library in static_libraries {
         link.arg(library);
@@ -1150,6 +1207,7 @@ fn build_wrapper_source(
     module_specs: &[ModuleSpec],
     execution_context_size: usize,
     target: NativePackagingTarget,
+    host_imports: &[PackagedHostImportSpec],
 ) -> Result<String, NativeLinkError> {
     let mut source = String::new();
     source.push_str("#include <stdint.h>\n#include <stddef.h>\n#include <string.h>\n\n");
@@ -1169,8 +1227,36 @@ fn build_wrapper_source(
     source.push_str(
         "static void store_u64(unsigned char* base, uintptr_t offset, uint64_t value) {\n    memcpy(base + offset, &value, sizeof(value));\n}\n\n",
     );
+    source.push_str(
+        "static void store_u32(unsigned char* base, uintptr_t offset, uint32_t value) {\n    memcpy(base + offset, &value, sizeof(value));\n}\n\n",
+    );
+    source.push_str(
+        "static uint32_t read_u32(const unsigned char* base, uintptr_t offset) {\n    uint32_t value;\n    memcpy(&value, base + offset, sizeof(value));\n    return value;\n}\n\n",
+    );
+    source.push_str(
+        "static uint64_t read_u64(const unsigned char* base, uintptr_t offset) {\n    uint64_t value;\n    memcpy(&value, base + offset, sizeof(value));\n    return value;\n}\n\n",
+    );
+
+    if !host_imports.is_empty() {
+        source.push_str("#include <stdio.h>\n");
+        for host_import in host_imports {
+            source.push_str(&format!(
+                "extern int {host_symbol}(unsigned char* module_context, unsigned char* guest_memory, size_t guest_memory_len, uint64_t* stack_words, size_t stack_word_count);\n",
+                host_symbol = host_import.descriptor.host_symbol_name,
+            ));
+        }
+        source.push('\n');
+    }
 
     for module in module_specs {
+        let module_host_imports: Vec<_> = host_imports
+            .iter()
+            .filter(|import| {
+                import.descriptor.guest_module_name == module.sanitized_name
+                    || sanitize_identifier(&import.descriptor.guest_module_name)
+                        == module.sanitized_name
+            })
+            .collect();
         let runtime_plan = build_linked_runtime_plan(&module.metadata)
             .map_err(|err| NativeLinkError::new(err.to_string()))?;
         for function in &module.metadata.functions {
@@ -1189,7 +1275,12 @@ fn build_wrapper_source(
                 "extern void {raw_symbol}(void);\nextern const unsigned char {preamble_symbol}[];\n"
             ));
         }
-        source.push_str(&build_module_runtime_source(module, &runtime_plan, target)?);
+        source.push_str(&build_module_runtime_source(
+            module,
+            &runtime_plan,
+            target,
+            &module_host_imports,
+        )?);
         for function in &module.metadata.functions {
             let Some(ty) = module.metadata.types.get(function.type_index as usize) else {
                 continue;
@@ -1211,6 +1302,8 @@ fn build_wrapper_source(
                 &module_init_function_name(&module.sanitized_name),
                 &module_context_name(&module.sanitized_name),
                 target,
+                &module_host_imports,
+                &module.metadata,
             ));
             source.push('\n');
         }
@@ -1227,6 +1320,8 @@ fn wrapper_function_source(
     init_function_name: &str,
     module_context_name: &str,
     target: NativePackagingTarget,
+    host_imports: &[&PackagedHostImportSpec],
+    metadata: &AotCompiledMetadata,
 ) -> String {
     let mut source = String::new();
     let function_name = cabi_wrapper_symbol_name(module_name, wasm_function_index);
@@ -1249,6 +1344,15 @@ fn wrapper_function_source(
         params.as_str()
     };
     let slot_count = ty.param_num_in_u64.max(ty.result_num_in_u64).max(1);
+    let memory_len = metadata
+        .memory
+        .as_ref()
+        .map(|mem| {
+            mem.min
+                .saturating_mul(razero_wasm::memory::MEMORY_PAGE_SIZE) as usize
+        })
+        .unwrap_or(0)
+        .max(1);
     source.push_str(&format!("{return_type} {function_name}({params}) {{\n"));
     source.push_str(&format!(
         "    uint64_t param_result[{slot_count}] = {{0}};\n"
@@ -1259,10 +1363,28 @@ fn wrapper_function_source(
     for (index, value) in ty.params.iter().enumerate() {
         source.push_str(&param_pack_source(*value, index));
     }
-    source.push_str(&format!(
-        "    {entrypoint_symbol}({preamble_symbol}, (const unsigned char*)&{raw_symbol}, (uintptr_t)&execution_context, {module_context_name}.bytes, param_result, (uintptr_t)go_stack);\n",
-        entrypoint_symbol = target.entrypoint_symbol,
-    ));
+    if host_imports.is_empty() {
+        source.push_str(&format!(
+            "    {entrypoint_symbol}({preamble_symbol}, (const unsigned char*)&{raw_symbol}, (uintptr_t)&execution_context, {module_context_name}.bytes, param_result, (uintptr_t)go_stack);\n",
+            entrypoint_symbol = target.entrypoint_symbol,
+        ));
+    } else {
+        source.push_str(&format!(
+            "    {entrypoint_symbol}({preamble_symbol}, (const unsigned char*)&{raw_symbol}, (uintptr_t)&execution_context, {module_context_name}.bytes, param_result, (uintptr_t)go_stack);\n    for (;;) {{\n        uint32_t exit_code = read_u32(execution_context.bytes, {exit_code_offset});\n        switch (exit_code & {exit_mask}) {{\n            case {exit_ok}:\n                goto done;\n            case {exit_call_go}: {{\n                uintptr_t go_stack_ptr = (uintptr_t)read_u64(execution_context.bytes, {go_stack_offset});\n                uintptr_t return_address = (uintptr_t)read_u64(execution_context.bytes, {return_offset});\n                uintptr_t frame_pointer = (uintptr_t)read_u64(execution_context.bytes, {frame_offset});\n                uint64_t* words = (uint64_t*)go_stack_ptr;\n                size_t stack_word_count = (size_t)(words[0] / 8u);\n                uint64_t* stack_words = words + 1;\n                switch (exit_code >> 8) {{\n{host_dispatch_cases}                    default:\n                        fprintf(stderr, \"unexpected host function index %u\\n\", exit_code >> 8);\n                        return -1;\n                }}\n                store_u32(execution_context.bytes, {exit_code_offset}, {exit_ok});\n                {after_host_call_symbol}((const unsigned char*)return_address, (uintptr_t)&execution_context, go_stack_ptr, frame_pointer);\n                break;\n            }}\n            default:\n                fprintf(stderr, \"unsupported exit code %u in packaged wrapper\\n\", exit_code);\n                return -1;\n        }}\n    }}\ndone:\n",
+            entrypoint_symbol = target.entrypoint_symbol,
+            exit_code_offset = metadata.execution_context.exit_code_offset,
+            exit_mask = EXIT_CODE_MASK,
+            exit_ok = ExitCode::OK.raw(),
+            exit_call_go = ExitCode::CALL_GO_FUNCTION.raw() & EXIT_CODE_MASK,
+            go_stack_offset = metadata.execution_context.stack_pointer_before_go_call_offset,
+            return_offset = metadata.execution_context.go_call_return_address_offset,
+            frame_offset = metadata.execution_context.frame_pointer_before_go_call_offset,
+            after_host_call_symbol = target.after_host_call_entrypoint_symbol,
+            host_dispatch_cases = host_imports.iter()
+                .map(|import| host_dispatch_case_source(import, memory_len))
+                .collect::<Vec<_>>().join(""),
+        ));
+    }
     if let Some(result) = ty.results.first().copied() {
         source.push_str(&result_unpack_source(result));
     }
@@ -1274,6 +1396,7 @@ fn build_module_runtime_source(
     module: &ModuleSpec,
     runtime_plan: &LinkedRuntimePlan,
     target: NativePackagingTarget,
+    host_imports: &[&PackagedHostImportSpec],
 ) -> Result<String, NativeLinkError> {
     let mut source = String::new();
     let module_context_name = module_context_name(&module.sanitized_name);
@@ -1411,6 +1534,19 @@ fn build_module_runtime_source(
             source.push_str(&format!(
                 "    store_u64({module_context_name}.bytes, {offset}, (uint64_t)(uintptr_t)&{tables_name}[{index}]);\n",
                 offset = module.metadata.module_context.tables_begin + (index as i32 * 8)
+            ));
+        }
+    }
+    if module.metadata.module_context.imported_functions_begin >= 0 {
+        for host_import in host_imports {
+            let import_base = module.metadata.module_context.imported_functions_begin
+                + FUNCTION_INSTANCE_SIZE.raw() as i32
+                    * host_import.descriptor.function_import_index as i32;
+            source.push_str(&format!(
+                "    store_u64({module_context_name}.bytes, {import_base}, (uint64_t)(uintptr_t){trampoline});\n    store_u64({module_context_name}.bytes, {import_ctx}, 0);\n    store_u64({module_context_name}.bytes, {import_type}, 0);\n",
+                trampoline = host_import.trampoline_symbol,
+                import_ctx = import_base + 8,
+                import_type = import_base + 16
             ));
         }
     }
@@ -1666,9 +1802,9 @@ mod tests {
         deserialize_native_package_metadata_bundle, link_native_executable, module_exports,
         preamble_symbol_name, serialize_native_package_metadata_bundle,
         validate_hello_host_metadata, validate_host_import_metadata, AotImportDescMetadata,
-        HelloHostSpec, ModuleSpec, NativeCAbiExport, NativeLinkModule,
-        NativePackageMetadataBundle, NativePackageMetadataEntry, NativePackagingTarget,
-        PackagedHostImportDescriptor, NATIVE_PACKAGE_MAGIC,
+        HelloHostSpec, ModuleSpec, NativeCAbiExport, NativeLinkModule, NativePackageMetadataBundle,
+        NativePackageMetadataEntry, NativePackagingTarget, PackagedHostImportDescriptor,
+        NATIVE_PACKAGE_MAGIC,
     };
     use object::{Object, ObjectSection};
     use std::{
@@ -1980,7 +2116,10 @@ mod tests {
         func_import.desc = AotImportDescMetadata::Func(99);
 
         let err = validate_hello_host_metadata(&metadata).unwrap_err();
-        assert_eq!(err.to_string(), "hello-host import type metadata is missing");
+        assert_eq!(
+            err.to_string(),
+            "hello-host import type metadata is missing"
+        );
     }
 
     #[test]
@@ -2052,7 +2191,10 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(err.to_string(), "aot metadata: invalid import function type index");
+        assert_eq!(
+            err.to_string(),
+            "aot metadata: invalid import function type index"
+        );
     }
 
     #[test]
@@ -2154,10 +2296,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(
-            err.to_string(),
-            "invalid opcode for const expression: 0xff"
-        );
+        assert_eq!(err.to_string(), "invalid opcode for const expression: 0xff");
     }
 
     #[test]
@@ -2357,8 +2496,9 @@ mod tests {
         let mut metadata = compile_module_metadata(&module);
         metadata.imports.clear();
 
-        let err = validate_host_import_metadata(&metadata, 1, current_native_packaging_target().unwrap())
-            .unwrap_err();
+        let err =
+            validate_host_import_metadata(&metadata, 1, current_native_packaging_target().unwrap())
+                .unwrap_err();
         assert_eq!(
             err.to_string(),
             "packaged host-import linker expected a descriptor for every imported function"
@@ -2401,7 +2541,10 @@ mod tests {
         run_function.type_index = 99;
 
         let err = HelloHostSpec::from_metadata("hello-host", &metadata).unwrap_err();
-        assert_eq!(err.to_string(), "hello-host run export is missing type metadata");
+        assert_eq!(
+            err.to_string(),
+            "hello-host run export is missing type metadata"
+        );
     }
 
     #[cfg(all(
@@ -2474,6 +2617,7 @@ int main(void) {
             workspace.join("guest-bin"),
             &[NativeLinkModule::from_artifact("guest", artifact)],
             &[libmain.clone()],
+            &[],
         )
         .unwrap();
 
@@ -2622,6 +2766,7 @@ int main(void) {
             workspace.join("guest-runtime-bin"),
             &[NativeLinkModule::from_artifact("guest", artifact)],
             &[libmain.clone()],
+            &[],
         )
         .unwrap();
         assert!(Command::new(&package.executable_path)
@@ -2773,6 +2918,7 @@ int main(void) {
                 NativeLinkModule::from_artifact("state", runtime_shape_artifact),
             ],
             &[libmain.clone()],
+            &[],
         )
         .unwrap();
 
@@ -6848,6 +6994,7 @@ int main(void) {
                 serialize_aot_metadata(&metadata),
             )],
             &[],
+            &[],
         )
         .unwrap_err();
 
@@ -6868,6 +7015,7 @@ int main(void) {
                 vec![0xde, 0xad, 0xbe, 0xef],
             )],
             &[],
+            &[],
         )
         .unwrap_err();
 
@@ -6884,7 +7032,8 @@ int main(void) {
 
     #[test]
     fn link_native_executable_rejects_invalid_export_index_in_sidecar_before_linking() {
-        let output_path = test_workspace("package-link-driver-invalid-export-index").join("native-bin");
+        let output_path =
+            test_workspace("package-link-driver-invalid-export-index").join("native-bin");
         let metadata = AotCompiledMetadata {
             exports: vec![crate::aot::AotExportMetadata {
                 ty: ExternType::FUNC,
@@ -6918,6 +7067,7 @@ int main(void) {
                 Vec::new(),
                 serialize_aot_metadata(&metadata),
             )],
+            &[],
             &[],
         )
         .unwrap_err();
@@ -6964,10 +7114,14 @@ int main(void) {
                 serialize_aot_metadata(&metadata),
             )],
             &[],
+            &[],
         )
         .unwrap_err();
 
-        assert_eq!(err.to_string(), "aot metadata: invalid start function index");
+        assert_eq!(
+            err.to_string(),
+            "aot metadata: invalid start function index"
+        );
 
         let work_dir = append_path_suffix(&output_path, ".razero-link");
         if work_dir.exists() {
@@ -7002,6 +7156,7 @@ int main(void) {
                 Vec::new(),
                 serialize_aot_metadata(&metadata),
             )],
+            &[],
             &[],
         )
         .unwrap_err();
@@ -7057,6 +7212,7 @@ int main(void) {
                 Vec::new(),
                 serialize_aot_metadata(&metadata),
             )],
+            &[],
             &[],
         )
         .unwrap_err();
@@ -7116,6 +7272,7 @@ int main(void) {
                 serialize_aot_metadata(&metadata),
             )],
             &[],
+            &[],
         )
         .unwrap_err();
 
@@ -7162,6 +7319,7 @@ int main(void) {
                 Vec::new(),
                 serialize_aot_metadata(&metadata),
             )],
+            &[],
             &[],
         )
         .unwrap_err();
@@ -7212,6 +7370,7 @@ int main(void) {
                 serialize_aot_metadata(&metadata),
             )],
             &[],
+            &[],
         )
         .unwrap_err();
 
@@ -7254,6 +7413,7 @@ int main(void) {
                 Vec::new(),
                 serialize_aot_metadata(&metadata),
             )],
+            &[],
             &[],
         )
         .unwrap_err();
@@ -7302,6 +7462,7 @@ int main(void) {
                 Vec::new(),
                 serialize_aot_metadata(&metadata),
             )],
+            &[],
             &[],
         )
         .unwrap_err();
@@ -7353,6 +7514,7 @@ int main(void) {
                 serialize_aot_metadata(&metadata),
             )],
             &[],
+            &[],
         )
         .unwrap_err();
 
@@ -7393,6 +7555,7 @@ int main(void) {
                 Vec::new(),
                 serialize_aot_metadata(&metadata),
             )],
+            &[],
             &[],
         )
         .unwrap_err();
@@ -7443,6 +7606,7 @@ int main(void) {
                 serialize_aot_metadata(&metadata),
             )],
             &[],
+            &[],
         )
         .unwrap_err();
 
@@ -7492,13 +7656,11 @@ int main(void) {
                 serialize_aot_metadata(&metadata),
             )],
             &[],
+            &[],
         )
         .unwrap_err();
 
-        assert_eq!(
-            err.to_string(),
-            "aot metadata: invalid element table index"
-        );
+        assert_eq!(err.to_string(), "aot metadata: invalid element table index");
     }
 
     #[test]
@@ -7540,6 +7702,7 @@ int main(void) {
                 Vec::new(),
                 serialize_aot_metadata(&metadata),
             )],
+            &[],
             &[],
         )
         .unwrap_err();
@@ -7596,6 +7759,7 @@ int main(void) {
                 serialize_aot_metadata(&metadata),
             )],
             &[],
+            &[],
         )
         .unwrap_err();
 
@@ -7643,6 +7807,7 @@ int main(void) {
                 Vec::new(),
                 serialize_aot_metadata(&metadata),
             )],
+            &[],
             &[],
         )
         .unwrap_err();
@@ -7692,6 +7857,7 @@ int main(void) {
                 serialize_aot_metadata(&metadata),
             )],
             &[],
+            &[],
         )
         .unwrap_err();
 
@@ -7739,6 +7905,7 @@ int main(void) {
                 Vec::new(),
                 serialize_aot_metadata(&metadata),
             )],
+            &[],
             &[],
         )
         .unwrap_err();
@@ -7788,6 +7955,7 @@ int main(void) {
                 serialize_aot_metadata(&metadata),
             )],
             &[],
+            &[],
         )
         .unwrap_err();
 
@@ -7835,6 +8003,7 @@ int main(void) {
                 Vec::new(),
                 serialize_aot_metadata(&metadata),
             )],
+            &[],
             &[],
         )
         .unwrap_err();
@@ -7891,12 +8060,13 @@ int main(void) {
                 serialize_aot_metadata(&metadata),
             )],
             &[],
+            &[],
         )
         .unwrap_err();
 
-        assert!(err
-            .to_string()
-            .contains("module 'guest' is outside the packaged linked-runtime slice: read index of global:"));
+        assert!(err.to_string().contains(
+            "module 'guest' is outside the packaged linked-runtime slice: read index of global:"
+        ));
     }
 
     #[test]
@@ -7938,6 +8108,7 @@ int main(void) {
                 Vec::new(),
                 serialize_aot_metadata(&metadata),
             )],
+            &[],
             &[],
         )
         .unwrap_err();
@@ -7988,6 +8159,7 @@ int main(void) {
                 serialize_aot_metadata(&metadata),
             )],
             &[],
+            &[],
         )
         .unwrap_err();
 
@@ -8036,6 +8208,7 @@ int main(void) {
                 Vec::new(),
                 serialize_aot_metadata(&metadata),
             )],
+            &[],
             &[],
         )
         .unwrap_err();
@@ -8086,6 +8259,7 @@ int main(void) {
                 serialize_aot_metadata(&metadata),
             )],
             &[],
+            &[],
         )
         .unwrap_err();
 
@@ -8134,6 +8308,7 @@ int main(void) {
                 Vec::new(),
                 serialize_aot_metadata(&metadata),
             )],
+            &[],
             &[],
         )
         .unwrap_err();
@@ -8184,6 +8359,7 @@ int main(void) {
                 serialize_aot_metadata(&metadata),
             )],
             &[],
+            &[],
         )
         .unwrap_err();
 
@@ -8194,8 +8370,8 @@ int main(void) {
 
     #[test]
     fn link_native_executable_rejects_empty_module_list() {
-        let err =
-            link_native_executable(PathBuf::from("target/empty-native-bin"), &[], &[]).unwrap_err();
+        let err = link_native_executable(PathBuf::from("target/empty-native-bin"), &[], &[], &[])
+            .unwrap_err();
 
         assert_eq!(
             err.to_string(),
@@ -8230,6 +8406,7 @@ int main(void) {
                 Vec::new(),
                 serialize_aot_metadata(&metadata),
             )],
+            &[],
             &[],
         )
         .unwrap_err();
@@ -8267,6 +8444,7 @@ int main(void) {
                 Vec::new(),
                 serialize_aot_metadata(&metadata),
             )],
+            &[],
             &[],
         )
         .unwrap_err();
@@ -8307,6 +8485,7 @@ int main(void) {
                 serialize_aot_metadata(&metadata),
             )],
             &[],
+            &[],
         )
         .unwrap_err();
 
@@ -8344,6 +8523,7 @@ int main(void) {
                 serialize_aot_metadata(&metadata),
             )],
             &[],
+            &[],
         )
         .unwrap_err();
 
@@ -8379,6 +8559,7 @@ int main(void) {
                 Vec::new(),
                 serialize_aot_metadata(&metadata),
             )],
+            &[],
             &[],
         )
         .unwrap_err();
@@ -8420,6 +8601,7 @@ int main(void) {
                 entry_asm_source: "",
                 trim_void_preamble_prologue: false,
             },
+            &[],
         )
         .unwrap();
 
@@ -8581,6 +8763,7 @@ int main(void) {
             }],
             64,
             current_native_packaging_target().unwrap(),
+            &[],
         )
         .unwrap();
 
@@ -8648,13 +8831,15 @@ int main(void) {
             result_num_in_u64: 0,
         };
 
-        let void_trimmed = build_named_preamble_object("trimmed_void", &void_ty, trim_target).unwrap();
+        let void_trimmed =
+            build_named_preamble_object("trimmed_void", &void_ty, trim_target).unwrap();
         let void_untrimmed =
             build_named_preamble_object("untrimmed_void", &void_ty, no_trim_target).unwrap();
         let non_void_trimmed =
             build_named_preamble_object("trimmed_non_void", &non_void_ty, trim_target).unwrap();
         let non_void_untrimmed =
-            build_named_preamble_object("untrimmed_non_void", &non_void_ty, no_trim_target).unwrap();
+            build_named_preamble_object("untrimmed_non_void", &non_void_ty, no_trim_target)
+                .unwrap();
 
         let void_trimmed_len = object::File::parse(void_trimmed.as_slice())
             .unwrap()
@@ -8723,6 +8908,7 @@ int main(void) {
             }],
             64,
             current_native_packaging_target().unwrap(),
+            &[],
         )
         .unwrap_err();
 

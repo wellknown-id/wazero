@@ -6915,9 +6915,8 @@ mod tests {
         });
 
         let fuel = Arc::new(AtomicI64::new(2));
-        let err =
-            with_active_fuel_remaining(Some(fuel.clone()), || interpreter.call(0, &[99]))
-                .unwrap_err();
+        let err = with_active_fuel_remaining(Some(fuel.clone()), || interpreter.call(0, &[99]))
+            .unwrap_err();
         assert_eq!("fuel exhausted", err.message());
     }
 
@@ -6993,13 +6992,11 @@ mod tests {
             })
             .expect("forward branch body should lower");
         let mut interpreter = Interpreter::new(Module {
-            functions: vec![
-                Function::new_native(
-                    Signature::new(vec![], vec![ValueType::I32]),
-                    lowered.operations,
-                )
-                .unwrap(),
-            ],
+            functions: vec![Function::new_native(
+                Signature::new(vec![], vec![ValueType::I32]),
+                lowered.operations,
+            )
+            .unwrap()],
             ..Module::default()
         });
         let fuel = Arc::new(AtomicI64::new(1));

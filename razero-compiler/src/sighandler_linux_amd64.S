@@ -55,8 +55,11 @@ razero_jit_sig_handler:
     testq %r11, %r11
     jz .Lnot_jit
 
+    cmpl $24, EXECCTX_EXITCODE_OFF(%r11)
+    je .Lrestore_context
     movl $26, EXECCTX_EXITCODE_OFF(%r11)
 
+.Lrestore_context:
     movq EXECCTX_ORIGSP_OFF(%r11), %r9
     movq %r9, REG_RSP*8(%r8)
     movq EXECCTX_ORIGFP_OFF(%r11), %r9

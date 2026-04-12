@@ -1,3 +1,5 @@
+#![doc = "Filesystem-backed compilation cache.\n\nThis module performs direct filesystem I/O and is only included when the\n`filecache` feature is enabled. Embedders who do not need disk caching\ncan use [`crate::InMemoryCompilationCache`] instead."]
+
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};

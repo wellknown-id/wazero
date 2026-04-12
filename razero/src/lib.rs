@@ -7,10 +7,12 @@ pub mod cache;
 pub mod config;
 pub mod ctx_keys;
 pub mod experimental;
-pub mod filecache;
 pub mod logging;
 pub mod runtime;
 pub mod version;
+
+#[cfg(feature = "filecache")]
+pub mod filecache;
 
 pub use api::{
     error::{ExitError, Result, RuntimeError},
@@ -55,8 +57,10 @@ pub use experimental::{
     YieldPolicyDecision, YieldPolicyObservation, YieldPolicyObserver, YieldPolicyRequest, Yielder,
     CORE_FEATURES_EXTENDED_CONST, CORE_FEATURES_TAIL_CALL, CORE_FEATURES_THREADS, ERR_YIELDED,
 };
-pub use filecache::FileCompilationCache;
 pub use logging::{LogLevel, Logger, NoopLogger};
 pub use runtime::Runtime;
 pub use runtime::{PrecompiledArtifact, PrecompiledArtifactError};
 pub use version::{version, VERSION};
+
+#[cfg(feature = "filecache")]
+pub use filecache::FileCompilationCache;
