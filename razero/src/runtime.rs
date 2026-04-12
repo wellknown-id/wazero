@@ -6426,6 +6426,98 @@ mod tests {
     }
 
     #[test]
+    fn yield_policy_observer_fires_before_yield_observer_on_allowed_direct_host_yield() {
+        let runtime = Runtime::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let module = runtime
+            .new_host_module_builder("example")
+            .new_function_builder()
+            .with_callback(
+                |ctx, _module, _params| {
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .with_name("async_work_impl")
+            .export("async_work")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let policy_ctx = with_yield_policy(&with_yielder(&Context::default()), allow_all_yields);
+        let observer_ctx = with_yield_policy_observer(&policy_ctx, {
+            let events = events.clone();
+            move |_ctx: &Context, observation: YieldPolicyObservation| {
+                events
+                    .lock()
+                    .expect("yield observer events poisoned")
+                    .push((
+                        "policy".to_string(),
+                        observation.module.name().map(str::to_string),
+                        observation.request.name().map(str::to_string),
+                        observation.request.caller_module_name().map(str::to_string),
+                        Some(observation.decision),
+                        None,
+                    ));
+            }
+        });
+        let ctx = with_yield_observer(&observer_ctx, {
+            let events = events.clone();
+            move |_ctx: &Context, observation: YieldObservation| {
+                events
+                    .lock()
+                    .expect("yield observer events poisoned")
+                    .push((
+                        "yield".to_string(),
+                        observation.module.name().map(str::to_string),
+                        None,
+                        None,
+                        None,
+                        Some(observation.event),
+                    ));
+            }
+        });
+
+        let err = module
+            .exported_function("async_work")
+            .unwrap()
+            .call_with_context(&ctx, &[])
+            .unwrap_err();
+        let RuntimeError::Yield(yield_error) = err else {
+            panic!("expected yield error");
+        };
+        yield_error
+            .resumer()
+            .expect("resumer should be present")
+            .cancel();
+
+        assert_eq!(
+            vec![
+                (
+                    "policy".to_string(),
+                    Some("example".to_string()),
+                    Some("async_work_impl".to_string()),
+                    Some("example".to_string()),
+                    Some(YieldPolicyDecision::Allowed),
+                    None,
+                ),
+                (
+                    "yield".to_string(),
+                    Some("example".to_string()),
+                    None,
+                    None,
+                    None,
+                    Some(YieldEvent::Yielded),
+                ),
+            ],
+            *events.lock().expect("yield observer events poisoned")
+        );
+    }
+
+    #[test]
     fn yield_policy_context_overrides_runtime_config_policy() {
         let runtime = Runtime::with_config(RuntimeConfig::new().with_yield_policy(deny_all_yields));
         runtime
