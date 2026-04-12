@@ -7265,6 +7265,194 @@ int main(void) {
     }
 
     #[test]
+    fn link_native_executable_rejects_passive_data_segments() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            memory_section: Some(razero_wasm::module::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                ..razero_wasm::module::Memory::default()
+            }),
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            data_section: vec![DataSegment {
+                offset_expression: ConstExpr::from_i32(0),
+                init: vec![0xaa],
+                passive: false,
+            }],
+            ..Module::default()
+        };
+        let mut metadata = compile_module_metadata(&module);
+        metadata.data_segments[0].passive = true;
+
+        let err = link_native_executable(
+            PathBuf::from("target/passive-data-native-bin"),
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "aot metadata: passive data segment with offset expression"
+        );
+    }
+
+    #[test]
+    fn link_native_executable_rejects_active_data_without_memory() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            memory_section: Some(razero_wasm::module::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                ..razero_wasm::module::Memory::default()
+            }),
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            data_section: vec![DataSegment {
+                offset_expression: ConstExpr::from_i32(0),
+                init: vec![0xaa],
+                passive: false,
+            }],
+            ..Module::default()
+        };
+        let mut metadata = compile_module_metadata(&module);
+        metadata.memory = None;
+        metadata.module_shape.has_local_memory = false;
+        metadata.module_shape.has_any_memory = false;
+
+        let err = link_native_executable(
+            PathBuf::from("target/data-without-memory-native-bin"),
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "aot metadata: active data segment requires memory"
+        );
+    }
+
+    #[test]
+    fn link_native_executable_rejects_non_funcref_tables() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            table_section: vec![Table {
+                min: 1,
+                max: Some(1),
+                ty: RefType::FUNCREF,
+            }],
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            ..Module::default()
+        };
+        let mut metadata = compile_module_metadata(&module);
+        metadata.tables[0].ty = RefType::EXTERNREF;
+
+        let err = link_native_executable(
+            PathBuf::from("target/non-funcref-table-native-bin"),
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "module 'guest' is outside the packaged linked-runtime slice: table[0] uses externref, only funcref tables are supported by linked runtime packaging"
+        );
+    }
+
+    #[test]
+    fn link_native_executable_rejects_passive_element_segments() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            table_section: vec![Table {
+                min: 1,
+                max: Some(1),
+                ty: RefType::FUNCREF,
+            }],
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            element_section: vec![ElementSegment {
+                offset_expr: ConstExpr::from_i32(0),
+                table_index: 0,
+                init: vec![ConstExpr::from_opcode(0xd2, &[0])],
+                ty: RefType::FUNCREF,
+                mode: ElementMode::Active,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let mut metadata = compile_module_metadata(&module);
+        metadata.element_segments[0].mode = ElementMode::Passive;
+
+        let err = link_native_executable(
+            PathBuf::from("target/passive-element-native-bin"),
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "aot metadata: passive/declarative element with offset expression"
+        );
+    }
+
+    #[test]
     fn link_native_executable_rejects_empty_module_list() {
         let err =
             link_native_executable(PathBuf::from("target/empty-native-bin"), &[], &[]).unwrap_err();
