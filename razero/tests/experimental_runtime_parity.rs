@@ -1109,6 +1109,28 @@ fn host_call_policy_resume_context_controls_follow_on_host_call() {
 }
 
 #[test]
+fn host_call_policy_initial_context_does_not_persist_when_resume_omits_policy() {
+    let (_runtime, guest) =
+        setup_yield_runtime_with_config(RuntimeConfig::new().with_host_call_policy(deny_async_work_host_call));
+    let initial_ctx =
+        with_host_call_policy(&with_yielder(&Context::default()), allow_all_host_calls);
+
+    let err = guest
+        .exported_function("run_twice")
+        .unwrap()
+        .call_with_context(&initial_ctx, &[])
+        .unwrap_err();
+    let resumer = yielded(err).resumer().expect("resumer should be present");
+
+    let err = resumer
+        .resume(&with_yielder(&Context::default()), &[40])
+        .unwrap_err();
+
+    assert_eq!("policy denied: host call", err.to_string());
+    assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+}
+
+#[test]
 fn host_call_policy_initial_observer_does_not_persist_when_resume_omits_one() {
     let (_runtime, guest) = setup_yield_runtime();
     let observations = Arc::new(Mutex::new(Vec::new()));
