@@ -151,6 +151,9 @@ that want a fully linked executable.
 - [95%:04af62a8] `razero_compiler::linker::link_native_executable(...)` packages one or
   more relocatable Wasm objects into a native executable for the current C ABI-first
   surface.
+- [100%:ea77dc43] The current public C ABI export filter is now pinned too:
+  native packaging rejects exported functions with non-scalar params or more
+  than one result rather than silently widening the surface.
 - [100%:ea77dc43] The current native-link entrypoint now has targeted pre-link
   rejection coverage for corrupt sidecar metadata (including stale
   export/start/import-type indexes), unsupported target architectures, and

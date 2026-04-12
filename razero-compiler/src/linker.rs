@@ -6978,6 +6978,82 @@ int main(void) {
     }
 
     #[test]
+    fn link_native_executable_rejects_module_with_multi_result_export_signature() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            ..Module::default()
+        };
+        let mut metadata = compile_module_metadata(&module);
+        metadata.types[0].results = vec![ValueType::I32, ValueType::I32];
+        metadata.types[0].result_num_in_u64 = 2;
+
+        let err = link_native_executable(
+            PathBuf::from("target/multi-result-native-bin"),
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "module 'guest' does not expose any C ABI compatible functions"
+        );
+    }
+
+    #[test]
+    fn link_native_executable_rejects_module_with_non_scalar_param_export_signature() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            ..Module::default()
+        };
+        let mut metadata = compile_module_metadata(&module);
+        metadata.types[0].params = vec![ValueType::V128];
+        metadata.types[0].param_num_in_u64 = 2;
+        metadata.types[0].results.clear();
+        metadata.types[0].result_num_in_u64 = 0;
+
+        let err = link_native_executable(
+            PathBuf::from("target/non-scalar-param-native-bin"),
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "module 'guest' does not expose any C ABI compatible functions"
+        );
+    }
+
+    #[test]
     fn build_wrapper_source_switches_to_aarch64_entrypoint_symbols() {
         let source = build_wrapper_source(
             &[ModuleSpec {
