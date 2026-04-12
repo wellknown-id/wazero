@@ -22,8 +22,11 @@ use super::lower_mem::mem_operand_from_base;
 use super::machine_pro_epi_logue::{append_epilogue, append_prologue};
 use super::machine_regalloc::do_regalloc;
 use super::operands::{AddressMode, Label, Operand};
-use super::reg::{vreg_for_real_reg, RSP};
+use super::reg::{vreg_for_real_reg, R15, RBP, RSP};
 use super::SseOpcode;
+
+const EXECUTION_CONTEXT_OFFSET_SAVED_REGISTERS_BEGIN: u32 = 96;
+const SAVED_REGISTER_SLOT_SIZE: u32 = 16;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Amd64Block {
@@ -74,22 +77,79 @@ impl Amd64Machine {
         &mut self.blocks[idx]
     }
 
+    fn exec_ctx_saved_reg_mem(slot: usize) -> Operand {
+        Operand::mem(AddressMode::imm_reg(
+            EXECUTION_CONTEXT_OFFSET_SAVED_REGISTERS_BEGIN + slot as u32 * SAVED_REGISTER_SLOT_SIZE,
+            vreg_for_real_reg(R15),
+        ))
+    }
+
+    fn clobbered_save_instructions(&self) -> Vec<Amd64Instr> {
+        self.clobbered
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(slot, reg)| {
+                if matches!(reg.reg_type(), RegType::Float) {
+                    Amd64Instr::xmm_mov_rm(SseOpcode::Movdqu, reg, Self::exec_ctx_saved_reg_mem(slot))
+                } else {
+                    Amd64Instr::mov_rm(reg, Self::exec_ctx_saved_reg_mem(slot), 8)
+                }
+            })
+            .collect()
+    }
+
+    fn clobbered_restore_instructions(&self) -> Vec<Amd64Instr> {
+        self.clobbered
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(slot, reg)| {
+                if matches!(reg.reg_type(), RegType::Float) {
+                    Amd64Instr::xmm_unary_rm_r(
+                        SseOpcode::Movdqu,
+                        Self::exec_ctx_saved_reg_mem(slot),
+                        reg,
+                    )
+                } else {
+                    Amd64Instr::mov64_mr(Self::exec_ctx_saved_reg_mem(slot), reg)
+                }
+            })
+            .collect()
+    }
+
     fn finalize_frame_layout(&mut self) {
         if self.frame_layout_finalized {
             return;
         }
         self.frame_layout_finalized = true;
-        if self.spill_slot_size <= 0 {
-            return;
-        }
-
         let frame_size = ((self.spill_slot_size + 15) / 16) * 16;
-        for block in &mut self.blocks {
-            if let Some(index) = block.instructions.windows(2).position(|pair| {
+        let save_instrs = self.clobbered_save_instructions();
+        let restore_instrs = self.clobbered_restore_instructions();
+        if let Some(entry_block_index) = self
+            .blocks
+            .iter()
+            .position(|block| block.entry)
+            .or(if self.blocks.is_empty() { None } else { Some(0) })
+        {
+            let entry_block = &mut self.blocks[entry_block_index];
+            let has_prologue = entry_block.instructions.windows(2).any(|pair| {
                 pair[0].to_string() == "pushq %rbp" && pair[1].to_string() == "movq %rsp, %rbp"
-            }) {
-                block.instructions.splice(
-                    (index + 2)..(index + 2),
+            });
+            if !has_prologue {
+                entry_block.instructions.splice(
+                    0..0,
+                    [
+                        Amd64Instr::push64(Operand::reg(vreg_for_real_reg(RBP))),
+                        Amd64Instr::mov_rr(vreg_for_real_reg(RSP), vreg_for_real_reg(RBP), true),
+                    ],
+                );
+            }
+
+            let mut insert_at = 2;
+            if frame_size > 0 {
+                entry_block.instructions.splice(
+                    insert_at..insert_at,
                     [Amd64Instr::alu_rmi_r(
                         AluRmiROpcode::Sub,
                         Operand::imm32(frame_size as u32),
@@ -97,7 +157,31 @@ impl Amd64Machine {
                         true,
                     )],
                 );
-                break;
+                insert_at += 1;
+            }
+            if !save_instrs.is_empty() {
+                entry_block
+                    .instructions
+                    .splice(insert_at..insert_at, save_instrs.clone());
+            }
+        }
+
+        if restore_instrs.is_empty() {
+            return;
+        }
+
+        for block in &mut self.blocks {
+            let mut index = 0usize;
+            while index + 1 < block.instructions.len() {
+                if block.instructions[index].to_string() == "movq %rbp, %rsp"
+                    && block.instructions[index + 1].to_string() == "popq %rbp"
+                {
+                    block.instructions
+                        .splice(index..index, restore_instrs.clone());
+                    index += restore_instrs.len() + 2;
+                } else {
+                    index += 1;
+                }
             }
         }
     }
@@ -1915,7 +1999,6 @@ impl BackendMachine for Amd64Machine {
     fn lower_params(&mut self, params: &[Value]) {
         let abi = self.current_abi.clone();
         let mut lowered = Vec::new();
-        append_prologue(self);
         for (value, arg) in params.iter().copied().zip(&abi.args) {
             if !value.valid() {
                 continue;

@@ -140,7 +140,8 @@ that want a fully linked executable.
 - [100%:04af62a8] `razero_compiler::runtime_support::LinkedModule` provides a
   metadata-driven linked startup/call surface for Linux ELF AOT modules with the
   supported runtime-state slice, and its public fail-closed constructor /
-  `call_export` / `start` error paths are now pinned by targeted tests.
+  `call_export` / `start` error paths plus repeated-call runtime-state behavior
+  are now pinned by targeted tests.
 - [95%:04af62a8] `razero_compiler::linker::link_native_executable(...)` packages one or
   more relocatable Wasm objects into a native executable for the current C ABI-first
   surface.
