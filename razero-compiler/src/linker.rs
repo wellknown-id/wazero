@@ -6678,4 +6678,38 @@ int main(void) {
         assert!(source.contains("razero_arm64_entrypoint"));
         assert!(!source.contains("razero_amd64_entrypoint"));
     }
+
+    #[test]
+    fn build_wrapper_source_rejects_missing_local_start_function_metadata() {
+        let err = build_wrapper_source(
+            &[ModuleSpec {
+                sanitized_name: "guest".to_string(),
+                metadata: crate::aot::AotCompiledMetadata {
+                    start_function_index: Some(7),
+                    types: vec![crate::aot::AotFunctionTypeMetadata {
+                        params: vec![],
+                        results: vec![],
+                        param_num_in_u64: 0,
+                        result_num_in_u64: 0,
+                    }],
+                    functions: vec![crate::aot::AotFunctionMetadata {
+                        local_function_index: 0,
+                        wasm_function_index: 0,
+                        type_index: 0,
+                        executable_offset: 0,
+                        executable_len: 4,
+                    }],
+                    ..crate::aot::AotCompiledMetadata::default()
+                },
+            }],
+            64,
+            current_native_packaging_target().unwrap(),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "linked module metadata has no local start function 7"
+        );
+    }
 }
