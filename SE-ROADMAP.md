@@ -181,8 +181,10 @@ that want a fully linked executable.
 - [100%:ea77dc43] The current native-link entrypoint now has targeted pre-link
   rejection coverage for corrupt sidecar metadata (including stale
   export/start/import-type indexes), unsupported target architectures, and
-  linked-runtime metadata that falls outside the packaged slice, plus
-  wrapper-generation rejection for missing local start-function metadata.
+  linked-runtime metadata that falls outside the packaged slice, including
+  public bounds/count ordering for data-segment overflow, element-segment
+  overflow, and global-initializer count mismatch, plus wrapper-generation
+  rejection for missing local start-function metadata.
 - [100%:ea77dc43] `razero_compiler::linker::link_hello_host_executable(...)` provides a
   **specialized** native-link flow for the existing `hello-host` example,
   including its single explicit `(i32, i32) -> ()` host import and local memory

@@ -1682,6 +1682,7 @@ mod tests {
     use razero_features::CoreFeatures;
     use razero_wasm::{
         engine::Engine as WasmEngine,
+        memory::MEMORY_PAGE_SIZE,
         module::{
             Code, ConstExpr, DataSegment, ElementMode, ElementSegment, Export, ExternType, Global,
             GlobalType, Import, ImportDesc, Module, RefType, Table, ValueType,
@@ -7121,6 +7122,145 @@ int main(void) {
         assert_eq!(
             err.to_string(),
             "module 'guest' is outside the packaged linked-runtime slice: linked runtime packaging does not support shared memories or atomics integration"
+        );
+    }
+
+    #[test]
+    fn link_native_executable_rejects_data_segment_past_memory_end() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            memory_section: Some(razero_wasm::module::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                ..razero_wasm::module::Memory::default()
+            }),
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            data_section: vec![DataSegment {
+                offset_expression: ConstExpr::from_i32(MEMORY_PAGE_SIZE as i32),
+                init: vec![0xaa],
+                passive: false,
+            }],
+            ..Module::default()
+        };
+        let metadata = compile_module_metadata(&module);
+
+        let err = link_native_executable(
+            PathBuf::from("target/data-past-memory-native-bin"),
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        let err = err.to_string();
+        assert!(err.contains(
+            "module 'guest' is outside the packaged linked-runtime slice: data[0] range"
+        ));
+        assert!(err.contains("exceeds memory length"));
+    }
+
+    #[test]
+    fn link_native_executable_rejects_element_segment_past_table_end() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            table_section: vec![Table {
+                min: 1,
+                max: Some(1),
+                ty: RefType::FUNCREF,
+            }],
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            element_section: vec![ElementSegment {
+                offset_expr: ConstExpr::from_i32(1),
+                table_index: 0,
+                init: vec![ConstExpr::from_opcode(0xd2, &[0])],
+                ty: RefType::FUNCREF,
+                mode: ElementMode::Active,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let metadata = compile_module_metadata(&module);
+
+        let err = link_native_executable(
+            PathBuf::from("target/element-past-table-native-bin"),
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "module 'guest' is outside the packaged linked-runtime slice: element[0] range 1..2 exceeds table length 1"
+        );
+    }
+
+    #[test]
+    fn link_native_executable_rejects_inconsistent_global_initializer_count() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            global_section: vec![Global {
+                ty: GlobalType {
+                    val_type: ValueType::I32,
+                    mutable: false,
+                },
+                init: ConstExpr::from_i32(0),
+            }],
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            ..Module::default()
+        };
+        let mut metadata = compile_module_metadata(&module);
+        metadata.global_initializers.clear();
+
+        let err = link_native_executable(
+            PathBuf::from("target/global-init-count-native-bin"),
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "aot metadata: global initializer count mismatch"
         );
     }
 
