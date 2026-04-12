@@ -6517,6 +6517,31 @@ int main(void) {
     }
 
     #[test]
+    fn link_native_executable_rejects_invalid_metadata_sidecar_before_linking() {
+        let output_path = test_workspace("package-link-driver-invalid-sidecar").join("native-bin");
+        let err = link_native_executable(
+            &output_path,
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                vec![0xde, 0xad, 0xbe, 0xef],
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "aot metadata: invalid header length: failed to fill whole buffer"
+        );
+
+        let work_dir = append_path_suffix(&output_path, ".razero-link");
+        if work_dir.exists() {
+            fs::remove_dir_all(&work_dir).unwrap();
+        }
+    }
+
+    #[test]
     fn link_native_executable_rejects_architecture_mismatch_before_linking() {
         let current = current_native_packaging_target().unwrap();
         let mismatched_architecture = match current.architecture {
