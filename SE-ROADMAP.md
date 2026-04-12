@@ -158,7 +158,8 @@ that want a fully linked executable.
 - [100%:ea77dc43] `razero_compiler::linker::link_hello_host_executable(...)` provides a
   **specialized** native-link flow for the existing `hello-host` example,
   including its single explicit `(i32, i32) -> ()` host import and local memory
-  setup.
+  setup, and now has direct public-entrypoint rejection coverage for invalid
+  sidecar metadata and missing `run` exports.
 - [100%:ea77dc43] The current `hello-host` / packaged-host-import metadata
   validators now have targeted fail-closed coverage for missing host-import type
   metadata, generic packaged-host descriptor/target mismatches, plus `run`

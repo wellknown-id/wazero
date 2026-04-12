@@ -1962,6 +1962,37 @@ mod tests {
     }
 
     #[test]
+    fn link_hello_host_executable_rejects_invalid_metadata_sidecar() {
+        let err = super::link_hello_host_executable(
+            PathBuf::from("target/hello-host-invalid-sidecar"),
+            &NativeLinkModule::new("hello-host", Vec::new(), vec![0xde, 0xad, 0xbe, 0xef]),
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "aot metadata: invalid header length: failed to fill whole buffer"
+        );
+    }
+
+    #[test]
+    fn link_hello_host_executable_rejects_guest_without_run_export() {
+        let module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
+        let mut metadata = compile_module_metadata(&module);
+        metadata.exports.retain(|export| export.name != "run");
+
+        let err = super::link_hello_host_executable(
+            PathBuf::from("target/hello-host-missing-run"),
+            &NativeLinkModule::new("hello-host", Vec::new(), serialize_aot_metadata(&metadata)),
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "hello-host guest must export func run");
+    }
+
+    #[test]
     fn validate_host_import_metadata_rejects_target_architecture_mismatch() {
         let module = decode_module(HELLO_HOST_WASM, CoreFeatures::V2).unwrap();
         let mut metadata = compile_module_metadata(&module);
