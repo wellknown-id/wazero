@@ -4764,6 +4764,66 @@ mod tests {
     }
 
     #[test]
+    fn denied_guest_host_trap_observer_precedes_listener_abort() {
+        let runtime = Runtime::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .new_host_module_builder("env")
+            .new_function_builder()
+            .with_func(
+                |_ctx, _module, params| Ok(vec![params[0] + 1]),
+                &[ValueType::I32],
+                &[ValueType::I32],
+            )
+            .with_name("inc")
+            .export("inc")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                &[
+                    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01,
+                    0x7f, 0x01, 0x7f, 0x02, 0x0b, 0x01, 0x03, b'e', b'n', b'v', 0x03, b'i', b'n',
+                    b'c', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r', b'u',
+                    b'n', 0x00, 0x01, 0x0a, 0x08, 0x01, 0x06, 0x00, 0x20, 0x00, 0x10, 0x00, 0x0b,
+                ],
+                ModuleConfig::new().with_name("guest"),
+            )
+            .unwrap();
+
+        let listener_ctx = with_function_listener_factory(
+            &Context::default(),
+            RecordingListenerFactory {
+                events: events.clone(),
+            },
+        );
+        let policy_ctx = with_host_call_policy(&listener_ctx, deny_env_host_calls);
+        let ctx = with_trap_observer(&policy_ctx, {
+            let events = events.clone();
+            move |_ctx: &Context, observation: TrapObservation| {
+                events.lock().expect("events poisoned").push(format!(
+                    "trap:{:?}:{}",
+                    observation.cause, observation.err
+                ));
+            }
+        });
+
+        let err = guest
+            .exported_function("run")
+            .unwrap()
+            .call_with_context(&ctx, &[41])
+            .unwrap_err();
+
+        assert_eq!("policy denied: host call", err.to_string());
+        let events = events.lock().expect("events poisoned");
+        assert_eq!(3, events.len());
+        assert!(events[0].starts_with("before:run:[41]:"));
+        assert_eq!("trap:PolicyDenied:policy denied: host call", events[1]);
+        assert_eq!("abort:run:policy denied: host call", events[2]);
+    }
+
+    #[test]
     fn host_call_policy_observer_fires_before_trap_for_denied_guest_host_callbacks() {
         let runtime = Runtime::new();
         let called = Arc::new(AtomicU32::new(0));
