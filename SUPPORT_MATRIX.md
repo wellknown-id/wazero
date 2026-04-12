@@ -64,11 +64,9 @@ the embedder rather than by a built-in runtime-owned WASI layer.
 - **`RuntimeConfig::new_auto()`** is the safest default when your embedder needs
   portability. It may transparently land on the interpreter, so do not assume
   compiler-specific performance characteristics unless you forced the compiler.
-- **Fuel metering** is available on both engines, but the current
-  compiler/secure-mode path still has one known trap-mapping limitation: fuel
-  exhaustion stops execution, yet the final surfaced trap can still read as
-  `memory fault` instead of `fuel exhausted` until the remaining signal-handler
-  integration work lands.
+- **Fuel metering** is available on both engines. On the strict runtime path,
+  fuel exhaustion now surfaces as `fuel exhausted` / `TrapCause::FuelExhausted`
+  on both interpreter and compiler/secure-mode execution.
 - **Observers and policy hooks** (`TrapObserver`, `YieldObserver`,
   `HostCallPolicy`, `YieldPolicy`, `FuelObserver`) are intended for safety and
   diagnostics, not free instrumentation. They add extra work to each relevant
@@ -276,8 +274,7 @@ Instead, the current experimental contract is:
   same numeric fuel amount across future accounting-model revisions.
 - Compiler and interpreter fuel units are intended to be operationally similar,
   but they should still be treated as **engine-specific experimental accounting
-  surfaces**, especially while basic-block injection and compiler trap mapping
-  remain incomplete.
+  surfaces**, especially while basic-block injection remains incomplete.
 
 ## Practical guidance
 

@@ -119,10 +119,10 @@ The razero store, engine, compilation caches, and type registries are shared acr
   Linux/arm64 is implemented but still awaiting native sign-off, and other
   targets fall back to software-checked execution even when secure mode is
   enabled.
-- **Deterministic fuel stops execution on both engines**, but the current
-  compiler/secure-mode path still has a known signal-handler integration gap:
-  some fuel exhaustion paths surface as `memory fault` instead of
-  `fuel exhausted`.
+- **Deterministic fuel stops execution on both engines**. On the strict runtime
+  path, fuel exhaustion now surfaces as `fuel exhausted` /
+  `TrapCause::FuelExhausted` for both interpreter and compiler/secure-mode
+  execution.
 - **Observers and policy hooks are part of the trusted policy layer**, not a
   sandbox boundary by themselves. They are useful for auditing and fail-closed
   policy decisions, but they also add work on hot paths and should be scoped to
