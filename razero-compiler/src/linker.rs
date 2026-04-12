@@ -7654,6 +7654,545 @@ int main(void) {
     }
 
     #[test]
+    fn link_native_executable_rejects_non_integer_data_offset_expression() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            memory_section: Some(razero_wasm::module::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                ..razero_wasm::module::Memory::default()
+            }),
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            data_section: vec![DataSegment {
+                offset_expression: ConstExpr::from_i32(0),
+                init: vec![0xaa],
+                passive: false,
+            }],
+            ..Module::default()
+        };
+        let mut metadata = compile_module_metadata(&module);
+        metadata.data_segments[0].offset_expression = vec![0xd0, 0x70, 0x0b];
+
+        let err = link_native_executable(
+            PathBuf::from("target/non-integer-data-offset-native-bin"),
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "module 'guest' is outside the packaged linked-runtime slice: offset expression must evaluate to i32/i64"
+        );
+    }
+
+    #[test]
+    fn link_native_executable_rejects_invalid_ref_null_offset_type() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            memory_section: Some(razero_wasm::module::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                ..razero_wasm::module::Memory::default()
+            }),
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            data_section: vec![DataSegment {
+                offset_expression: ConstExpr::from_i32(0),
+                init: vec![0xaa],
+                passive: false,
+            }],
+            ..Module::default()
+        };
+        let mut metadata = compile_module_metadata(&module);
+        metadata.data_segments[0].offset_expression = vec![0xd0, 0x00, 0x0b];
+
+        let err = link_native_executable(
+            PathBuf::from("target/invalid-ref-null-offset-native-bin"),
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "module 'guest' is outside the packaged linked-runtime slice: invalid type for ref.null: 0x0"
+        );
+    }
+
+    #[test]
+    fn link_native_executable_rejects_truncated_ref_null_offset_expression() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            memory_section: Some(razero_wasm::module::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                ..razero_wasm::module::Memory::default()
+            }),
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            data_section: vec![DataSegment {
+                offset_expression: ConstExpr::from_i32(0),
+                init: vec![0xaa],
+                passive: false,
+            }],
+            ..Module::default()
+        };
+        let mut metadata = compile_module_metadata(&module);
+        metadata.data_segments[0].offset_expression = vec![0xd0];
+
+        let err = link_native_executable(
+            PathBuf::from("target/truncated-ref-null-offset-native-bin"),
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "module 'guest' is outside the packaged linked-runtime slice: read reference type for ref.null: unexpected end of constant expression"
+        );
+    }
+
+    #[test]
+    fn link_native_executable_rejects_multi_value_const_expression() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            memory_section: Some(razero_wasm::module::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                ..razero_wasm::module::Memory::default()
+            }),
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            data_section: vec![DataSegment {
+                offset_expression: ConstExpr::from_i32(0),
+                init: vec![0xaa],
+                passive: false,
+            }],
+            ..Module::default()
+        };
+        let mut metadata = compile_module_metadata(&module);
+        metadata.data_segments[0].offset_expression = vec![0x41, 0x00, 0x41, 0x01, 0x0b];
+
+        let err = link_native_executable(
+            PathBuf::from("target/multi-value-const-native-bin"),
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "module 'guest' is outside the packaged linked-runtime slice: stack has more than one value at end of constant expression"
+        );
+    }
+
+    #[test]
+    fn link_native_executable_rejects_malformed_global_get_initializer_index() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            memory_section: Some(razero_wasm::module::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                ..razero_wasm::module::Memory::default()
+            }),
+            global_section: vec![Global {
+                ty: GlobalType {
+                    val_type: ValueType::I32,
+                    mutable: false,
+                },
+                init: ConstExpr::from_i32(0),
+            }],
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            data_section: vec![DataSegment {
+                offset_expression: ConstExpr::from_i32(0),
+                init: vec![0xaa],
+                passive: false,
+            }],
+            ..Module::default()
+        };
+        let mut metadata = compile_module_metadata(&module);
+        metadata.global_initializers[0].init_expression = vec![0x23];
+
+        let err = link_native_executable(
+            PathBuf::from("target/malformed-global-get-native-bin"),
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("module 'guest' is outside the packaged linked-runtime slice: read index of global:"));
+    }
+
+    #[test]
+    fn link_native_executable_rejects_unsupported_element_initializer_opcode() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            table_section: vec![Table {
+                min: 1,
+                max: Some(1),
+                ty: RefType::FUNCREF,
+            }],
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            element_section: vec![ElementSegment {
+                offset_expr: ConstExpr::from_i32(0),
+                table_index: 0,
+                init: vec![ConstExpr::from_opcode(0xd2, &[0])],
+                ty: RefType::FUNCREF,
+                mode: ElementMode::Active,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let mut metadata = compile_module_metadata(&module);
+        metadata.element_segments[0].init_expressions = vec![vec![0x41, 0x00, 0x0b]];
+
+        let err = link_native_executable(
+            PathBuf::from("target/unsupported-element-init-native-bin"),
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "module 'guest' is outside the packaged linked-runtime slice: element[0].init[0] uses an unsupported initializer opcode 0x41"
+        );
+    }
+
+    #[test]
+    fn link_native_executable_rejects_missing_local_function_in_element_initializer() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            table_section: vec![Table {
+                min: 1,
+                max: Some(1),
+                ty: RefType::FUNCREF,
+            }],
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            element_section: vec![ElementSegment {
+                offset_expr: ConstExpr::from_i32(0),
+                table_index: 0,
+                init: vec![ConstExpr::from_opcode(0xd2, &[0])],
+                ty: RefType::FUNCREF,
+                mode: ElementMode::Active,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let mut metadata = compile_module_metadata(&module);
+        metadata.element_segments[0].init_expressions = vec![vec![0xd2, 0x07, 0x0b]];
+
+        let err = link_native_executable(
+            PathBuf::from("target/missing-local-element-init-native-bin"),
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "module 'guest' is outside the packaged linked-runtime slice: element[0].init[0] references missing local function 7"
+        );
+    }
+
+    #[test]
+    fn link_native_executable_rejects_empty_element_initializer() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            table_section: vec![Table {
+                min: 1,
+                max: Some(1),
+                ty: RefType::FUNCREF,
+            }],
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            element_section: vec![ElementSegment {
+                offset_expr: ConstExpr::from_i32(0),
+                table_index: 0,
+                init: vec![ConstExpr::from_opcode(0xd2, &[0])],
+                ty: RefType::FUNCREF,
+                mode: ElementMode::Active,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let mut metadata = compile_module_metadata(&module);
+        metadata.element_segments[0].init_expressions = vec![Vec::new()];
+
+        let err = link_native_executable(
+            PathBuf::from("target/empty-element-init-native-bin"),
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "aot metadata: element init expression cannot be empty"
+        );
+    }
+
+    #[test]
+    fn link_native_executable_rejects_invalid_ref_null_element_initializer() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            table_section: vec![Table {
+                min: 1,
+                max: Some(1),
+                ty: RefType::FUNCREF,
+            }],
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            element_section: vec![ElementSegment {
+                offset_expr: ConstExpr::from_i32(0),
+                table_index: 0,
+                init: vec![ConstExpr::from_opcode(0xd2, &[0])],
+                ty: RefType::FUNCREF,
+                mode: ElementMode::Active,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let mut metadata = compile_module_metadata(&module);
+        metadata.element_segments[0].init_expressions = vec![vec![0xd0, 0x70]];
+
+        let err = link_native_executable(
+            PathBuf::from("target/invalid-ref-null-element-init-native-bin"),
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "module 'guest' is outside the packaged linked-runtime slice: element[0].init[0] has an invalid ref.null encoding"
+        );
+    }
+
+    #[test]
+    fn link_native_executable_rejects_ref_func_initializer_with_trailing_bytes() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            table_section: vec![Table {
+                min: 1,
+                max: Some(1),
+                ty: RefType::FUNCREF,
+            }],
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            element_section: vec![ElementSegment {
+                offset_expr: ConstExpr::from_i32(0),
+                table_index: 0,
+                init: vec![ConstExpr::from_opcode(0xd2, &[0])],
+                ty: RefType::FUNCREF,
+                mode: ElementMode::Active,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let mut metadata = compile_module_metadata(&module);
+        metadata.element_segments[0].init_expressions = vec![vec![0xd2, 0x00, 0x00, 0x0b]];
+
+        let err = link_native_executable(
+            PathBuf::from("target/ref-func-trailing-element-init-native-bin"),
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "module 'guest' is outside the packaged linked-runtime slice: element[0].init[0] has trailing bytes"
+        );
+    }
+
+    #[test]
+    fn link_native_executable_rejects_malformed_ref_func_initializer_index() {
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            table_section: vec![Table {
+                min: 1,
+                max: Some(1),
+                ty: RefType::FUNCREF,
+            }],
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            element_section: vec![ElementSegment {
+                offset_expr: ConstExpr::from_i32(0),
+                table_index: 0,
+                init: vec![ConstExpr::from_opcode(0xd2, &[0])],
+                ty: RefType::FUNCREF,
+                mode: ElementMode::Active,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+        let mut metadata = compile_module_metadata(&module);
+        metadata.element_segments[0].init_expressions = vec![vec![0xd2]];
+
+        let err = link_native_executable(
+            PathBuf::from("target/malformed-ref-func-element-init-native-bin"),
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("module 'guest' is outside the packaged linked-runtime slice: element[0].init[0] ref.func index:"));
+    }
+
+    #[test]
     fn link_native_executable_rejects_empty_module_list() {
         let err =
             link_native_executable(PathBuf::from("target/empty-native-bin"), &[], &[]).unwrap_err();

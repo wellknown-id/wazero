@@ -186,8 +186,11 @@ that want a fully linked executable.
   overflow, global-initializer count mismatch, passive data/element segment
   shapes, active data without memory, non-funcref tables, and element-table
   metadata mismatches, plus malformed const-expression metadata like bad global
-  initializer types and invalid data-offset opcodes, and wrapper-generation
-  rejection for missing local start-function metadata.
+  initializer types and invalid/truncated/non-integer data-offset forms, plus
+  malformed element-initializer metadata (unsupported opcode, missing local
+  function, empty initializer, invalid `ref.null`, trailing `ref.func` bytes,
+  malformed `ref.func` index) and wrapper-generation rejection for missing
+  local start-function metadata.
 - [100%:ea77dc43] `razero_compiler::linker::link_hello_host_executable(...)` provides a
   **specialized** native-link flow for the existing `hello-host` example,
   including its single explicit `(i32, i32) -> ()` host import and local memory
