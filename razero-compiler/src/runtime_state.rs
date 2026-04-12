@@ -1033,4 +1033,33 @@ mod tests {
             "element[0].init[0] references missing local function 7"
         ));
     }
+
+    #[test]
+    fn linked_runtime_plan_rejects_empty_element_initializer() {
+        let mut metadata = metadata_with_one_table_global_data_and_element();
+        metadata.element_segments[0].init_expressions = vec![Vec::new()];
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains("element[0].init[0] is empty"));
+    }
+
+    #[test]
+    fn linked_runtime_plan_rejects_invalid_ref_null_element_initializer() {
+        let mut metadata = metadata_with_one_table_global_data_and_element();
+        metadata.element_segments[0].init_expressions = vec![vec![0xd0, 0x70]];
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains(
+            "element[0].init[0] has an invalid ref.null encoding"
+        ));
+    }
+
+    #[test]
+    fn linked_runtime_plan_rejects_ref_func_initializer_with_trailing_bytes() {
+        let mut metadata = metadata_with_one_table_global_data_and_element();
+        metadata.element_segments[0].init_expressions = vec![vec![0xd2, 0x00, 0x00, 0x0b]];
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains("element[0].init[0] has trailing bytes"));
+    }
 }
