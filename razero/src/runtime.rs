@@ -6625,6 +6625,99 @@ mod tests {
     }
 
     #[test]
+    fn trap_observer_resume_context_receives_follow_on_policy_denial() {
+        let runtime = Runtime::new();
+        let initial_observations = Arc::new(Mutex::new(Vec::new()));
+        let resumed_observations = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .new_host_module_builder("example")
+            .new_function_builder()
+            .with_func(
+                |ctx, _module, _params| {
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .with_name("async_work")
+            .export("async_work")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                include_bytes!("../../experimental/testdata/yield.wasm"),
+                ModuleConfig::new(),
+            )
+            .unwrap();
+
+        let initial_ctx = with_trap_observer(&with_yielder(&Context::default()), {
+            let initial_observations = initial_observations.clone();
+            move |_ctx: &Context, observation: TrapObservation| {
+                initial_observations
+                    .lock()
+                    .expect("initial trap observations poisoned")
+                    .push((observation.cause, observation.err.to_string()));
+            }
+        });
+
+        let err = guest
+            .exported_function("run_twice")
+            .unwrap()
+            .call_with_context(&initial_ctx, &[])
+            .unwrap_err();
+        let RuntimeError::Yield(yield_error) = err else {
+            panic!("expected initial yield error");
+        };
+
+        assert!(
+            initial_observations
+                .lock()
+                .expect("initial trap observations poisoned")
+                .is_empty()
+        );
+
+        let resumed_ctx = with_trap_observer(
+            &with_yield_policy(&with_yielder(&Context::default()), deny_all_yields),
+            {
+                let resumed_observations = resumed_observations.clone();
+                move |_ctx: &Context, observation: TrapObservation| {
+                    resumed_observations
+                        .lock()
+                        .expect("resumed trap observations poisoned")
+                        .push((observation.cause, observation.err.to_string()));
+                }
+            },
+        );
+        let err = yield_error
+            .resumer()
+            .expect("resumer should be present")
+            .resume(&resumed_ctx, &[40])
+            .unwrap_err();
+
+        assert_eq!("policy denied: cooperative yield", err.to_string());
+        assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+        assert!(
+            initial_observations
+                .lock()
+                .expect("initial trap observations poisoned")
+                .is_empty()
+        );
+        assert_eq!(
+            vec![(
+                TrapCause::PolicyDenied,
+                "policy denied: cooperative yield".to_string(),
+            )],
+            *resumed_observations
+                .lock()
+                .expect("resumed trap observations poisoned")
+        );
+    }
+
+    #[test]
     fn yield_policy_denies_direct_host_function_suspension_with_function_metadata() {
         let runtime = Runtime::new();
         let observed = Arc::new(Mutex::new(Vec::new()));
