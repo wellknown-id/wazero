@@ -8551,6 +8551,91 @@ mod tests {
     }
 
     #[test]
+    fn yield_policy_observer_resume_context_receives_follow_on_allow() {
+        let runtime = Runtime::new();
+        let resumed_observations = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .new_host_module_builder("example")
+            .new_function_builder()
+            .with_func(
+                |ctx, _module, _params| {
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .with_name("async_work")
+            .export("async_work")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                include_bytes!("../../experimental/testdata/yield.wasm"),
+                ModuleConfig::new(),
+            )
+            .unwrap();
+
+        let err = guest
+            .exported_function("run_twice")
+            .unwrap()
+            .call_with_context(&with_yielder(&Context::default()), &[])
+            .unwrap_err();
+        let RuntimeError::Yield(first_yield) = err else {
+            panic!("expected initial yield error");
+        };
+
+        let resumed_ctx = with_yield_policy_observer(
+            &with_yield_policy(&with_yielder(&Context::default()), allow_all_yields),
+            {
+                let resumed_observations = resumed_observations.clone();
+                move |_ctx: &Context, observation: YieldPolicyObservation| {
+                    resumed_observations
+                        .lock()
+                        .expect("resumed yield policy observations poisoned")
+                        .push((
+                            observation.module.name().map(str::to_string),
+                            observation.request.name().map(str::to_string),
+                            observation.request.caller_module_name().map(str::to_string),
+                            observation.decision,
+                        ));
+                }
+            },
+        );
+
+        let err = first_yield
+            .resumer()
+            .expect("resumer should be present")
+            .resume(&resumed_ctx, &[40])
+            .unwrap_err();
+        let RuntimeError::Yield(second_yield) = err else {
+            panic!("expected second yield error");
+        };
+
+        let results = second_yield
+            .resumer()
+            .expect("resumer should be present")
+            .resume(&with_yielder(&Context::default()), &[2])
+            .unwrap();
+
+        assert_eq!(vec![42], results);
+        assert_eq!(
+            vec![(
+                None,
+                Some("run_twice".to_string()),
+                None,
+                YieldPolicyDecision::Allowed,
+            )],
+            *resumed_observations
+                .lock()
+                .expect("resumed yield policy observations poisoned")
+        );
+    }
+
+    #[test]
     fn snapshotter_is_not_reinjected_on_follow_on_resumed_host_call() {
         let runtime = Runtime::new();
         let observations = Arc::new(Mutex::new(Vec::new()));
