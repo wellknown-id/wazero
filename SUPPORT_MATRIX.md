@@ -263,9 +263,10 @@ Instead, the current experimental contract is:
 - Imported host work is **not automatically priced by wall clock or syscall
   cost**. If your embedder wants host-side resource accounting, debit or
   recharge explicitly from the host with `experimental::add_fuel`.
-- Yield / resume keeps using the budget/controller selected for the suspended
-  execution unless the runtime’s existing documented override points say
-  otherwise.
+- Yield / resume does not inherently preserve the suspended execution's
+  `FuelController`: later resumed-segment host calls use the resume context's
+  controller when one is supplied, and otherwise run without a call-scoped fuel
+  controller override.
 
 ### What is still intentionally unspecified
 
