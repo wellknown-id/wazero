@@ -945,4 +945,59 @@ mod tests {
         let err = build_linked_runtime_plan(&metadata).unwrap_err();
         assert!(err.contains("linked runtime metadata has inconsistent element segment counts"));
     }
+
+    #[test]
+    fn linked_runtime_plan_rejects_passive_data_segments() {
+        let mut metadata = metadata_with_one_table_global_data_and_element();
+        metadata.data_segments[0].passive = true;
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains(
+            "data[0] is passive; linked runtime packaging only supports active data segments"
+        ));
+    }
+
+    #[test]
+    fn linked_runtime_plan_rejects_data_segments_without_memory() {
+        let mut metadata = metadata_with_one_table_global_data_and_element();
+        metadata.memory = None;
+        metadata.module_shape.has_local_memory = false;
+        metadata.module_shape.has_any_memory = false;
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains(
+            "active data segments require a defined local memory in linked runtime packaging"
+        ));
+    }
+
+    #[test]
+    fn linked_runtime_plan_rejects_non_funcref_tables() {
+        let mut metadata = metadata_with_one_table_global_data_and_element();
+        metadata.tables[0].ty = RefType::EXTERNREF;
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains(
+            "table[0] uses externref, only funcref tables are supported by linked runtime packaging"
+        ));
+    }
+
+    #[test]
+    fn linked_runtime_plan_rejects_non_active_element_segments() {
+        let mut metadata = metadata_with_one_table_global_data_and_element();
+        metadata.element_segments[0].mode = ElementMode::Passive;
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains(
+            "element[0] uses Passive; linked runtime packaging only supports active element segments"
+        ));
+    }
+
+    #[test]
+    fn linked_runtime_plan_rejects_unknown_element_table_reference() {
+        let mut metadata = metadata_with_one_table_global_data_and_element();
+        metadata.element_segments[0].table_index = 1;
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains("element[0] references unknown table 1"));
+    }
 }
