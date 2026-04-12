@@ -937,6 +937,78 @@ fn host_call_policy_observer_reports_direct_host_export_denial_before_trap() {
 }
 
 #[test]
+fn host_call_policy_observer_reports_guest_import_denial_before_trap() {
+    let runtime = Runtime::new();
+    runtime
+        .new_host_module_builder("env")
+        .new_function_builder()
+        .with_func(
+            |_ctx, _module, params| Ok(vec![params[0]]),
+            &[ValueType::I32],
+            &[ValueType::I32],
+        )
+        .with_name("hook_impl")
+        .export("hook")
+        .instantiate(&Context::default())
+        .unwrap();
+    let guest = runtime
+        .instantiate_binary(
+            &[
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01,
+                0x7f, 0x01, 0x7f, 0x02, 0x0c, 0x01, 0x03, b'e', b'n', b'v', 0x04, b'h', b'o',
+                b'o', b'k', 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, b'r',
+                b'u', b'n', 0x00, 0x01, 0x0a, 0x08, 0x01, 0x06, 0x00, 0x41, 0x2a, 0x10, 0x00,
+                0x0b,
+            ],
+            ModuleConfig::new().with_name("guest"),
+        )
+        .unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let ctx = with_trap_observer(
+        &with_host_call_policy_observer(
+            &with_host_call_policy(&Context::default(), deny_hook_impl_host_call),
+            {
+                let events = events.clone();
+                move |_ctx: &Context, observation: HostCallPolicyObservation| {
+                    events.lock().expect("events poisoned").push(format!(
+                        "policy:{}:{}:{}:{:?}",
+                        observation.module.name().unwrap_or("<none>"),
+                        observation.request.name().unwrap_or("<none>"),
+                        observation.request.caller_module_name().unwrap_or("<none>"),
+                        observation.decision
+                    ));
+                }
+            },
+        ),
+        {
+            let events = events.clone();
+            move |_ctx: &Context, observation: razero::TrapObservation| {
+                events.lock().expect("events poisoned").push(format!(
+                    "trap:{:?}:{}",
+                    observation.cause, observation.err
+                ));
+            }
+        },
+    );
+
+    let err = guest
+        .exported_function("run")
+        .unwrap()
+        .call_with_context(&ctx, &[41])
+        .unwrap_err();
+
+    assert_eq!("policy denied: host call", err.to_string());
+    assert_eq!(Some(TrapCause::PolicyDenied), trap_cause_of(&err));
+    assert_eq!(
+        vec![
+            "policy:guest:hook_impl:guest:Denied".to_string(),
+            "trap:PolicyDenied:policy denied: host call".to_string(),
+        ],
+        *events.lock().expect("events poisoned")
+    );
+}
+
+#[test]
 fn denied_host_call_policy_short_circuits_yield_policy_and_yield_observers() {
     let runtime = Runtime::new();
     let host_call_observations = Arc::new(Mutex::new(Vec::new()));
