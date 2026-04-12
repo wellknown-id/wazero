@@ -6518,6 +6518,84 @@ mod tests {
     }
 
     #[test]
+    fn yield_resume_validation_error_does_not_emit_resumed_event() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("example")
+            .new_function_builder()
+            .with_callback(
+                |ctx, _module, _params| {
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .export("async_work")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                include_bytes!("../../experimental/testdata/yield.wasm"),
+                ModuleConfig::new(),
+            )
+            .unwrap();
+
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let initial_ctx = with_yield_observer(
+            &with_yielder(&Context::default()),
+            {
+                let observations = observations.clone();
+                move |_ctx: &Context, observation: YieldObservation| {
+                    observations
+                        .lock()
+                        .expect("yield observations poisoned")
+                        .push((
+                            observation.event,
+                            observation.yield_count,
+                            observation.expected_host_results,
+                        ));
+                }
+            },
+        );
+
+        let err = guest
+            .exported_function("run")
+            .unwrap()
+            .call_with_context(&initial_ctx, &[])
+            .unwrap_err();
+        let RuntimeError::Yield(yield_error) = err else {
+            panic!("expected yield error");
+        };
+        let resumer = yield_error.resumer().expect("resumer should be present");
+
+        let err = resumer
+            .resume(&with_yielder(&Context::default()), &[])
+            .unwrap_err();
+        assert_eq!(
+            "cannot resume: expected 1 host results, but got 0",
+            err.to_string()
+        );
+        assert_eq!(
+            vec![(YieldEvent::Yielded, 1, 1)],
+            *observations.lock().expect("yield observations poisoned")
+        );
+        assert_eq!(
+            vec![142],
+            resumer
+                .resume(&with_yielder(&Context::default()), &[42])
+                .unwrap()
+        );
+        assert_eq!(
+            vec![(YieldEvent::Yielded, 1, 1)],
+            *observations.lock().expect("yield observations poisoned")
+        );
+    }
+
+    #[test]
     fn yield_policy_context_overrides_runtime_config_policy() {
         let runtime = Runtime::with_config(RuntimeConfig::new().with_yield_policy(deny_all_yields));
         runtime
