@@ -6687,6 +6687,99 @@ int main(void) {
     }
 
     #[test]
+    fn link_native_executable_rejects_invalid_export_index_in_sidecar_before_linking() {
+        let output_path = test_workspace("package-link-driver-invalid-export-index").join("native-bin");
+        let metadata = AotCompiledMetadata {
+            exports: vec![crate::aot::AotExportMetadata {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 1,
+            }],
+            functions: vec![crate::aot::AotFunctionMetadata {
+                local_function_index: 0,
+                wasm_function_index: 0,
+                type_index: 0,
+                executable_offset: 0,
+                executable_len: 4,
+            }],
+            types: vec![crate::aot::AotFunctionTypeMetadata {
+                params: vec![ValueType::I32],
+                results: vec![ValueType::I32],
+                param_num_in_u64: 1,
+                result_num_in_u64: 1,
+            }],
+            module_shape: crate::aot::AotModuleShapeMetadata {
+                local_function_count: 1,
+                ..crate::aot::AotModuleShapeMetadata::default()
+            },
+            ..AotCompiledMetadata::default()
+        };
+
+        let err = link_native_executable(
+            &output_path,
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "aot metadata: invalid export index");
+
+        let work_dir = append_path_suffix(&output_path, ".razero-link");
+        if work_dir.exists() {
+            fs::remove_dir_all(&work_dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn link_native_executable_rejects_invalid_start_function_index_in_sidecar_before_linking() {
+        let output_path =
+            test_workspace("package-link-driver-invalid-start-index").join("native-bin");
+        let metadata = AotCompiledMetadata {
+            start_function_index: Some(1),
+            functions: vec![crate::aot::AotFunctionMetadata {
+                local_function_index: 0,
+                wasm_function_index: 0,
+                type_index: 0,
+                executable_offset: 0,
+                executable_len: 4,
+            }],
+            types: vec![crate::aot::AotFunctionTypeMetadata {
+                params: vec![],
+                results: vec![],
+                param_num_in_u64: 0,
+                result_num_in_u64: 0,
+            }],
+            module_shape: crate::aot::AotModuleShapeMetadata {
+                local_function_count: 1,
+                ..crate::aot::AotModuleShapeMetadata::default()
+            },
+            ..AotCompiledMetadata::default()
+        };
+
+        let err = link_native_executable(
+            &output_path,
+            &[NativeLinkModule::new(
+                "guest",
+                Vec::new(),
+                serialize_aot_metadata(&metadata),
+            )],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "aot metadata: invalid start function index");
+
+        let work_dir = append_path_suffix(&output_path, ".razero-link");
+        if work_dir.exists() {
+            fs::remove_dir_all(&work_dir).unwrap();
+        }
+    }
+
+    #[test]
     fn link_native_executable_rejects_architecture_mismatch_before_linking() {
         let current = current_native_packaging_target().unwrap();
         let mismatched_architecture = match current.architecture {

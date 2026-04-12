@@ -152,10 +152,10 @@ that want a fully linked executable.
   more relocatable Wasm objects into a native executable for the current C ABI-first
   surface.
 - [100%:ea77dc43] The current native-link entrypoint now has targeted pre-link
-  rejection coverage for corrupt sidecar metadata, unsupported target
-  architectures, and linked-runtime metadata that falls outside the packaged
-  slice, plus wrapper-generation rejection for missing local start-function
-  metadata.
+  rejection coverage for corrupt sidecar metadata (including stale export/start
+  indexes), unsupported target architectures, and linked-runtime metadata that
+  falls outside the packaged slice, plus wrapper-generation rejection for
+  missing local start-function metadata.
 - [100%:ea77dc43] `razero_compiler::linker::link_hello_host_executable(...)` provides a
   **specialized** native-link flow for the existing `hello-host` example,
   including its single explicit `(i32, i32) -> ()` host import and local memory
