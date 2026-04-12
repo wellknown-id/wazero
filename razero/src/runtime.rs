@@ -6202,6 +6202,107 @@ mod tests {
     }
 
     #[test]
+    fn fuel_observer_yielded_call_finishes_observation_before_resume() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("example")
+            .new_function_builder()
+            .with_func(
+                |ctx, _module, _params| {
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .with_name("async_work")
+            .export("async_work")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                include_bytes!("../../experimental/testdata/yield.wasm"),
+                ModuleConfig::new(),
+            )
+            .unwrap();
+
+        let initial_observations = Arc::new(Mutex::new(Vec::new()));
+        let resume_observations = Arc::new(Mutex::new(Vec::new()));
+        let initial_ctx = with_yielder(&with_fuel_observer(
+            &with_fuel_controller(
+                &Context::default(),
+                TestFuelController {
+                    budget: 64,
+                    consumed: Arc::new(AtomicI64::new(0)),
+                },
+            ),
+            {
+                let initial_observations = initial_observations.clone();
+                move |_ctx: &Context, observation: FuelObservation| {
+                    initial_observations
+                        .lock()
+                        .expect("initial fuel observations poisoned")
+                        .push(observation.event);
+                }
+            },
+        ));
+
+        let err = guest
+            .exported_function("run")
+            .unwrap()
+            .call_with_context(&initial_ctx, &[])
+            .unwrap_err();
+        let RuntimeError::Yield(yield_error) = err else {
+            panic!("expected yield error");
+        };
+
+        assert_eq!(
+            vec![FuelEvent::Budgeted, FuelEvent::Consumed],
+            *initial_observations
+                .lock()
+                .expect("initial fuel observations poisoned")
+        );
+
+        let resume_ctx = with_yielder(&with_fuel_observer(
+            &Context::default(),
+            {
+                let resume_observations = resume_observations.clone();
+                move |_ctx: &Context, observation: FuelObservation| {
+                    resume_observations
+                        .lock()
+                        .expect("resume fuel observations poisoned")
+                        .push(observation.event);
+                }
+            },
+        ));
+
+        assert_eq!(
+            vec![142],
+            yield_error
+                .resumer()
+                .expect("resumer should be present")
+                .resume(&resume_ctx, &[42])
+                .unwrap()
+        );
+
+        assert_eq!(
+            vec![FuelEvent::Budgeted, FuelEvent::Consumed],
+            *initial_observations
+                .lock()
+                .expect("initial fuel observations poisoned")
+        );
+        assert_eq!(
+            Vec::<FuelEvent>::new(),
+            *resume_observations
+                .lock()
+                .expect("resume fuel observations poisoned")
+        );
+    }
+
+    #[test]
     fn memory_supports_read_write_and_grow() {
         let runtime = Runtime::new();
         let bytes = [
@@ -7957,6 +8058,68 @@ mod tests {
             .unwrap();
 
         assert_eq!(vec![142], results);
+        assert_eq!(
+            vec![(YieldEvent::Yielded, 1, 1)],
+            *observations.lock().expect("yield observations poisoned")
+        );
+    }
+
+    #[test]
+    fn yield_cancel_does_not_emit_additional_yield_observer_event() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("example")
+            .new_function_builder()
+            .with_func(
+                |ctx, _module, _params| {
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .with_name("async_work")
+            .export("async_work")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                include_bytes!("../../experimental/testdata/yield.wasm"),
+                ModuleConfig::new(),
+            )
+            .unwrap();
+
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let ctx = with_yield_observer(&with_yielder(&Context::default()), {
+            let observations = observations.clone();
+            move |_ctx: &Context, observation: YieldObservation| {
+                observations
+                    .lock()
+                    .expect("yield observations poisoned")
+                    .push((
+                        observation.event,
+                        observation.yield_count,
+                        observation.expected_host_results,
+                    ));
+            }
+        });
+
+        let err = guest
+            .exported_function("run")
+            .unwrap()
+            .call_with_context(&ctx, &[])
+            .unwrap_err();
+        let RuntimeError::Yield(yield_error) = err else {
+            panic!("expected yield error");
+        };
+        yield_error
+            .resumer()
+            .expect("resumer should be present")
+            .cancel();
+
         assert_eq!(
             vec![(YieldEvent::Yielded, 1, 1)],
             *observations.lock().expect("yield observations poisoned")
