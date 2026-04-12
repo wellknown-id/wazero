@@ -143,7 +143,8 @@ that want a fully linked executable.
   `call_export` / `start` error paths, eager start-signature/type validation,
   plus repeated-call runtime-state behavior are now pinned by targeted tests,
   including `_start` fallback rejection for non-function exports, missing local
-  function metadata, and missing cached entry preambles.
+  function metadata, missing cached entry preambles, and constructor-time
+  rejection of shared-memory / host-module runtime shapes.
 - [100%:04af62a8] Linked runtime-plan bounds and metadata-shape rejection for
   packaged local memory / table initialization are now pinned by targeted tests
   too, so obvious segment-overflow, segment-kind/type, element-initializer,

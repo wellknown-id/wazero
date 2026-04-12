@@ -1384,6 +1384,87 @@ mod tests {
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     #[test]
+    fn linked_module_rejects_shared_memory_runtime_shapes() {
+        let mut engine = CompilerEngine::new();
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            function_section: vec![0],
+            memory_section: Some(razero_wasm::module::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                ..razero_wasm::module::Memory::default()
+            }),
+            code_section: vec![Code {
+                body: vec![0x41, 0x07, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            ..Module::default()
+        };
+
+        engine.compile_module(&module).unwrap();
+        let compiled = engine.compiled_module(&module).unwrap();
+        let mut metadata = compiled.aot.clone();
+        metadata.memory.as_mut().unwrap().is_shared = true;
+        let err = LinkedModule::from_metadata_and_first_local_function(
+            metadata,
+            compiled.function_ptr(0).unwrap(),
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("linked runtime packaging does not support shared memories or atomics integration"));
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn linked_module_rejects_host_module_runtime_shapes() {
+        let mut engine = CompilerEngine::new();
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![0x41, 0x07, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            ..Module::default()
+        };
+
+        engine.compile_module(&module).unwrap();
+        let compiled = engine.compiled_module(&module).unwrap();
+        let mut metadata = compiled.aot.clone();
+        metadata.module_shape.is_host_module = true;
+        let err = LinkedModule::from_metadata_and_first_local_function(
+            metadata,
+            compiled.function_ptr(0).unwrap(),
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("host modules are not supported by linked runtime packaging"));
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
     fn linked_module_rejects_missing_local_function_descriptors() {
         let mut engine = CompilerEngine::new();
         let module = Module {
