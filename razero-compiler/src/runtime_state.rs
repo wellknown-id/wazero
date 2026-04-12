@@ -1000,4 +1000,37 @@ mod tests {
         let err = build_linked_runtime_plan(&metadata).unwrap_err();
         assert!(err.contains("element[0] references unknown table 1"));
     }
+
+    #[test]
+    fn linked_runtime_plan_rejects_non_funcref_element_segments() {
+        let mut metadata = metadata_with_one_table_global_data_and_element();
+        metadata.element_segments[0].ty = RefType::EXTERNREF;
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains(
+            "element[0] uses externref; linked runtime packaging only supports funcref element segments"
+        ));
+    }
+
+    #[test]
+    fn linked_runtime_plan_rejects_unsupported_element_initializer_opcode() {
+        let mut metadata = metadata_with_one_table_global_data_and_element();
+        metadata.element_segments[0].init_expressions = vec![vec![0x41, 0x00, 0x0b]];
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains(
+            "element[0].init[0] uses an unsupported initializer opcode 0x41"
+        ));
+    }
+
+    #[test]
+    fn linked_runtime_plan_rejects_missing_local_function_in_element_initializer() {
+        let mut metadata = metadata_with_one_table_global_data_and_element();
+        metadata.element_segments[0].init_expressions = vec![vec![0xd2, 0x07, 0x0b]];
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains(
+            "element[0].init[0] references missing local function 7"
+        ));
+    }
 }
