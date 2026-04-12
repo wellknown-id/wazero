@@ -151,7 +151,8 @@ that want a fully linked executable.
   expressions, malformed `global.get` initializers, and malformed
   element-segment `ref.func` initializers, including non-integer data offsets
   and invalid or truncated `ref.null` offset types, plus multi-value const
-  expressions.
+  expressions, unsupported element initializer opcodes, and missing local
+  function references in element initializers.
 - [100%:04af62a8] Linked runtime-plan bounds and metadata-shape rejection for
   packaged local memory / table initialization are now pinned by targeted tests
   too, so obvious segment-overflow, segment-kind/type, element-initializer,
