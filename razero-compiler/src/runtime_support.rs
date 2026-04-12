@@ -658,6 +658,76 @@ mod tests {
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     #[test]
+    fn linked_module_start_rejects_missing_start_entrypoint() {
+        let mut engine = CompilerEngine::new();
+        let module = Module {
+            type_section: vec![function_type(&[ValueType::I32], &[ValueType::I32])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![0x20, 0x00, 0x41, 0x01, 0x6a, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 0,
+            }],
+            ..Module::default()
+        };
+
+        engine.compile_module(&module).unwrap();
+        let compiled = engine.compiled_module(&module).unwrap();
+        let linked = LinkedModule::from_metadata_and_first_local_function(
+            compiled.aot.clone(),
+            compiled.function_ptr(0).unwrap(),
+        )
+        .unwrap();
+
+        let err = linked.start().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("linked module metadata has no start function"));
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn linked_module_start_rejects_value_returning_start_export() {
+        let mut engine = CompilerEngine::new();
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            function_section: vec![0],
+            code_section: vec![Code {
+                body: vec![0x41, 0x07, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "_start".to_string(),
+                index: 0,
+            }],
+            ..Module::default()
+        };
+
+        engine.compile_module(&module).unwrap();
+        let compiled = engine.compiled_module(&module).unwrap();
+        let linked = LinkedModule::from_metadata_and_first_local_function(
+            compiled.aot.clone(),
+            compiled.function_ptr(0).unwrap(),
+        )
+        .unwrap();
+
+        let err = linked.start().unwrap_err();
+        assert!(err.to_string().contains("start functions must not return values"));
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
     fn linked_module_initializes_runtime_state_from_metadata() {
         let mut engine = CompilerEngine::new();
         let module = Module {
