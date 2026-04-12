@@ -7374,6 +7374,52 @@ mod tests {
     }
 
     #[test]
+    fn yield_cancel_is_idempotent_and_blocks_resume() {
+        let runtime = Runtime::new();
+        runtime
+            .new_host_module_builder("example")
+            .new_function_builder()
+            .with_callback(
+                |ctx, _module, _params| {
+                    get_yielder(&ctx)
+                        .expect("yielder should be injected")
+                        .r#yield();
+                    Ok(vec![0])
+                },
+                &[],
+                &[ValueType::I32],
+            )
+            .export("async_work")
+            .instantiate(&Context::default())
+            .unwrap();
+
+        let guest = runtime
+            .instantiate_binary(
+                include_bytes!("../../experimental/testdata/yield.wasm"),
+                ModuleConfig::new(),
+            )
+            .unwrap();
+
+        let err = guest
+            .exported_function("run")
+            .unwrap()
+            .call_with_context(&with_yielder(&Context::default()), &[])
+            .unwrap_err();
+        let RuntimeError::Yield(yield_error) = err else {
+            panic!("expected yield error");
+        };
+        let resumer = yield_error.resumer().expect("resumer should be present");
+
+        resumer.cancel();
+        resumer.cancel();
+
+        let err = resumer
+            .resume(&with_yielder(&Context::default()), &[42])
+            .unwrap_err();
+        assert!(err.to_string().contains("cancelled"));
+    }
+
+    #[test]
     fn yielded_guest_resume_rejects_wrong_host_result_count_and_can_retry() {
         let runtime = Runtime::new();
         runtime
