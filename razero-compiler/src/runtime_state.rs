@@ -1062,4 +1062,33 @@ mod tests {
         let err = build_linked_runtime_plan(&metadata).unwrap_err();
         assert!(err.contains("element[0].init[0] has trailing bytes"));
     }
+
+    #[test]
+    fn linked_runtime_plan_rejects_mismatched_global_initializer_type() {
+        let mut metadata = metadata_with_one_table_global_data_and_element();
+        metadata.global_initializers[0].init_expression = ConstExpr::from_i64(0).data;
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains(
+            "global[0] initializer type i64 does not match declared type i32"
+        ));
+    }
+
+    #[test]
+    fn linked_runtime_plan_rejects_non_integer_data_offset_expression() {
+        let mut metadata = metadata_with_one_table_global_data_and_element();
+        metadata.data_segments[0].offset_expression = vec![0xd2, 0x00, 0x0b];
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains("offset expression must evaluate to i32/i64"));
+    }
+
+    #[test]
+    fn linked_runtime_plan_rejects_malformed_ref_func_initializer_index() {
+        let mut metadata = metadata_with_one_table_global_data_and_element();
+        metadata.element_segments[0].init_expressions = vec![vec![0xd2]];
+
+        let err = build_linked_runtime_plan(&metadata).unwrap_err();
+        assert!(err.contains("element[0].init[0] ref.func index:"));
+    }
 }

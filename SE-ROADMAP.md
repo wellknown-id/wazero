@@ -145,8 +145,9 @@ that want a fully linked executable.
 - [100%:04af62a8] Linked runtime-plan bounds and metadata-shape rejection for
   packaged local memory / table initialization are now pinned by targeted tests
   too, so obvious segment-overflow, segment-kind/type, element-initializer,
-  shared-memory, local-function, count-shape, host-module, import-shape, and
-  termination-helper regressions fail closed under direct planner coverage.
+  offset/type-expression, shared-memory, local-function, count-shape,
+  host-module, import-shape, and termination-helper regressions fail closed
+  under direct planner coverage.
 - [95%:04af62a8] `razero_compiler::linker::link_native_executable(...)` packages one or
   more relocatable Wasm objects into a native executable for the current C ABI-first
   surface.
