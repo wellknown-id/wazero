@@ -3118,6 +3118,68 @@ fn fuel_observer_budgeted_and_consumed_wrap_guest_listener_callbacks() {
 }
 
 #[test]
+fn host_fuel_overdraw_reports_after_then_consumed_then_exhausted() {
+    let runtime = Runtime::new();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let module = runtime
+        .new_host_module_builder("env")
+        .new_function_builder()
+        .with_func(
+            |ctx, _module, _params| {
+                assert_eq!(0, remaining_fuel(&ctx).unwrap());
+                add_fuel(&ctx, -2).unwrap();
+                Ok(vec![1])
+            },
+            &[],
+            &[ValueType::I32],
+        )
+        .with_name("burn")
+        .export("burn")
+        .instantiate(&Context::default())
+        .unwrap();
+    let base_ctx = with_function_listener_factory(
+        &Context::default(),
+        AbortRecordingFactory {
+            events: events.clone(),
+        },
+    );
+    let controller_ctx = with_fuel_controller(
+        &base_ctx,
+        TrackingFuelController {
+            budget: 1,
+            consumed: Arc::new(AtomicI64::new(0)),
+        },
+    );
+    let call_ctx = with_fuel_observer(&controller_ctx, {
+        let events = events.clone();
+        move |_ctx: &Context, observation: FuelObservation| {
+            events
+                .lock()
+                .expect("events poisoned")
+                .push(format!("fuel:{:?}", observation.event));
+        }
+    });
+
+    let err = module
+        .exported_function("burn")
+        .unwrap()
+        .call_with_context(&call_ctx, &[])
+        .unwrap_err();
+
+    assert_eq!("fuel exhausted", err.to_string());
+    assert_eq!(
+        vec![
+            "fuel:Budgeted".to_string(),
+            "before:burn".to_string(),
+            "after:burn".to_string(),
+            "fuel:Consumed".to_string(),
+            "fuel:Exhausted".to_string(),
+        ],
+        *events.lock().expect("events poisoned")
+    );
+}
+
+#[test]
 fn host_panic_does_not_emit_trap_observer_event() {
     let runtime = Runtime::new();
     let observations = Arc::new(Mutex::new(Vec::new()));

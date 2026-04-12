@@ -216,8 +216,8 @@ back to the instantiated-module store.
   budget for that call. A non-positive controller budget disables metering for
   that call.
 - When a `FuelObserver` is present, lifecycle events are emitted in call order:
-  `budgeted`, then any in-host `recharged` events from `add_fuel`, then terminal
-  `consumed` or `exhausted`.
+  `budgeted`, then any in-host `recharged` events from `add_fuel`, then the
+  terminal events for that path.
 - `FunctionListener.Before` for the guest call runs after the initial
   `budgeted` notification, and `FunctionListener.Abort` / `After` happens
   before the terminal `consumed` or `exhausted` fuel event.
@@ -231,7 +231,8 @@ back to the instantiated-module store.
   calls do not currently emit additional `FuelObserver` callbacks even if the
   resume context installs a `FuelObserver`.
 - Fuel consumption is reported through `Consumed` on normal completion and on
-  trap/error paths.
+  trap/error paths. On the current host-debit overdraw path, the observer
+  sequence is `After`, then `Consumed`, then `Exhausted`.
 
 ## Current experimental fuel cost model
 
