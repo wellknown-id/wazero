@@ -1152,26 +1152,31 @@ fn build_hello_host_source(
         host_dispatch_cases = hello_host
             .host_imports
             .iter()
-            .map(|host_import| host_dispatch_case_source(host_import, hello_host.memory_len_bytes.max(1)))
+            .map(|host_import| host_dispatch_case_source(host_import, hello_host.memory_len_bytes.max(1), "guest_module_ctx"))
             .collect::<Vec<_>>()
             .join("")
     ));
     source
 }
 
-fn host_dispatch_case_source(host_import: &PackagedHostImportSpec, memory_len: usize) -> String {
+fn host_dispatch_case_source(
+    host_import: &PackagedHostImportSpec,
+    memory_len: usize,
+    module_context_name: &str,
+) -> String {
     let slot_count = host_import
         .import_type
         .param_num_in_u64
         .max(host_import.import_type.result_num_in_u64)
         .max(1);
     format!(
-        "                    case {index}u:\n                        if (stack_word_count < {slot_count}u) {{ fprintf(stderr, \"host import {module}.{name} stack is too small\\n\"); return 4; }}\n                        if ({host_symbol}(guest_module_ctx.bytes, guest_memory, (size_t){memory_len}, stack_words, stack_word_count) != 0) {{ fprintf(stderr, \"host import {module}.{name} failed\\n\"); return 5; }}\n                        break;\n",
+        "                    case {index}u:\n                        if (stack_word_count < {slot_count}u) {{ fprintf(stderr, \"host import {module}.{name} stack is too small\\n\"); return 4; }}\n                        if ({host_symbol}({module_ctx}.bytes, guest_memory, (size_t){memory_len}, stack_words, stack_word_count) != 0) {{ fprintf(stderr, \"host import {module}.{name} failed\\n\"); return 5; }}\n                        break;\n",
         index = host_import.descriptor.function_import_index,
         slot_count = slot_count,
         host_symbol = host_import.descriptor.host_symbol_name,
         module = host_import.descriptor.import_module,
         name = host_import.descriptor.import_name,
+        module_ctx = module_context_name,
         memory_len = memory_len,
     )
 }
@@ -1239,7 +1244,15 @@ fn build_wrapper_source(
 
     if !host_imports.is_empty() {
         source.push_str("#include <stdio.h>\n");
+        source.push_str(&format!(
+            "extern void {symbol}(const unsigned char*, uintptr_t, uintptr_t, uintptr_t);\n",
+            symbol = target.after_host_call_entrypoint_symbol,
+        ));
         for host_import in host_imports {
+            source.push_str(&format!(
+                "extern void {trampoline}(void);\n",
+                trampoline = host_import.trampoline_symbol,
+            ));
             source.push_str(&format!(
                 "extern int {host_symbol}(unsigned char* module_context, unsigned char* guest_memory, size_t guest_memory_len, uint64_t* stack_words, size_t stack_word_count);\n",
                 host_symbol = host_import.descriptor.host_symbol_name,
@@ -1359,6 +1372,24 @@ fn wrapper_function_source(
     ));
     source.push_str("    razero_link_exec_ctx_t execution_context = {{0}};\n");
     source.push_str("    uint64_t go_stack[4096] = {0};\n");
+    if !host_imports.is_empty() {
+        let memory_var = module_memory_name(module_name);
+        source.push_str(&format!(
+            "    unsigned char* guest_memory = (unsigned char*){memory_var};\n"
+        ));
+        let memory_len_val = metadata
+            .memory
+            .as_ref()
+            .map(|mem| {
+                mem.min
+                    .saturating_mul(razero_wasm::memory::MEMORY_PAGE_SIZE) as usize
+            })
+            .unwrap_or(0);
+        source.push_str(&format!(
+            "    size_t guest_memory_len = {memory_len_val};\n"
+        ));
+        source.push_str("    (void)guest_memory; (void)guest_memory_len;\n");
+    }
     source.push_str(&format!("    {init_function_name}();\n"));
     for (index, value) in ty.params.iter().enumerate() {
         source.push_str(&param_pack_source(*value, index));
@@ -1381,7 +1412,7 @@ fn wrapper_function_source(
             frame_offset = metadata.execution_context.frame_pointer_before_go_call_offset,
             after_host_call_symbol = target.after_host_call_entrypoint_symbol,
             host_dispatch_cases = host_imports.iter()
-                .map(|import| host_dispatch_case_source(import, memory_len))
+                .map(|import| host_dispatch_case_source(import, memory_len, module_context_name))
                 .collect::<Vec<_>>().join(""),
         ));
     }
@@ -8916,5 +8947,294 @@ int main(void) {
             err.to_string(),
             "linked module metadata has no local start function 7"
         );
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn link_native_executable_dispatches_host_imports_via_generic_path() {
+        if !command_exists("cc") || !command_exists("ar") {
+            return;
+        }
+
+        let workspace = test_workspace("package-link-generic-host-import");
+        fs::create_dir_all(&workspace).unwrap();
+
+        let module = Module {
+            type_section: vec![
+                function_type(&[ValueType::I32, ValueType::I32], &[]),
+                function_type(&[], &[ValueType::I32]),
+            ],
+            import_section: vec![Import {
+                ty: ExternType::FUNC,
+                module: "env".to_string(),
+                name: "add_one".to_string(),
+                desc: ImportDesc::Func(0),
+                index_per_type: 0,
+            }],
+            import_function_count: 1,
+            function_section: vec![1],
+            memory_section: Some(razero_wasm::module::Memory {
+                min: 1,
+                cap: 1,
+                max: 1,
+                is_max_encoded: true,
+                ..razero_wasm::module::Memory::default()
+            }),
+            code_section: vec![Code {
+                body: vec![0x41, 0x00, 0x41, 0x00, 0x10, 0x00, 0x41, 0x2b, 0x0b],
+                ..Code::default()
+            }],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "run".to_string(),
+                index: 1,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+
+        let mut engine = CompilerEngine::new();
+        engine.compile_module(&module).unwrap();
+        let artifact = engine
+            .compiled_module(&module)
+            .unwrap()
+            .emit_relocatable_object()
+            .unwrap();
+
+        let host_handler_c = workspace.join("host_handler.c");
+        fs::write(
+            &host_handler_c,
+            r#"#include <stdint.h>
+#include <stddef.h>
+
+int razero_host_env_add_one(unsigned char* module_context, unsigned char* guest_memory, size_t guest_memory_len, uint64_t* stack_words, size_t stack_word_count) {
+    (void)module_context;
+    (void)guest_memory;
+    (void)guest_memory_len;
+    (void)stack_words;
+    (void)stack_word_count;
+    return 0;
+}
+"#,
+        )
+        .unwrap();
+        let host_handler_o = workspace.join("host_handler.o");
+        let libhost = workspace.join("libhost.a");
+        assert!(Command::new("cc")
+            .arg("-std=c11")
+            .arg("-O2")
+            .arg("-fno-pie")
+            .arg("-c")
+            .arg(&host_handler_c)
+            .arg("-o")
+            .arg(&host_handler_o)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("ar")
+            .arg("rcs")
+            .arg(&libhost)
+            .arg(&host_handler_o)
+            .status()
+            .unwrap()
+            .success());
+
+        let main_c = workspace.join("main.c");
+        fs::write(
+            &main_c,
+            r#"#include <stdint.h>
+#include <stdio.h>
+
+extern int32_t razero_cabi_guest_function_1(void);
+
+int main(void) {
+    int32_t result = razero_cabi_guest_function_1();
+    if (result != 43) {
+        fprintf(stderr, "expected 43, got %d\n", result);
+        return 1;
+    }
+    return 0;
+}
+"#,
+        )
+        .unwrap();
+        let main_o = workspace.join("main.o");
+        let libmain = workspace.join("libmain.a");
+        assert!(Command::new("cc")
+            .arg("-std=c11")
+            .arg("-O2")
+            .arg("-fno-pie")
+            .arg("-c")
+            .arg(&main_c)
+            .arg("-o")
+            .arg(&main_o)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("ar")
+            .arg("rcs")
+            .arg(&libmain)
+            .arg(&main_o)
+            .status()
+            .unwrap()
+            .success());
+
+        let host_import = PackagedHostImportDescriptor {
+            guest_module_name: "guest".to_string(),
+            import_module: "env".to_string(),
+            import_name: "add_one".to_string(),
+            function_import_index: 0,
+            type_index: 0,
+            host_symbol_name: "razero_host_env_add_one".to_string(),
+        };
+
+        let package = link_native_executable(
+            workspace.join("generic-host-import-bin"),
+            &[NativeLinkModule::from_artifact("guest", artifact)],
+            &[libmain, libhost],
+            &[host_import],
+        )
+        .unwrap();
+
+        let output = Command::new(&package.executable_path).output().unwrap();
+        assert!(
+            output.status.success(),
+            "status: {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let metadata_bytes = fs::read(append_path_suffix(
+            &package.executable_path,
+            ".razero-package",
+        ))
+        .unwrap();
+        let bundle = deserialize_native_package_metadata_bundle(&metadata_bytes).unwrap();
+        assert_eq!(bundle.host_imports.len(), 1);
+        assert_eq!(bundle.host_imports[0].import_name, "add_one");
+
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn link_native_executable_packages_table_and_element_segments() {
+        if !command_exists("cc") || !command_exists("ar") {
+            return;
+        }
+
+        let workspace = test_workspace("package-link-table-elements");
+        fs::create_dir_all(&workspace).unwrap();
+
+        let module = Module {
+            type_section: vec![function_type(&[], &[ValueType::I32])],
+            function_section: vec![0, 0, 0],
+            table_section: vec![Table {
+                min: 2,
+                max: Some(2),
+                ty: RefType::FUNCREF,
+            }],
+            code_section: vec![
+                Code {
+                    body: vec![0x41, 0x2a, 0x0b],
+                    ..Code::default()
+                },
+                Code {
+                    body: vec![0x41, 0x13, 0x0b],
+                    ..Code::default()
+                },
+                Code {
+                    body: vec![0x41, 0x05, 0x0b],
+                    ..Code::default()
+                },
+            ],
+            export_section: vec![Export {
+                ty: ExternType::FUNC,
+                name: "get_value".to_string(),
+                index: 2,
+            }],
+            element_section: vec![ElementSegment {
+                offset_expr: ConstExpr::from_i32(0),
+                table_index: 0,
+                init: vec![
+                    ConstExpr::from_opcode(0xd2, &[0]),
+                    ConstExpr::from_opcode(0xd2, &[1]),
+                ],
+                ty: RefType::FUNCREF,
+                mode: ElementMode::Active,
+            }],
+            enabled_features: CoreFeatures::V2,
+            ..Module::default()
+        };
+
+        let mut engine = CompilerEngine::new();
+        engine.compile_module(&module).unwrap();
+        let artifact = engine
+            .compiled_module(&module)
+            .unwrap()
+            .emit_relocatable_object()
+            .unwrap();
+
+        let main_c = workspace.join("main.c");
+        fs::write(
+            &main_c,
+            r#"#include <stdint.h>
+#include <stdio.h>
+
+extern int32_t razero_cabi_guest_function_2(void);
+
+int main(void) {
+    int32_t result = razero_cabi_guest_function_2();
+    return result == 5 ? 0 : 1;
+}
+"#,
+        )
+        .unwrap();
+        let main_o = workspace.join("main.o");
+        let libmain = workspace.join("libmain.a");
+        assert!(Command::new("cc")
+            .arg("-std=c11")
+            .arg("-O2")
+            .arg("-fno-pie")
+            .arg("-c")
+            .arg(&main_c)
+            .arg("-o")
+            .arg(&main_o)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("ar")
+            .arg("rcs")
+            .arg(&libmain)
+            .arg(&main_o)
+            .status()
+            .unwrap()
+            .success());
+
+        let package = link_native_executable(
+            workspace.join("table-elements-bin"),
+            &[NativeLinkModule::from_artifact("guest", artifact)],
+            &[libmain],
+            &[],
+        )
+        .unwrap();
+
+        let output = Command::new(&package.executable_path).output().unwrap();
+        assert!(
+            output.status.success(),
+            "status: {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        fs::remove_dir_all(workspace).unwrap();
     }
 }

@@ -221,12 +221,12 @@ that want a fully linked executable.
 
 #### What is still incomplete
 
-- [72%:a6e60bab] The **generic** native-link path is still intentionally narrower than a fully
+- [78%:a6e60bab] The **generic** native-link path is still intentionally narrower than a fully
   general packaging/runtime product:
   - [80%:04af62a8] Linux ELF only
   - [70%:04af62a8] exported-function-oriented C ABI wrappers
   - [70%:04af62a8] scalar C ABI-compatible signatures only
-  - [75%:a6e60bab] not every host/import/runtime shape is generalized yet
+  - [80%:a6e60bab] not every host/import/runtime shape is generalized yet, but the generic host-import dispatch path now has E2E coverage (first test exercising `link_native_executable` with non-empty `host_imports`), plus table/element-segment E2E coverage and fixed trampoline/after-host-call extern declarations in generated wrapper code
 - [85%:04af62a8] `hello-host` remains available as a **specialized convenience path**, but no
   longer defines the only host-ABI/runtime-support route.
 - [55%:04af62a8] There is not yet a fully stable, general-purpose packaging story for:

@@ -3,7 +3,10 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use razero_platform::signal::{install_sigsegv_handler, read_sigsegv_handler};
+use razero_platform::signal::install_sigsegv_handler;
+
+#[cfg(all(test, target_os = "linux"))]
+use razero_platform::signal::read_sigsegv_handler;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(C)]
